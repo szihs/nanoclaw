@@ -238,6 +238,12 @@ function buildContainerArgs(
     args.push('-e', 'CLAUDE_CODE_OAUTH_TOKEN=placeholder');
   }
 
+  // Pass GitHub token for gh CLI access inside containers (if configured)
+  const ghToken = process.env.GH_TOKEN;
+  if (ghToken) {
+    args.push('-e', `GH_TOKEN=${ghToken}`);
+  }
+
   // Runtime-specific args for host gateway resolution
   args.push(...hostGatewayArgs());
 

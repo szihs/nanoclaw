@@ -1,0 +1,59 @@
+{
+  "slang-base": {
+    "description": "General Slang compiler coworker (base template for all Slang specialists)",
+    "template": "groups/slang-base/CLAUDE.md",
+    "repo": "https://github.com/shader-slang/slang",
+    "containerDeps": ["gh", "cmake", "ninja-build", "python3"],
+    "skills": ["slang-repo", "slang-explore", "github-issues", "slack-comms", "discord-comms"],
+    "worktreeBase": "data/slang-repo"
+  },
+  "slang-ir": {
+    "description": "Slang IR specialist — intermediate representation, passes, and transformations",
+    "template": "groups/slang-ir/CLAUDE.md",
+    "base": "slang-base",
+    "focusFiles": ["source/slang/slang-ir*.h", "source/slang/slang-ir*.cpp", "source/slang/slang-lower-to-ir.cpp"]
+  },
+  "slang-frontend": {
+    "description": "Slang frontend specialist — lexer, parser, type checking, semantic analysis",
+    "template": "groups/slang-frontend/CLAUDE.md",
+    "base": "slang-base",
+    "focusFiles": ["source/slang/slang-parser*.cpp", "source/slang/slang-lexer*.cpp", "source/slang/slang-check*.cpp", "source/slang/slang-ast-*.h"]
+  },
+  "slang-cuda": {
+    "description": "Slang CUDA backend specialist — CUDA code generation and GPU features",
+    "template": "groups/slang-cuda/CLAUDE.md",
+    "base": "slang-base",
+    "focusFiles": ["source/slang/slang-emit-cuda*.cpp", "source/slang/slang-emit-c-like*.cpp"]
+  },
+  "slang-optix": {
+    "description": "Slang OptiX backend specialist — ray tracing shader compilation",
+    "template": "groups/slang-optix/CLAUDE.md",
+    "base": "slang-base",
+    "focusFiles": ["source/slang/slang-emit-cuda*.cpp"]
+  },
+  "slang-langfeat": {
+    "description": "Slang language feature implementer — end-to-end feature development across all pipeline stages",
+    "template": "groups/slang-langfeat/CLAUDE.md",
+    "base": "slang-base",
+    "focusFiles": ["source/slang/"]
+  },
+  "slang-docs": {
+    "description": "Slang documentation writer — user guides, API reference, stdlib docs",
+    "template": "groups/slang-docs/CLAUDE.md",
+    "base": "slang-base",
+    "focusFiles": ["docs/", "prelude/", "README.md"]
+  },
+  "slang-coverage": {
+    "description": "Slang test coverage analyst — coverage reports, gap identification, test writing",
+    "template": "groups/slang-coverage/CLAUDE.md",
+    "base": "slang-base",
+    "containerDeps": ["lcov"],
+    "focusFiles": ["tests/"]
+  },
+  "slang-test": {
+    "description": "Slang test infrastructure specialist — test harness, writing and debugging tests",
+    "template": "groups/slang-test/CLAUDE.md",
+    "base": "slang-base",
+    "focusFiles": ["tests/", "tools/slang-test/"]
+  }
+}

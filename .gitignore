@@ -13,10 +13,24 @@ logs/
 groups/*
 !groups/main/
 !groups/global/
+!groups/coworker-types.json
 groups/main/*
 groups/global/*
 !groups/main/CLAUDE.md
 !groups/global/CLAUDE.md
+
+# Slang coworker templates (tracked as reusable templates, not runtime data)
+!groups/slang-base/
+!groups/slang-ir/
+!groups/slang-frontend/
+!groups/slang-cuda/
+!groups/slang-optix/
+!groups/slang-langfeat/
+!groups/slang-docs/
+!groups/slang-coverage/
+!groups/slang-test/
+groups/slang-*/*
+!groups/slang-*/CLAUDE.md
 
 # Secrets
 *.keys.json

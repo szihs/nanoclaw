@@ -244,3 +244,64 @@ When scheduling tasks for other groups, use the `target_group_jid` parameter wit
 - `schedule_task(prompt: "...", schedule_type: "cron", schedule_value: "0 9 * * 1", target_group_jid: "120363336345536173@g.us")`
 
 The task will run in that group's context with access to their files and memory.
+
+---
+
+## Slang Coworker Orchestration
+
+You can spawn and manage Slang compiler coworkers — specialized AI agents that work on the Slang project autonomously.
+
+### Available Coworker Types
+
+Read `/workspace/project/groups/coworker-types.json` for the full registry. Key types:
+
+| Type | Specialization |
+|------|---------------|
+| `slang-base` | General Slang coworker (base) |
+| `slang-ir` | IR system specialist |
+| `slang-frontend` | Lexer/parser/type checking |
+| `slang-cuda` | CUDA backend |
+| `slang-optix` | OptiX/ray tracing backend |
+| `slang-langfeat` | End-to-end language features |
+| `slang-docs` | Documentation |
+| `slang-coverage` | Test coverage analysis |
+| `slang-test` | Test infrastructure |
+
+### Spawning a Coworker
+
+To spawn a new coworker instance:
+
+1. Choose the appropriate type from `coworker-types.json`
+2. Create a group folder:
+   ```bash
+   # Copy base template
+   cp /workspace/project/groups/slang-base/CLAUDE.md /workspace/project/groups/slang_<name>/CLAUDE.md
+   # Append domain template if specialized
+   cat /workspace/project/groups/<type>/CLAUDE.md >> /workspace/project/groups/slang_<name>/CLAUDE.md
+   ```
+3. Register the group:
+   ```
+   mcp__nanoclaw__register_group(jid: "cli:slang-<name>", name: "Slang: <name>", folder: "slang_<name>", trigger: "@slang", requiresTrigger: false)
+   ```
+4. Set up git worktree (if slang-repo is cloned at `/workspace/project/data/slang-repo`):
+   ```bash
+   cd /workspace/project/data/slang-repo
+   git worktree add /workspace/project/data/worktrees/<name> -b coworker/<name>
+   ```
+5. Send the initial task via IPC or schedule it
+
+### Coordinating Coworkers
+
+- **Check status**: Read coworker group folders for their investigation results and CLAUDE.md updates
+- **Collect results**: Read `/workspace/project/groups/slang_<name>/investigations/`
+- **Cross-reference**: When multiple coworkers work on related tasks, synthesize their findings
+
+### Commands (for channel users)
+
+- `spawn <type> <name> <task>` — Spawn a new coworker instance
+- `list coworkers` — List active coworker groups
+- `coworker status <name>` — Check what a coworker has produced
+
+### Onboarding New Coworker Types
+
+To create entirely new coworker types (e.g., for a new project or domain), use the `/onboard-coworker` Claude Code skill. This is an interactive wizard that creates skills, templates, and container config.
