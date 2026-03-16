@@ -35,6 +35,20 @@ Ask the user these questions using AskUserQuestion:
 4. **Tools needed**: What tools/skills does it need? (build systems, linters, test frameworks, APIs)
 5. **Channels**: Which communication channels? (Slack, Discord, GitHub)
 6. **Working style**: Plan-first (default) or act-first? Autonomous or collaborative?
+7. **Composable skills**: Does the user want to provide existing skills or captured workflows as building blocks? (e.g., "use the slang-repo and github-issues skills, plus the investigate-codegen-bug workflow")
+
+### Composable Skill Input
+
+The user can specify existing skills and captured workflows to compose into the new coworker:
+
+- **Container skills** from `container/skills/*/SKILL.md` — reusable tool capabilities
+- **Captured workflows** from `groups/*/workflows/*.md` — proven step-by-step patterns from previous coworker runs
+- **Coworker type bases** from `groups/coworker-types.json` — inherit from existing types
+
+When skills/workflows are provided as input:
+1. Read each referenced skill/workflow file
+2. Include them in the coworker's CLAUDE.md as "Available Skills" and "Known Workflows"
+3. The coworker will use these as its initial playbook, then evolve via auto-memory
 
 ## Phase 2: Inventory — Check Existing Skills & Tools
 
@@ -46,6 +60,9 @@ ls container/skills/
 
 # List existing coworker types
 cat groups/coworker-types.json | jq 'keys'
+
+# List captured workflows from existing coworkers
+find groups/*/workflows -name "*.md" 2>/dev/null
 
 # Check what's installed in the container
 head -50 container/Dockerfile
@@ -157,7 +174,39 @@ If new tokens are needed:
 2. If the container needs the token, add it to `src/container-runner.ts` in the container environment setup
 3. Sync env: `cp .env data/env/env`
 
-## Phase 7: Register in Coworker Types
+## Phase 7: Integrate Captured Workflows
+
+Check for captured workflows from existing coworkers that are relevant to this new type:
+
+```bash
+# Find all captured workflows
+find groups/*/workflows -name "*.md" 2>/dev/null
+```
+
+For each relevant workflow:
+1. Read the workflow file
+2. Add it to the coworker template's CLAUDE.md under a `## Known Workflows` section
+3. These give the new coworker a head start — proven patterns it can follow immediately
+
+Example addition to the template's CLAUDE.md:
+```markdown
+## Known Workflows
+
+These are proven workflows captured by previous coworkers. Use them as starting patterns:
+
+### Investigate Backend Codegen Bug
+1. github-issues → Read issue, extract repro
+2. slang-repo → Build with debug symbols
+3. slang-explore → Trace frontend → IR → backend
+4. slang-repo → Create minimal test
+5. github-issues → Comment with findings
+
+(See workflows/ for full details)
+```
+
+Also copy relevant workflow files into the template's `workflows/` directory so they persist.
+
+## Phase 8: Register in Coworker Types
 
 Add the new type to `groups/coworker-types.json`:
 
@@ -170,12 +219,13 @@ Add the new type to `groups/coworker-types.json`:
     "repo": "<repo-url if applicable>",
     "containerDeps": ["<tool1>", "<tool2>"],
     "skills": ["<skill1>", "<skill2>"],
+    "workflows": ["<workflow1>", "<workflow2>"],
     "focusFiles": ["<glob-pattern>"]
   }
 }
 ```
 
-## Phase 8: Test the Coworker
+## Phase 9: Test the Coworker
 
 1. Spawn a test instance:
    ```bash
@@ -190,7 +240,7 @@ Add the new type to `groups/coworker-types.json`:
 
 3. If using `npm run dev`, send a test message to the coworker's channel
 
-## Phase 9: Summary
+## Phase 10: Summary
 
 After completing all phases, summarize what was created:
 

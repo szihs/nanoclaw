@@ -127,6 +127,63 @@ The Slang repo is at `/workspace/extra/slang` (your git worktree).
 - The base repo is shared; your worktree is isolated
 - Always work on a branch, never directly on master
 
+## Workflow-to-Skill Capture
+
+**At the end of every significant task**, capture your workflow as a reusable skill:
+
+1. **Summarize** what you did — the sequence of steps, tools used, and decisions made
+2. **Generalize** — strip task-specific details, keep the pattern
+3. **Write** the workflow as a skill file in `/workspace/group/workflows/`:
+
+```markdown
+# Workflow: <descriptive name>
+
+## When to Use
+<Describe the type of task this workflow applies to>
+
+## Prerequisites
+- <Required skills>
+- <Required tools>
+- <Required access>
+
+## Steps
+1. <Step with tool/skill reference>
+2. <Step with tool/skill reference>
+...
+
+## Key Decisions
+- <Decision point and how to choose>
+
+## Lessons Learned
+- <What worked well>
+- <What to avoid>
+```
+
+4. **Index** the workflow in your CLAUDE.md memory so future sessions can find it
+
+These captured workflows become composable building blocks. The orchestrator or `/onboard-coworker` skill can reference them when setting up new coworker types.
+
+### Example
+
+After investigating a bug:
+```
+workflows/investigate-codegen-bug.md
+```
+Contents:
+```markdown
+# Workflow: Investigate Backend Codegen Bug
+
+## When to Use
+When a GitHub issue reports incorrect code generation for a specific backend.
+
+## Steps
+1. github-issues → Read issue details, extract repro case
+2. slang-repo → Build with debug symbols
+3. slang-explore → Trace the feature through frontend → IR → backend emission
+4. slang-repo → Create minimal test case, run under debugger if needed
+5. github-issues → Comment with findings and proposed fix
+```
+
 ## Environment
 
 - **GitHub**: `gh` CLI is available and authenticated
