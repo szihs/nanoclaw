@@ -150,8 +150,13 @@ function buildVolumeMounts(
   };
   if (hookCmd) {
     settings.hooks = {
+      PreToolUse: [{ command: `${hookCmd} PreToolUse` }],
       PostToolUse: [{ command: `${hookCmd} PostToolUse` }],
+      PostToolUseFailure: [{ command: `${hookCmd} PostToolUseFailure` }],
       Notification: [{ command: `${hookCmd} Notification` }],
+      SubagentStart: [{ command: `${hookCmd} SubagentStart` }],
+      SubagentStop: [{ command: `${hookCmd} SubagentStop` }],
+      SessionStart: [{ command: `${hookCmd} SessionStart` }],
       Stop: [{ command: `${hookCmd} Stop` }],
     };
   }

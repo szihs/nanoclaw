@@ -136,7 +136,7 @@ const TYPE_CHAR_INDEX = {
 
 // Frame indices: walk1=0, walk2=1, walk3=2, type1=3, type2=4, read1=5, read2=6
 const ANIM_FRAMES = {
-  idle: [1],                    // walk2 (standing)
+  idle: [1, 1, 1, 1, 0, 1, 1, 1], // subtle head bob (occasional walk1 frame)
   walking: [0, 1, 2, 1],       // walk cycle
   working: [3, 4],              // typing
   thinking: [5, 6],             // reading

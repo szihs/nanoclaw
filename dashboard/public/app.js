@@ -11,14 +11,41 @@ let frame = 0;
 let ws = null;
 let pollTimer = null;
 let hoveredDesk = -1;
+let timelineFilter = null; // group folder filter for timeline
+let cachedMessages = []; // messages fetched from /api/messages
 
 const Z = PixelSprites.ZOOM;
 const OFFICE_TILE = PixelSprites.TILE;
 
 // --- WebSocket ---
+function updateDetailHooks(cw) {
+  const hooksEl = document.getElementById('detail-hooks');
+  if (!hooksEl) return;
+  const events = state.hookEvents.filter((e) => e.group === cw.folder).slice(-10);
+  hooksEl.innerHTML = events.length > 0
+    ? '<label style="color:var(--text-dim);font-size:9px;text-transform:uppercase">Recent Events</label>' +
+      events.map((e) => `<div class="hook-entry"><span class="ts">${formatTime(e.timestamp)}</span> <span class="tool-name">${e.tool || e.event}</span></div>`).join('')
+    : '';
+}
+
 function applyState(nextState) {
   state = nextState;
   updateTimeline();
+  // Live-update detail panel if open
+  if (selectedCoworker) {
+    const updated = state.coworkers.find((c) => c.folder === selectedCoworker.folder);
+    if (updated) {
+      updateDetailHooks(updated);
+      document.getElementById('detail-tool').textContent = updated.lastToolUse || '-';
+      const sc = { idle: ['#6B7280', 'IDLE'], working: ['#10B981', 'WORKING'], thinking: ['#F59E0B', 'THINKING'], error: ['#EF4444', 'ERROR'] };
+      const [sColor, sLabel] = sc[updated.status] || sc.idle;
+      const statusEl = document.getElementById('detail-status');
+      if (statusEl) statusEl.innerHTML = `<span class="status-badge" style="background:${sColor}20;color:${sColor}">${sLabel}</span>`;
+      document.getElementById('detail-task').textContent = updated.currentTask || 'None';
+      document.getElementById('detail-activity').textContent = updated.lastActivity ? timeAgo(updated.lastActivity) : 'Never';
+      document.getElementById('detail-task-count').textContent = updated.taskCount;
+    }
+  }
 }
 
 async function pollState() {
@@ -526,12 +553,41 @@ async function showDetailPanel(cw) {
   document.getElementById('detail-task-count').textContent = cw.taskCount;
   document.getElementById('detail-tool').textContent = cw.lastToolUse || '-';
 
+  // Memory panel — full content with lightweight markdown rendering
   const memEl = document.getElementById('detail-memory');
-  memEl.textContent = 'Loading...';
+  memEl.innerHTML = '<span style="color:var(--text-muted)">Loading...</span>';
   try {
     const res = await fetch(`/api/memory/${cw.folder}`);
-    memEl.textContent = res.ok ? (await res.text()).slice(0, 2000) : '(no CLAUDE.md)';
+    if (res.ok) {
+      const raw = await res.text();
+      memEl.innerHTML = renderMarkdown(raw);
+    } else {
+      memEl.textContent = '(no CLAUDE.md)';
+    }
   } catch { memEl.textContent = '(error)'; }
+
+  // Memory expand/collapse toggle
+  const memToggle = document.getElementById('memory-toggle');
+  if (memToggle) {
+    memToggle.textContent = memEl.classList.contains('expanded') ? 'Collapse' : 'Expand';
+    memToggle.onclick = () => {
+      memEl.classList.toggle('expanded');
+      memToggle.textContent = memEl.classList.contains('expanded') ? 'Collapse' : 'Expand';
+    };
+  }
+
+  // View Timeline button
+  const timelineBtn = document.getElementById('detail-view-timeline');
+  if (timelineBtn) {
+    timelineBtn.onclick = () => {
+      setTimelineFilter(cw.folder);
+      // Switch to timeline tab
+      document.querySelectorAll('.tab').forEach((t) => t.classList.remove('active'));
+      document.querySelectorAll('.tab-content').forEach((t) => t.classList.remove('active'));
+      document.querySelector('[data-tab="observability"]').classList.add('active');
+      document.getElementById('observability').classList.add('active');
+    };
+  }
 
   const hooksEl = document.getElementById('detail-hooks');
   const events = state.hookEvents.filter((e) => e.group === cw.folder).slice(-10);
@@ -539,6 +595,45 @@ async function showDetailPanel(cw) {
     ? '<label style="color:var(--text-dim);font-size:9px;text-transform:uppercase">Recent Events</label>' +
       events.map((e) => `<div class="hook-entry"><span class="ts">${formatTime(e.timestamp)}</span> <span class="tool-name">${e.tool || e.event}</span></div>`).join('')
     : '';
+}
+
+// Lightweight markdown renderer (headers, bold, code, bullets)
+function renderMarkdown(text) {
+  return esc(text)
+    .split('\n')
+    .map((line) => {
+      // Headers
+      if (line.startsWith('### ')) return `<div class="md-h3">${line.slice(4)}</div>`;
+      if (line.startsWith('## ')) return `<div class="md-h2">${line.slice(3)}</div>`;
+      if (line.startsWith('# ')) return `<div class="md-h1">${line.slice(2)}</div>`;
+      // Bullets
+      if (/^[-*] /.test(line)) return `<div class="md-li">${line.replace(/^[-*] /, '&bull; ')}</div>`;
+      // Inline code
+      line = line.replace(/`([^`]+)`/g, '<code class="md-code">$1</code>');
+      // Bold
+      line = line.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+      return `<div>${line || '&nbsp;'}</div>`;
+    })
+    .join('');
+}
+
+// Timeline filter management
+function setTimelineFilter(group) {
+  timelineFilter = group || null;
+  const filterBar = document.getElementById('timeline-filter-bar');
+  if (filterBar) {
+    if (timelineFilter) {
+      filterBar.style.display = 'flex';
+      filterBar.querySelector('.filter-group').textContent = timelineFilter;
+    } else {
+      filterBar.style.display = 'none';
+    }
+  }
+  updateTimeline();
+}
+
+function clearTimelineFilter() {
+  setTimelineFilter(null);
 }
 
 function updateStatusBar() {
@@ -579,6 +674,20 @@ setInterval(() => {
 // TAB 2: TIMELINE / AUDIT LOG (debug mode, event history)
 // ===================================================================
 
+// Fetch messages periodically for timeline integration
+async function fetchMessages() {
+  try {
+    const res = await fetch('/api/messages', { cache: 'no-store' });
+    if (res.ok) {
+      const data = await res.json();
+      cachedMessages = data.messages || data;
+    }
+  } catch { /* ignore */ }
+}
+// Fetch messages every 5s
+setInterval(fetchMessages, 5000);
+fetchMessages();
+
 function updateTimeline() {
   document.getElementById('obs-total-coworkers').textContent = state.coworkers.length;
   document.getElementById('obs-total-tasks').textContent = state.tasks.length;
@@ -592,7 +701,7 @@ function updateTimeline() {
   const avg = durations.length > 0 ? durations.reduce((a, b) => a + b, 0) / durations.length : 0;
   document.getElementById('obs-avg-duration').textContent = avg > 0 ? formatDuration(avg) : '-';
 
-  // Merge events
+  // Merge events: tasks, hooks, and messages
   const timeline = [];
   for (const log of state.taskRunLogs) {
     const task = state.tasks.find((t) => t.id === log.task_id);
@@ -604,41 +713,109 @@ function updateTimeline() {
       title: `Task ${log.status}`,
       detail: `${formatDuration(log.duration_ms)} — ${(log.result || log.error || '').slice(0, 100)}`,
       prompt: task?.prompt || '',
+      badge: 'TASK',
+      badgeClass: 'tl-type-task-run',
     });
   }
   for (const ev of state.hookEvents) {
+    // Color-code by event type
+    let iconColor = 'var(--yellow)';
+    let badge = 'HOOK';
+    let badgeClass = 'tl-type-hook';
+    if (ev.event === 'PostToolUseFailure') {
+      iconColor = 'var(--red)';
+      badge = 'ERROR';
+      badgeClass = 'tl-type-error';
+    } else if (ev.event === 'SubagentStart' || ev.event === 'SubagentStop') {
+      iconColor = 'var(--purple)';
+      badge = 'AGENT';
+      badgeClass = 'tl-type-subagent';
+    } else if (ev.event === 'SessionStart') {
+      iconColor = 'var(--green)';
+      badge = 'SESSION';
+      badgeClass = 'tl-type-session';
+    }
     timeline.push({
       time: ev.timestamp,
       type: 'hook',
       group: ev.group || '?',
-      iconColor: 'var(--yellow)',
+      iconColor,
       title: ev.tool || ev.event || 'event',
       detail: ev.message || '',
       prompt: '',
+      badge,
+      badgeClass,
+      toolInput: ev.tool_input || '',
+      toolResponse: ev.tool_response || '',
     });
   }
+
+  // Add messages from SQLite
+  for (const msg of cachedMessages) {
+    timeline.push({
+      time: new Date(msg.created_at).getTime(),
+      type: 'message',
+      group: msg.group_folder || '?',
+      iconColor: msg.direction === 'incoming' ? 'var(--accent)' : 'var(--green)',
+      title: msg.direction === 'incoming' ? 'Message In' : 'Reply',
+      detail: (msg.body || '').slice(0, 200),
+      prompt: '',
+      badge: 'MSG',
+      badgeClass: 'tl-type-message',
+    });
+  }
+
   timeline.sort((a, b) => b.time - a.time);
 
+  // Apply filter
+  const filtered = timelineFilter
+    ? timeline.filter((ev) => ev.group === timelineFilter)
+    : timeline;
+
   const container = document.getElementById('timeline-list');
-  container.innerHTML = timeline.slice(0, 200).map((ev) => {
+
+  // Snapshot expanded IDs before rebuild
+  const expandedIds = new Set();
+  container.querySelectorAll('.tl-expand-content[style*="block"]').forEach((el) => {
+    expandedIds.add(el.id);
+  });
+
+  container.innerHTML = filtered.slice(0, 200).map((ev, idx) => {
     const gc = getGroupColor(ev.group);
+    const hasExpand = ev.toolInput || ev.toolResponse;
+    const expandId = `tl-expand-${idx}`;
     return `<div class="tl-entry">
       <div class="tl-time">${formatTimeFull(ev.time)}</div>
       <div class="tl-line"><div class="tl-dot" style="background:${ev.iconColor}"></div><div class="tl-connector"></div></div>
       <div class="tl-content">
         <div class="tl-header">
-          <span class="tl-group" style="color:${gc}">${esc(ev.group)}</span>
-          <span class="tl-type tl-type-${ev.type}">${ev.type === 'task-run' ? 'TASK' : 'HOOK'}</span>
+          <span class="tl-group tl-group-link" style="color:${gc}" data-group="${esc(ev.group)}">${esc(ev.group)}</span>
+          <span class="tl-type ${ev.badgeClass || 'tl-type-hook'}">${ev.badge || 'HOOK'}</span>
           <span class="tl-title">${esc(ev.title)}</span>
+          ${hasExpand ? `<button class="tl-expand-btn" data-target="${expandId}">[+]</button>` : ''}
         </div>
         ${ev.prompt ? `<div class="tl-prompt">${esc(ev.prompt.slice(0, 120))}</div>` : ''}
         <div class="tl-detail">${esc(ev.detail)}</div>
+        ${hasExpand ? `<div class="tl-expand-content" id="${expandId}" style="display:none">
+          ${ev.toolInput ? `<div class="tl-code-block"><label>Tool Input</label><pre>${esc(ev.toolInput)}</pre></div>` : ''}
+          ${ev.toolResponse ? `<div class="tl-code-block"><label>Tool Response</label><pre>${esc(ev.toolResponse)}</pre></div>` : ''}
+        </div>` : ''}
       </div>
     </div>`;
   }).join('');
 
-  if (timeline.length === 0) {
+  if (filtered.length === 0) {
     container.innerHTML = '<div class="tl-empty">No events yet. Spawn a coworker or schedule a task.</div>';
+  }
+
+  // Restore expanded state after rebuild
+  for (const id of expandedIds) {
+    const el = document.getElementById(id);
+    if (el) {
+      el.style.display = 'block';
+      const btn = container.querySelector(`[data-target="${id}"]`);
+      if (btn) btn.textContent = '[-]';
+    }
   }
 
   drawSparkline();
@@ -710,6 +887,456 @@ function formatDuration(ms) {
 function esc(s) {
   return String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
+
+// --- Event delegation for timeline interactions ---
+document.addEventListener('click', (e) => {
+  // Expand/collapse toggle for tool_input/tool_response
+  const expandBtn = e.target.closest('.tl-expand-btn');
+  if (expandBtn) {
+    const targetId = expandBtn.dataset.target;
+    const target = document.getElementById(targetId);
+    if (target) {
+      const isVisible = target.style.display !== 'none';
+      target.style.display = isVisible ? 'none' : 'block';
+      expandBtn.textContent = isVisible ? '[+]' : '[-]';
+    }
+    return;
+  }
+
+  // Click group name in timeline to filter
+  const groupLink = e.target.closest('.tl-group-link');
+  if (groupLink) {
+    const group = groupLink.dataset.group;
+    if (group) setTimelineFilter(group);
+    return;
+  }
+
+  // Clear filter button
+  if (e.target.closest('.filter-clear-btn')) {
+    clearTimelineFilter();
+    return;
+  }
+});
+
+// ===================================================================
+// TAB 3: ADMIN PANEL
+// ===================================================================
+
+const adminState = {
+  panel: 'overview',
+  messages: [],
+  messagesHasMore: false,
+  tasks: [],
+  sessions: [],
+  skills: [],
+  groups: [],
+  debug: null,
+  overview: null,
+  loaded: new Set(),
+};
+
+// --- Admin pill navigation ---
+document.querySelectorAll('.admin-pill').forEach((pill) => {
+  pill.addEventListener('click', () => {
+    document.querySelectorAll('.admin-pill').forEach((p) => p.classList.remove('active'));
+    document.querySelectorAll('.admin-panel').forEach((p) => p.classList.remove('active'));
+    pill.classList.add('active');
+    const panelId = pill.dataset.panel;
+    document.getElementById(panelId).classList.add('active');
+    const name = panelId.replace('admin-', '');
+    adminState.panel = name;
+    if (!adminState.loaded.has(name)) loadAdminPanel(name);
+  });
+});
+
+function loadAdminPanel(name) {
+  const loaders = {
+    overview: loadAdminOverview,
+    messages: loadAdminMessages,
+    tasks: loadAdminTasks,
+    sessions: loadAdminSessions,
+    skills: loadAdminSkills,
+    groups: loadAdminGroups,
+    debug: loadAdminDebug,
+  };
+  if (loaders[name]) loaders[name]();
+}
+
+// --- Overview ---
+async function loadAdminOverview() {
+  const el = document.getElementById('admin-overview-content');
+  try {
+    const res = await fetch('/api/overview');
+    if (!res.ok) throw new Error('fetch failed');
+    adminState.overview = await res.json();
+    adminState.loaded.add('overview');
+    renderAdminOverview();
+  } catch { el.innerHTML = '<div class="admin-empty">Failed to load overview</div>'; }
+}
+
+function renderAdminOverview() {
+  const d = adminState.overview;
+  if (!d) return;
+  const el = document.getElementById('admin-overview-content');
+  const uptimeStr = formatDuration(d.uptime * 1000);
+  el.innerHTML = `
+    <div class="admin-stat-grid">
+      <div class="admin-stat-card"><div class="num">${uptimeStr}</div><div class="label">Uptime</div></div>
+      <div class="admin-stat-card"><div class="num">${d.groups.total}</div><div class="label">Groups</div></div>
+      <div class="admin-stat-card"><div class="num">${d.tasks.active}</div><div class="label">Active Tasks</div></div>
+      <div class="admin-stat-card"><div class="num">${d.tasks.paused}</div><div class="label">Paused Tasks</div></div>
+      <div class="admin-stat-card"><div class="num">${d.messages.total}</div><div class="label">Messages</div></div>
+      <div class="admin-stat-card"><div class="num">${d.sessions}</div><div class="label">Sessions</div></div>
+    </div>`;
+}
+
+// --- Messages ---
+async function loadAdminMessages(append) {
+  const el = document.getElementById('admin-messages-content');
+  if (!append) el.innerHTML = '<div class="admin-loading">Loading...</div>';
+  try {
+    let url = '/api/messages?limit=50';
+    if (append && adminState.messages.length > 0) {
+      const last = adminState.messages[adminState.messages.length - 1];
+      url += '&before=' + encodeURIComponent(last.created_at);
+    }
+    const res = await fetch(url);
+    if (!res.ok) throw new Error('fetch failed');
+    const data = await res.json();
+    if (append) {
+      adminState.messages = adminState.messages.concat(data.messages);
+    } else {
+      adminState.messages = data.messages;
+    }
+    adminState.messagesHasMore = data.hasMore;
+    adminState.loaded.add('messages');
+    renderAdminMessages();
+  } catch { if (!append) el.innerHTML = '<div class="admin-empty">Failed to load messages</div>'; }
+}
+
+function renderAdminMessages() {
+  const el = document.getElementById('admin-messages-content');
+  if (adminState.messages.length === 0) {
+    el.innerHTML = '<div class="admin-empty">No messages found</div>';
+    return;
+  }
+  let html = `<table class="admin-table">
+    <tr><th>Time</th><th>Group</th><th>Direction</th><th>Sender</th><th>Content</th></tr>`;
+  for (const m of adminState.messages) {
+    const dir = m.direction === 'incoming' ? 'IN' : 'OUT';
+    const dirClass = m.direction === 'incoming' ? 'color:var(--accent)' : 'color:var(--green)';
+    html += `<tr>
+      <td style="white-space:nowrap">${esc(formatTime(m.created_at))}</td>
+      <td>${esc(m.group_folder || '-')}</td>
+      <td style="${dirClass};font-weight:600">${dir}</td>
+      <td>${esc(m.sender_name || m.sender || '-')}</td>
+      <td style="max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc((m.body || m.content || '').slice(0, 200))}</td>
+    </tr>`;
+  }
+  html += '</table>';
+  if (adminState.messagesHasMore) {
+    html += '<button class="admin-load-more" id="admin-messages-more">Load older messages</button>';
+  }
+  el.innerHTML = html;
+}
+
+// --- Tasks ---
+async function loadAdminTasks() {
+  const el = document.getElementById('admin-tasks-content');
+  el.innerHTML = '<div class="admin-loading">Loading...</div>';
+  try {
+    const res = await fetch('/api/tasks');
+    if (!res.ok) throw new Error('fetch failed');
+    adminState.tasks = await res.json();
+    adminState.loaded.add('tasks');
+    renderAdminTasks();
+  } catch { el.innerHTML = '<div class="admin-empty">Failed to load tasks</div>'; }
+}
+
+function renderAdminTasks() {
+  const el = document.getElementById('admin-tasks-content');
+  if (adminState.tasks.length === 0) {
+    el.innerHTML = '<div class="admin-empty">No scheduled tasks</div>';
+    return;
+  }
+  let html = `<table class="admin-table">
+    <tr><th>ID</th><th>Group</th><th>Prompt</th><th>Schedule</th><th>Status</th><th>Last Run</th><th>Actions</th></tr>`;
+  for (const t of adminState.tasks) {
+    const statusClass = t.status === 'active' ? 'active' : 'paused';
+    const actionBtn = t.status === 'active'
+      ? `<button class="admin-action-btn" data-action="pause-task" data-id="${t.id}">Pause</button>`
+      : `<button class="admin-action-btn success" data-action="resume-task" data-id="${t.id}">Resume</button>`;
+    html += `<tr>
+      <td>${t.id}</td>
+      <td>${esc(t.group_folder)}</td>
+      <td style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(t.prompt)}">${esc((t.prompt || '').slice(0, 80))}</td>
+      <td>${esc(t.schedule_type || '')} ${esc(t.schedule_value || '')}</td>
+      <td><span class="admin-chip ${statusClass}">${t.status}</span></td>
+      <td>${t.last_run ? formatTime(t.last_run) : '-'}</td>
+      <td>${actionBtn}</td>
+    </tr>`;
+    // Show recent run logs inline
+    if (t.recentLogs && t.recentLogs.length > 0) {
+      html += `<tr><td colspan="7" style="padding:2px 10px 8px 30px;background:var(--bg)">
+        <span style="font-size:8px;color:var(--text-muted);text-transform:uppercase">Recent Runs</span>
+        ${t.recentLogs.map((l) => {
+          const c = l.status === 'success' ? 'var(--green)' : l.status === 'error' ? 'var(--red)' : 'var(--yellow)';
+          return `<div style="font-size:9px;color:var(--text-dim);padding:1px 0">
+            <span style="color:${c}">${l.status}</span> ${formatTime(l.run_at)} — ${formatDuration(l.duration_ms)}
+            ${l.error ? ` <span style="color:var(--red)">${esc(l.error.slice(0, 80))}</span>` : ''}
+          </div>`;
+        }).join('')}
+      </td></tr>`;
+    }
+  }
+  html += '</table>';
+  el.innerHTML = html;
+}
+
+// --- Sessions ---
+async function loadAdminSessions() {
+  const el = document.getElementById('admin-sessions-content');
+  el.innerHTML = '<div class="admin-loading">Loading...</div>';
+  try {
+    const res = await fetch('/api/sessions');
+    if (!res.ok) throw new Error('fetch failed');
+    adminState.sessions = await res.json();
+    adminState.loaded.add('sessions');
+    renderAdminSessions();
+  } catch { el.innerHTML = '<div class="admin-empty">Failed to load sessions</div>'; }
+}
+
+function renderAdminSessions() {
+  const el = document.getElementById('admin-sessions-content');
+  if (adminState.sessions.length === 0) {
+    el.innerHTML = '<div class="admin-empty">No active sessions</div>';
+    return;
+  }
+  let html = `<table class="admin-table">
+    <tr><th>Group Folder</th><th>Group Name</th><th>Session ID</th><th>Actions</th></tr>`;
+  for (const s of adminState.sessions) {
+    html += `<tr>
+      <td>${esc(s.group_folder)}</td>
+      <td>${esc(s.group_name || '-')}</td>
+      <td style="font-size:9px;color:var(--text-muted)">${esc(s.session_id || '-')}</td>
+      <td><button class="admin-action-btn danger" data-action="delete-session" data-folder="${esc(s.group_folder)}">Delete</button></td>
+    </tr>`;
+  }
+  html += '</table>';
+  el.innerHTML = html;
+}
+
+// --- Skills ---
+async function loadAdminSkills() {
+  const el = document.getElementById('admin-skills-content');
+  el.innerHTML = '<div class="admin-loading">Loading...</div>';
+  try {
+    const res = await fetch('/api/skills');
+    if (!res.ok) throw new Error('fetch failed');
+    adminState.skills = await res.json();
+    adminState.loaded.add('skills');
+    renderAdminSkills();
+  } catch { el.innerHTML = '<div class="admin-empty">Failed to load skills</div>'; }
+}
+
+function renderAdminSkills() {
+  const el = document.getElementById('admin-skills-content');
+  if (adminState.skills.length === 0) {
+    el.innerHTML = '<div class="admin-empty">No skills found in container/skills/</div>';
+    return;
+  }
+  let html = `<table class="admin-table">
+    <tr><th>Skill</th><th>Description</th><th>Files</th><th>Status</th><th>Actions</th></tr>`;
+  for (const s of adminState.skills) {
+    const chipClass = s.enabled ? 'enabled' : 'disabled';
+    const chipText = s.enabled ? 'Enabled' : 'Disabled';
+    const btnClass = s.enabled ? 'danger' : 'success';
+    const btnText = s.enabled ? 'Disable' : 'Enable';
+    html += `<tr>
+      <td><strong>${esc(s.title || s.name)}</strong><br><span style="color:var(--text-muted)">${esc(s.name)}</span></td>
+      <td style="max-width:250px">${esc(s.description || '-')}</td>
+      <td style="font-size:9px;color:var(--text-muted)">${(s.files || []).join(', ')}</td>
+      <td><span class="admin-chip ${chipClass}">${chipText}</span></td>
+      <td><button class="admin-action-btn ${btnClass}" data-action="toggle-skill" data-name="${esc(s.name)}">${btnText}</button></td>
+    </tr>`;
+  }
+  html += '</table>';
+  el.innerHTML = html;
+}
+
+// --- Groups ---
+async function loadAdminGroups() {
+  const el = document.getElementById('admin-groups-content');
+  el.innerHTML = '<div class="admin-loading">Loading...</div>';
+  try {
+    const res = await fetch('/api/groups/detail');
+    if (!res.ok) throw new Error('fetch failed');
+    adminState.groups = await res.json();
+    adminState.loaded.add('groups');
+    renderAdminGroups();
+  } catch { el.innerHTML = '<div class="admin-empty">Failed to load groups</div>'; }
+}
+
+function renderAdminGroups() {
+  const el = document.getElementById('admin-groups-content');
+  if (adminState.groups.length === 0) {
+    el.innerHTML = '<div class="admin-empty">No registered groups</div>';
+    return;
+  }
+  let html = '';
+  for (const g of adminState.groups) {
+    const containerChip = g.containerRunning
+      ? '<span class="admin-chip running">Running</span>'
+      : '<span class="admin-chip stopped">Stopped</span>';
+    const mainBadge = g.is_main ? ' <span class="admin-chip active">Main</span>' : '';
+    html += `<div class="admin-group-card">
+      <h4>${esc(g.name || g.folder)}${mainBadge} ${containerChip}</h4>
+      <div class="admin-group-meta">
+        <span>Folder: <strong>${esc(g.folder)}</strong></span>
+        <span>Sessions: ${g.sessionCount || 0}</span>
+        <span>Trigger: ${esc(g.trigger_pattern || 'default')}</span>
+        <span>Added: ${g.added_at ? formatTime(g.added_at) : '-'}</span>
+      </div>
+      <details>
+        <summary style="cursor:pointer;font-size:10px;color:var(--text-dim)">CLAUDE.md Editor</summary>
+        <textarea class="admin-editor" data-folder="${esc(g.folder)}">${esc(g.memory || '(no CLAUDE.md)')}</textarea>
+        <button class="admin-save-btn" data-action="save-memory" data-folder="${esc(g.folder)}">Save</button>
+      </details>
+    </div>`;
+  }
+  el.innerHTML = html;
+}
+
+// --- Debug ---
+async function loadAdminDebug() {
+  const el = document.getElementById('admin-debug-content');
+  el.innerHTML = '<div class="admin-loading">Loading...</div>';
+  try {
+    const res = await fetch('/api/debug');
+    if (!res.ok) throw new Error('fetch failed');
+    adminState.debug = await res.json();
+    adminState.loaded.add('debug');
+    renderAdminDebug();
+  } catch { el.innerHTML = '<div class="admin-empty">Failed to load debug info</div>'; }
+}
+
+function renderAdminDebug() {
+  const d = adminState.debug;
+  if (!d) return;
+  const el = document.getElementById('admin-debug-content');
+  const fmtBytes = (b) => b > 1048576 ? (b / 1048576).toFixed(1) + ' MB' : (b / 1024).toFixed(0) + ' KB';
+  el.innerHTML = `
+    <div class="admin-stat-grid">
+      <div class="admin-stat-card"><div class="num">${d.pid}</div><div class="label">PID</div></div>
+      <div class="admin-stat-card"><div class="num">${formatDuration(d.uptime * 1000)}</div><div class="label">Uptime</div></div>
+      <div class="admin-stat-card"><div class="num">${fmtBytes(d.memory.rss)}</div><div class="label">RSS</div></div>
+      <div class="admin-stat-card"><div class="num">${fmtBytes(d.memory.heapUsed)}</div><div class="label">Heap Used</div></div>
+      <div class="admin-stat-card"><div class="num">${d.wsClients}</div><div class="label">WS Clients</div></div>
+      <div class="admin-stat-card"><div class="num">${d.hookEventsBuffered}</div><div class="label">Hook Events</div></div>
+    </div>
+    <h4 style="font-size:11px;margin:10px 0 6px">Database Row Counts</h4>
+    <table class="admin-table">
+      <tr><th>Table</th><th>Rows</th></tr>
+      ${Object.entries(d.rowCounts || {}).map(([t, c]) => `<tr><td>${esc(t)}</td><td>${c}</td></tr>`).join('')}
+    </table>
+    <h4 style="font-size:11px;margin:10px 0 6px">Memory Details</h4>
+    <div class="admin-code">${JSON.stringify(d.memory, null, 2)}</div>
+    <h4 style="font-size:11px;margin:10px 0 6px">DB Path</h4>
+    <div class="admin-code">${esc(d.dbPath)} (${d.dbAvailable ? 'available' : 'unavailable'})</div>`;
+}
+
+// --- Admin event delegation ---
+document.getElementById('admin')?.addEventListener('click', async (e) => {
+  const btn = e.target.closest('[data-action]');
+  if (!btn) {
+    // Load more messages
+    if (e.target.id === 'admin-messages-more') {
+      loadAdminMessages(true);
+      return;
+    }
+    // Refresh buttons
+    const refreshBtn = e.target.closest('.admin-refresh-btn');
+    if (refreshBtn) {
+      const name = refreshBtn.dataset.load;
+      adminState.loaded.delete(name);
+      loadAdminPanel(name);
+    }
+    return;
+  }
+
+  const action = btn.dataset.action;
+
+  if (action === 'pause-task') {
+    const id = btn.dataset.id;
+    btn.disabled = true;
+    try {
+      await fetch(`/api/tasks/${id}/pause`, { method: 'POST' });
+      adminState.loaded.delete('tasks');
+      loadAdminTasks();
+    } catch { btn.disabled = false; }
+    return;
+  }
+
+  if (action === 'resume-task') {
+    const id = btn.dataset.id;
+    btn.disabled = true;
+    try {
+      await fetch(`/api/tasks/${id}/resume`, { method: 'POST' });
+      adminState.loaded.delete('tasks');
+      loadAdminTasks();
+    } catch { btn.disabled = false; }
+    return;
+  }
+
+  if (action === 'delete-session') {
+    const folder = btn.dataset.folder;
+    if (!confirm(`Delete all sessions for "${folder}"?`)) return;
+    btn.disabled = true;
+    try {
+      await fetch(`/api/sessions/${encodeURIComponent(folder)}`, { method: 'DELETE' });
+      adminState.loaded.delete('sessions');
+      loadAdminSessions();
+    } catch { btn.disabled = false; }
+    return;
+  }
+
+  if (action === 'toggle-skill') {
+    const name = btn.dataset.name;
+    btn.disabled = true;
+    try {
+      await fetch(`/api/skills/${encodeURIComponent(name)}/toggle`, { method: 'POST' });
+      adminState.loaded.delete('skills');
+      loadAdminSkills();
+    } catch { btn.disabled = false; }
+    return;
+  }
+
+  if (action === 'save-memory') {
+    const folder = btn.dataset.folder;
+    const textarea = document.querySelector(`.admin-editor[data-folder="${folder}"]`);
+    if (!textarea) return;
+    btn.disabled = true;
+    btn.textContent = 'Saving...';
+    try {
+      await fetch(`/api/memory/${encodeURIComponent(folder)}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'text/plain' },
+        body: textarea.value,
+      });
+      btn.textContent = 'Saved!';
+      setTimeout(() => { btn.textContent = 'Save'; btn.disabled = false; }, 1500);
+    } catch {
+      btn.textContent = 'Error';
+      setTimeout(() => { btn.textContent = 'Save'; btn.disabled = false; }, 1500);
+    }
+    return;
+  }
+});
+
+// Auto-load overview when admin tab is first shown
+document.querySelector('[data-tab="admin"]')?.addEventListener('click', () => {
+  if (!adminState.loaded.has('overview')) loadAdminOverview();
+});
 
 // --- Init ---
 window.addEventListener('resize', () => { needsResize = true; });

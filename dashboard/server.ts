@@ -12,7 +12,7 @@
 import { createServer } from 'http';
 import { createHash } from 'crypto';
 import { execSync } from 'child_process';
-import { readFileSync, readdirSync, existsSync, statSync } from 'fs';
+import { readFileSync, readdirSync, existsSync, statSync, writeFileSync, unlinkSync } from 'fs';
 import { join, resolve, extname } from 'path';
 import Database from 'better-sqlite3';
 
@@ -21,6 +21,7 @@ const PUBLIC_DIR = resolve(import.meta.dirname, 'public');
 const DB_PATH = join(PROJECT_ROOT, 'store', 'messages.db');
 const GROUPS_DIR = join(PROJECT_ROOT, 'groups');
 const DATA_DIR = join(PROJECT_ROOT, 'data');
+const SKILLS_DIR = join(PROJECT_ROOT, 'container', 'skills');
 const COWORKER_TYPES_PATH = join(GROUPS_DIR, 'coworker-types.json');
 const PORT = parseInt(process.env.DASHBOARD_PORT || '3737', 10);
 
@@ -36,6 +37,14 @@ function openDb(): Database.Database | null {
 }
 
 let db = openDb();
+
+function openWriteDb(): Database.Database | null {
+  try {
+    return new Database(DB_PATH, { fileMustExist: true });
+  } catch {
+    return null;
+  }
+}
 
 // --- State snapshot ---
 
@@ -69,6 +78,11 @@ interface HookEvent {
   event: string;
   tool?: string;
   message?: string;
+  tool_input?: string;
+  tool_response?: string;
+  session_id?: string;
+  agent_id?: string;
+  agent_type?: string;
   timestamp: number;
 }
 
@@ -358,8 +372,18 @@ const server = createServer((req, res) => {
       try {
         const event = JSON.parse(body) as HookEvent;
         event.timestamp = Date.now();
-        hookEvents.push(event);
-        if (hookEvents.length > MAX_HOOK_EVENTS) hookEvents.shift();
+
+        // Server-side truncation guard (500 chars max per field)
+        const truncate = (s?: string) => s ? s.slice(0, 500) : s;
+        event.tool_input = truncate(event.tool_input);
+        event.tool_response = truncate(event.tool_response);
+
+        // PreToolUse updates live state only — skip ring buffer to avoid timeline flood
+        const isPreToolUse = event.event === 'PreToolUse';
+        if (!isPreToolUse) {
+          hookEvents.push(event);
+          if (hookEvents.length > MAX_HOOK_EVENTS) hookEvents.shift();
+        }
 
         // Update live state
         if (event.group) {
@@ -416,6 +440,317 @@ const server = createServer((req, res) => {
       res.writeHead(404);
       res.end('not found');
     }
+    return;
+  }
+
+  // API: get hook events filtered by group
+  if (url.pathname === '/api/hook-events') {
+    const group = url.searchParams.get('group');
+    const filtered = group
+      ? hookEvents.filter((e) => e.group === group)
+      : hookEvents;
+    res.writeHead(200, {
+      'Content-Type': 'application/json',
+      'Access-Control-Allow-Origin': '*',
+    });
+    res.end(JSON.stringify(filtered.slice(-200)));
+    return;
+  }
+
+  // API: get recent messages from SQLite (for timeline integration + admin panel)
+  // Messages table: id, chat_jid, sender, sender_name, content, timestamp, is_from_me, is_bot_message
+  // Group folder resolved via registered_groups.jid -> folder
+  if (url.pathname === '/api/messages') {
+    const group = url.searchParams.get('group'); // group folder name
+    const limit = Math.min(parseInt(url.searchParams.get('limit') || '200', 10), 500);
+    const before = url.searchParams.get('before'); // ISO timestamp for pagination
+    let messages: any[] = [];
+    let hasMore = false;
+    if (db) {
+      try {
+        // Join to get group_folder, add direction/body aliases for client compat
+        const base = `SELECT m.*, rg.folder as group_folder,
+          CASE WHEN m.is_from_me = 1 THEN 'outgoing' ELSE 'incoming' END as direction,
+          m.content as body, m.timestamp as created_at
+          FROM messages m LEFT JOIN registered_groups rg ON m.chat_jid = rg.jid`;
+        if (group && before) {
+          messages = db.prepare(`${base} WHERE rg.folder = ? AND m.timestamp < ? ORDER BY m.timestamp DESC LIMIT ?`).all(group, before, limit + 1);
+        } else if (group) {
+          messages = db.prepare(`${base} WHERE rg.folder = ? ORDER BY m.timestamp DESC LIMIT ?`).all(group, limit + 1);
+        } else if (before) {
+          messages = db.prepare(`${base} WHERE m.timestamp < ? ORDER BY m.timestamp DESC LIMIT ?`).all(before, limit + 1);
+        } else {
+          messages = db.prepare(`${base} ORDER BY m.timestamp DESC LIMIT ?`).all(limit + 1);
+        }
+        if (messages.length > limit) {
+          hasMore = true;
+          messages = messages.slice(0, limit);
+        }
+      } catch { /* messages table may not exist */ }
+    }
+    res.writeHead(200, {
+      'Content-Type': 'application/json',
+      'Access-Control-Allow-Origin': '*',
+    });
+    res.end(JSON.stringify({ messages, hasMore }));
+    return;
+  }
+
+  // API: admin overview stats
+  if (url.pathname === '/api/overview') {
+    const result: any = { uptime: process.uptime(), groups: { total: 0 }, tasks: { active: 0, paused: 0, completed: 0 }, messages: { total: 0 }, sessions: 0 };
+    if (db) {
+      try {
+        result.groups.total = (db.prepare('SELECT COUNT(*) as c FROM registered_groups').get() as any)?.c || 0;
+        const taskCounts = db.prepare("SELECT status, COUNT(*) as c FROM scheduled_tasks GROUP BY status").all() as any[];
+        for (const r of taskCounts) {
+          if (r.status === 'active') result.tasks.active = r.c;
+          else if (r.status === 'paused') result.tasks.paused = r.c;
+          else result.tasks.completed = r.c;
+        }
+        result.messages.total = (db.prepare('SELECT COUNT(*) as c FROM messages').get() as any)?.c || 0;
+        result.sessions = (db.prepare('SELECT COUNT(*) as c FROM sessions').get() as any)?.c || 0;
+      } catch { /* ignore */ }
+    }
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify(result));
+    return;
+  }
+
+  // API: admin tasks with recent run logs
+  if (url.pathname === '/api/tasks') {
+    let tasks: any[] = [];
+    if (db) {
+      try {
+        tasks = db.prepare('SELECT * FROM scheduled_tasks ORDER BY created_at DESC').all() as any[];
+        for (const task of tasks) {
+          task.recentLogs = db.prepare('SELECT * FROM task_run_logs WHERE task_id = ? ORDER BY run_at DESC LIMIT 5').all(task.id);
+        }
+      } catch { /* ignore */ }
+    }
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify(tasks));
+    return;
+  }
+
+  // API: pause task
+  if (req.method === 'POST' && /^\/api\/tasks\/(\d+)\/pause$/.test(url.pathname)) {
+    const id = url.pathname.match(/\/api\/tasks\/(\d+)\/pause/)![1];
+    const wdb = openWriteDb();
+    if (wdb) {
+      try {
+        wdb.prepare("UPDATE scheduled_tasks SET status='paused' WHERE id=?").run(id);
+        wdb.close();
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end('{"ok":true}');
+      } catch (e: any) {
+        wdb.close();
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: e.message }));
+      }
+    } else {
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end('{"error":"db unavailable"}');
+    }
+    return;
+  }
+
+  // API: resume task
+  if (req.method === 'POST' && /^\/api\/tasks\/(\d+)\/resume$/.test(url.pathname)) {
+    const id = url.pathname.match(/\/api\/tasks\/(\d+)\/resume/)![1];
+    const wdb = openWriteDb();
+    if (wdb) {
+      try {
+        wdb.prepare("UPDATE scheduled_tasks SET status='active' WHERE id=?").run(id);
+        wdb.close();
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end('{"ok":true}');
+      } catch (e: any) {
+        wdb.close();
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: e.message }));
+      }
+    } else {
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end('{"error":"db unavailable"}');
+    }
+    return;
+  }
+
+  // API: list sessions
+  if (req.method === 'GET' && url.pathname === '/api/sessions') {
+    let sessions: any[] = [];
+    if (db) {
+      try {
+        sessions = db.prepare('SELECT s.group_folder, s.session_id, rg.name as group_name FROM sessions s LEFT JOIN registered_groups rg ON s.group_folder = rg.folder').all();
+      } catch { /* ignore */ }
+    }
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify(sessions));
+    return;
+  }
+
+  // API: delete sessions for a group folder
+  if (req.method === 'DELETE' && /^\/api\/sessions\//.test(url.pathname)) {
+    const folder = decodeURIComponent(url.pathname.replace('/api/sessions/', ''));
+    const wdb = openWriteDb();
+    if (wdb) {
+      try {
+        wdb.prepare('DELETE FROM sessions WHERE group_folder=?').run(folder);
+        wdb.close();
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end('{"ok":true}');
+      } catch (e: any) {
+        wdb.close();
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: e.message }));
+      }
+    } else {
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end('{"error":"db unavailable"}');
+    }
+    return;
+  }
+
+  // API: list skills
+  if (req.method === 'GET' && url.pathname === '/api/skills') {
+    const skills: any[] = [];
+    try {
+      if (existsSync(SKILLS_DIR)) {
+        for (const name of readdirSync(SKILLS_DIR)) {
+          const skillDir = join(SKILLS_DIR, name);
+          if (!statSync(skillDir).isDirectory()) continue;
+          const info: any = { name, enabled: !existsSync(join(skillDir, '.disabled')), files: [] };
+          const skillMd = join(skillDir, 'SKILL.md');
+          if (existsSync(skillMd)) {
+            const content = readFileSync(skillMd, 'utf-8');
+            const titleMatch = content.match(/^#\s+(.+)/m);
+            info.title = titleMatch ? titleMatch[1] : name;
+            info.description = content.split('\n').find((l: string) => l.trim() && !l.startsWith('#'))?.trim() || '';
+          }
+          info.files = readdirSync(skillDir).filter((f: string) => !f.startsWith('.'));
+          skills.push(info);
+        }
+      }
+    } catch { /* ignore */ }
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify(skills));
+    return;
+  }
+
+  // API: toggle skill enabled/disabled
+  if (req.method === 'POST' && /^\/api\/skills\/[^/]+\/toggle$/.test(url.pathname)) {
+    const name = decodeURIComponent(url.pathname.match(/\/api\/skills\/([^/]+)\/toggle/)![1]);
+    const skillDir = resolve(SKILLS_DIR, name);
+    if (!skillDir.startsWith(SKILLS_DIR)) {
+      res.writeHead(403);
+      res.end('{"error":"forbidden"}');
+      return;
+    }
+    const disabledFile = join(skillDir, '.disabled');
+    let enabled: boolean;
+    try {
+      if (existsSync(disabledFile)) {
+        unlinkSync(disabledFile);
+        enabled = true;
+      } else {
+        writeFileSync(disabledFile, '');
+        enabled = false;
+      }
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ enabled }));
+    } catch (e: any) {
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: e.message }));
+    }
+    return;
+  }
+
+  // API: group details
+  if (req.method === 'GET' && url.pathname === '/api/groups/detail') {
+    let groups: any[] = [];
+    if (db) {
+      try {
+        groups = db.prepare('SELECT * FROM registered_groups').all() as any[];
+        for (const g of groups) {
+          // Count sessions
+          g.sessionCount = (db.prepare('SELECT COUNT(*) as c FROM sessions WHERE group_folder = ?').get(g.folder) as any)?.c || 0;
+          // Read CLAUDE.md
+          const mdPath = join(GROUPS_DIR, g.folder, 'CLAUDE.md');
+          try {
+            g.memory = readFileSync(mdPath, 'utf-8');
+          } catch {
+            g.memory = null;
+          }
+          // Check for running container
+          g.containerRunning = false;
+          try {
+            const containerName = g.folder.replace(/_/g, '-');
+            const out = execSync(
+              `docker ps --filter "name=nanoclaw-${containerName}" --format "{{.Names}}" 2>/dev/null`,
+              { timeout: 2000, encoding: 'utf-8' },
+            ).trim();
+            if (out) g.containerRunning = true;
+          } catch { /* ignore */ }
+        }
+      } catch { /* ignore */ }
+    }
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify(groups));
+    return;
+  }
+
+  // API: debug info
+  if (req.method === 'GET' && url.pathname === '/api/debug') {
+    const mem = process.memoryUsage();
+    const result: any = {
+      pid: process.pid,
+      uptime: process.uptime(),
+      memory: {
+        rss: mem.rss,
+        heapUsed: mem.heapUsed,
+        heapTotal: mem.heapTotal,
+        external: mem.external,
+      },
+      dbPath: DB_PATH,
+      dbAvailable: !!db,
+      rowCounts: {} as Record<string, number>,
+      wsClients: wsClients.size,
+      hookEventsBuffered: hookEvents.length,
+    };
+    if (db) {
+      try {
+        for (const table of ['messages', 'scheduled_tasks', 'task_run_logs', 'sessions', 'registered_groups', 'chats']) {
+          result.rowCounts[table] = (db.prepare(`SELECT COUNT(*) as c FROM ${table}`).get() as any)?.c || 0;
+        }
+      } catch { /* ignore */ }
+    }
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify(result));
+    return;
+  }
+
+  // API: write CLAUDE.md for a group (admin panel)
+  if (req.method === 'PUT' && url.pathname.startsWith('/api/memory/')) {
+    const folder = decodeURIComponent(url.pathname.replace('/api/memory/', ''));
+    const mdPath = resolve(GROUPS_DIR, folder, 'CLAUDE.md');
+    if (!mdPath.startsWith(GROUPS_DIR)) {
+      res.writeHead(403);
+      res.end('{"error":"forbidden"}');
+      return;
+    }
+    let body = '';
+    req.on('data', (chunk) => (body += chunk));
+    req.on('end', () => {
+      try {
+        writeFileSync(mdPath, body, 'utf-8');
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end('{"ok":true}');
+      } catch (e: any) {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: e.message }));
+      }
+    });
     return;
   }
 
