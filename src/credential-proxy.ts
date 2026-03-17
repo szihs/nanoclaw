@@ -62,6 +62,10 @@ export function startCredentialProxy(
         delete headers['keep-alive'];
         delete headers['transfer-encoding'];
 
+        // Strip anthropic-beta headers — some upstream proxies (e.g. NVIDIA)
+        // reject beta flags they don't recognise
+        delete headers['anthropic-beta'];
+
         if (authMode === 'api-key') {
           // API key mode: inject x-api-key on every request
           delete headers['x-api-key'];

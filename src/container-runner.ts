@@ -26,6 +26,7 @@ import {
   stopContainer,
 } from './container-runtime.js';
 import { detectAuthMode } from './credential-proxy.js';
+import { readEnvFile } from './env.js';
 import { validateAdditionalMounts } from './mount-security.js';
 import { RegisteredGroup } from './types.js';
 
@@ -242,6 +243,21 @@ function buildContainerArgs(
   const ghToken = process.env.GH_TOKEN;
   if (ghToken) {
     args.push('-e', `GH_TOKEN=${ghToken}`);
+  }
+
+  // Pass model overrides and SDK config so the container uses the same settings as the host
+  const passthroughEnvVars = [
+    'ANTHROPIC_DEFAULT_OPUS_MODEL',
+    'ANTHROPIC_DEFAULT_SONNET_MODEL',
+    'ANTHROPIC_DEFAULT_HAIKU_MODEL',
+    'ANTHROPIC_MODEL',
+    'ANTHROPIC_SMALL_FAST_MODEL',
+    'CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS',
+  ];
+  const passthroughFromFile = readEnvFile(passthroughEnvVars);
+  for (const key of passthroughEnvVars) {
+    const val = process.env[key] || passthroughFromFile[key];
+    if (val) args.push('-e', `${key}=${val}`);
   }
 
   // Runtime-specific args for host gateway resolution
