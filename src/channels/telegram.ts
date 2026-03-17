@@ -132,13 +132,22 @@ export async function sendPoolMessage(
       'Pool message sent',
     );
   } catch (err) {
-    logger.warn({ chatId, sender, poolIndex: idx }, 'Pool bot failed, falling back to main bot');
+    logger.warn(
+      { chatId, sender, poolIndex: idx },
+      'Pool bot failed, falling back to main bot',
+    );
     // Fallback: send via main bot with sender prefix
     if (mainBotApi) {
       await sendTelegramMessage(mainBotApi, numericId, `*${sender}:*\n${text}`);
-      logger.info({ chatId, sender, length: text.length }, 'Fallback message sent via main bot');
+      logger.info(
+        { chatId, sender, length: text.length },
+        'Fallback message sent via main bot',
+      );
     } else {
-      logger.error({ chatId, sender }, 'Pool bot failed and main bot not available');
+      logger.error(
+        { chatId, sender },
+        'Pool bot failed and main bot not available',
+      );
     }
   }
 }
