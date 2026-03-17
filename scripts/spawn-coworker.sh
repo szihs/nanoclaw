@@ -35,8 +35,32 @@ while [[ $# -gt 0 ]]; do
             COWORKER_TYPE="$2"
             shift 2
             ;;
+        --list|-l)
+            echo "=== Coworker Types ==="
+            if command -v jq &>/dev/null && [[ -f "$COWORKER_TYPES" ]]; then
+                jq -r 'to_entries[] | "  \(.key): \(.value.description)"' "$COWORKER_TYPES"
+            else
+                echo "  (install jq to see types, or check groups/coworker-types.json)"
+            fi
+            echo ""
+            echo "=== Active Instances ==="
+            for dir in "$GROUPS_DIR"/slang_*/; do
+                [[ -d "$dir" ]] || continue
+                name=$(basename "$dir")
+                echo "  $name"
+            done
+            if ! ls "$GROUPS_DIR"/slang_*/ &>/dev/null 2>&1; then
+                echo "  (none)"
+            fi
+            exit 0
+            ;;
         --help|-h)
-            echo "Usage: $0 [--type <coworker-type>] <name> [task]"
+            echo "Usage: $0 [--type <coworker-type>] [--list] <name> [task]"
+            echo ""
+            echo "Options:"
+            echo "  --type <type>  Coworker type (default: slang-base)"
+            echo "  --list         List all types and active instances"
+            echo "  --help         Show this help"
             echo ""
             echo "Available coworker types:"
             if command -v jq &>/dev/null && [[ -f "$COWORKER_TYPES" ]]; then

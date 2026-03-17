@@ -25,6 +25,36 @@ This skill creates new AI coworker types for NanoClaw. Each coworker type is a r
 | `container/Dockerfile` | Container dependencies |
 | `src/container-runner.ts` | Container env vars and mounts |
 
+## Phase 0: Discovery Dashboard — Show What Exists
+
+Before asking the user anything, show them the current landscape:
+
+1. Read `groups/coworker-types.json` and list all existing coworker types with descriptions
+2. Scan `groups/` for spawned instances (folders matching `slang_*` or type patterns) and show active instances per type
+3. List available container skills from `container/skills/`
+4. List captured workflows from `groups/*/workflows/*.md`
+
+Present as a formatted summary:
+```
+=== Existing Coworker Types ===
+  slang-ir:        Slang IR specialist (2 instances: slang_ir-generics, slang_ir-passes)
+  slang-frontend:  Slang frontend specialist (0 instances)
+  slang-cuda:      CUDA backend specialist (1 instance: slang_cuda-atomics)
+  ...
+
+=== Available Skills ===
+  slang-repo, slang-explore, github-issues, slack-comms, discord-comms, agent-browser
+
+=== Captured Workflows ===
+  slang-ir/workflows/investigate-codegen-bug.md
+  ...
+```
+
+Then ask using AskUserQuestion:
+- **"Create new type"** — proceed to Phase 1
+- **"Extend existing type"** — skip to Phase 4 with the selected type as base
+- **"Spawn instance of existing type"** — run `./scripts/spawn-coworker.sh --type <type> <name> <task>`
+
 ## Phase 1: Discovery — Understand the Coworker Role
 
 Ask the user these questions using AskUserQuestion:
