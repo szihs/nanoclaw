@@ -149,9 +149,13 @@ const DIRECTION_ROW = { front: 0, back: 1, side: 2 };
 
 /**
  * Extract a single frame from a character sprite sheet.
- * Returns an offscreen canvas of size CHAR_FRAME_W x CHAR_FRAME_H.
+ * Returns a cached offscreen canvas of size CHAR_FRAME_W x CHAR_FRAME_H.
  */
+const charFrameCache = new Map();
 function extractCharFrame(spriteSheet, frameIdx, rowIdx) {
+  const key = `${spriteSheet.src}-${frameIdx}-${rowIdx}`;
+  if (charFrameCache.has(key)) return charFrameCache.get(key);
+
   const c = document.createElement('canvas');
   c.width = CHAR_FRAME_W;
   c.height = CHAR_FRAME_H;
@@ -163,6 +167,7 @@ function extractCharFrame(spriteSheet, frameIdx, rowIdx) {
     0, 0,
     CHAR_FRAME_W, CHAR_FRAME_H
   );
+  charFrameCache.set(key, c);
   return c;
 }
 

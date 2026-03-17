@@ -38,16 +38,24 @@ if command -v jq &>/dev/null; then
   MESSAGE=$(echo "$INPUT" | jq -r '.message // .notification // empty' 2>/dev/null)
 fi
 
-# Build event payload
-PAYLOAD=$(cat <<EOF
-{
-  "group": "$GROUP",
-  "event": "$EVENT_TYPE",
-  "tool": "${TOOL_NAME:-$CLAUDE_TOOL_NAME}",
-  "message": "${MESSAGE:-$CLAUDE_NOTIFICATION}"
-}
-EOF
-)
+# Build event payload (use jq if available for safe JSON, fallback to escaped string)
+if command -v jq &>/dev/null; then
+  PAYLOAD=$(jq -n \
+    --arg group "$GROUP" \
+    --arg event "$EVENT_TYPE" \
+    --arg tool "${TOOL_NAME:-$CLAUDE_TOOL_NAME}" \
+    --arg message "${MESSAGE:-$CLAUDE_NOTIFICATION}" \
+    '{group: $group, event: $event, tool: $tool, message: $message}')
+else
+  # Escape double quotes in values for safe JSON
+  esc_group="${GROUP//\"/\\\"}"
+  esc_event="${EVENT_TYPE//\"/\\\"}"
+  esc_tool="${TOOL_NAME:-$CLAUDE_TOOL_NAME}"
+  esc_tool="${esc_tool//\"/\\\"}"
+  esc_msg="${MESSAGE:-$CLAUDE_NOTIFICATION}"
+  esc_msg="${esc_msg//\"/\\\"}"
+  PAYLOAD="{\"group\":\"$esc_group\",\"event\":\"$esc_event\",\"tool\":\"$esc_tool\",\"message\":\"$esc_msg\"}"
+fi
 
 # Fire and forget — don't block the agent
 curl -s -X POST \

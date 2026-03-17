@@ -463,9 +463,13 @@ function updateStatusBar() {
   document.getElementById('stat-time').textContent = new Date().toLocaleTimeString();
 }
 
+let needsResize = true;
 function animate() {
   frame++;
-  resizeCanvas();
+  if (needsResize) {
+    resizeCanvas();
+    needsResize = false;
+  }
   drawOffice();
   updateStatusBar();
   if (selectedCoworker) {
@@ -476,7 +480,7 @@ function animate() {
 }
 
 // ===================================================================
-// TAB 2: TIMELINE / AUDIT LOG
+// TAB 2: TIMELINE / AUDIT LOG (debug mode, event history)
 // ===================================================================
 
 function updateTimeline() {
@@ -612,7 +616,7 @@ function esc(s) {
 }
 
 // --- Init ---
-window.addEventListener('resize', resizeCanvas);
+window.addEventListener('resize', () => { needsResize = true; });
 resizeCanvas();
 connectWs();
 animate();

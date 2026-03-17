@@ -194,12 +194,15 @@ echo "  Registered group: $JID → $FOLDER_NAME"
 if [[ -n "$TASK" ]]; then
     INPUT_DIR="$DATA_DIR/ipc/$FOLDER_NAME/input"
     mkdir -p "$INPUT_DIR"
-    cat > "$INPUT_DIR/task_${TIMESTAMP}.json" <<EOF
-{
-  "type": "message",
-  "text": "$TASK"
-}
+    if command -v jq &>/dev/null; then
+        jq -n --arg text "$TASK" '{"type":"message","text":$text}' > "$INPUT_DIR/task_${TIMESTAMP}.json"
+    else
+        ESCAPED_TASK="${TASK//\\/\\\\}"
+        ESCAPED_TASK="${ESCAPED_TASK//\"/\\\"}"
+        cat > "$INPUT_DIR/task_${TIMESTAMP}.json" <<EOF
+{"type":"message","text":"$ESCAPED_TASK"}
 EOF
+    fi
     echo "  Queued initial task: $TASK"
 fi
 

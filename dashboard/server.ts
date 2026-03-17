@@ -3,14 +3,15 @@
  *
  * Two-tab dashboard:
  *   Tab 1: Pixel Art Office — real-time interactive coworker visualization
- *   Tab 2: Observability — all-time metrics, task history, analytics
+ *   Tab 2: Timeline — all-time metrics, task history, analytics
  *
  * Reads NanoClaw state read-only (SQLite + IPC files + coworker-types.json).
  * Receives real-time hook events via POST /api/hook-event.
  */
 
 import { createServer } from 'http';
-import { readFileSync, readdirSync, existsSync, statSync, watch } from 'fs';
+import { createHash } from 'crypto';
+import { readFileSync, readdirSync, existsSync, statSync } from 'fs';
 import { join, resolve, extname } from 'path';
 import Database from 'better-sqlite3';
 
@@ -252,9 +253,7 @@ function getState(): DashboardState {
 // --- WebSocket (manual, no external dep) ---
 
 function computeAcceptKey(key: string): string {
-  const crypto = require('crypto');
-  return crypto
-    .createHash('sha1')
+  return createHash('sha1')
     .update(key + '258EAFA5-E914-47DA-95CA-5AB5DC6552AA')
     .digest('base64');
 }
@@ -388,8 +387,14 @@ const server = createServer((req, res) => {
 
   // API: get coworker CLAUDE.md
   if (url.pathname.startsWith('/api/memory/')) {
-    const folder = url.pathname.replace('/api/memory/', '');
-    const mdPath = join(GROUPS_DIR, folder, 'CLAUDE.md');
+    const folder = decodeURIComponent(url.pathname.replace('/api/memory/', ''));
+    const mdPath = resolve(GROUPS_DIR, folder, 'CLAUDE.md');
+    // Prevent path traversal
+    if (!mdPath.startsWith(GROUPS_DIR)) {
+      res.writeHead(403);
+      res.end('forbidden');
+      return;
+    }
     try {
       const content = readFileSync(mdPath, 'utf-8');
       res.writeHead(200, { 'Content-Type': 'text/plain' });
@@ -402,8 +407,14 @@ const server = createServer((req, res) => {
   }
 
   // Static files
-  let filePath = url.pathname === '/' ? '/index.html' : url.pathname;
-  filePath = join(PUBLIC_DIR, filePath);
+  let filePath = url.pathname === '/' ? '/index.html' : decodeURIComponent(url.pathname);
+  filePath = resolve(PUBLIC_DIR, '.' + filePath);
+  // Prevent path traversal
+  if (!filePath.startsWith(PUBLIC_DIR)) {
+    res.writeHead(403);
+    res.end('forbidden');
+    return;
+  }
 
   try {
     const content = readFileSync(filePath);
@@ -473,5 +484,5 @@ server.listen(PORT, () => {
   console.log(`\n  NanoClaw Dashboard`);
   console.log(`  http://localhost:${PORT}\n`);
   console.log(`  Tab 1: Pixel Art Office (real-time)`);
-  console.log(`  Tab 2: Observability (all-time metrics)\n`);
+  console.log(`  Tab 2: Timeline (all-time metrics)\n`);
 });
