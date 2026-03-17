@@ -464,7 +464,7 @@ function updateStatusBar() {
 }
 
 let needsResize = true;
-function animate() {
+function tick() {
   frame++;
   if (needsResize) {
     resizeCanvas();
@@ -476,8 +476,13 @@ function animate() {
     const u = state.coworkers.find((c) => c.folder === selectedCoworker.folder);
     if (u) selectedCoworker = u;
   }
+}
+// Use both rAF (smooth in real browsers) and setInterval (works in headless)
+function animate() {
+  tick();
   requestAnimationFrame(animate);
 }
+setInterval(tick, 500);
 
 // ===================================================================
 // TAB 2: TIMELINE / AUDIT LOG (debug mode, event history)
