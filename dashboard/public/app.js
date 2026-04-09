@@ -1088,13 +1088,18 @@ function drawOffice() {
 
   const assignments = getDeskAssignments();
 
-  // Center the map in the viewport
+  // Center the map in the viewport, scaling down to fit if needed
   const mapCols = layoutData?.cols || 21;
   const mapVisRows = layoutData ? (layoutData.rows - FIRST_VIS_ROW) : 12;
   const mapW = mapCols * TW;
   const mapH = mapVisRows * TW;
-  const ox = Math.round((canvas.width - mapW) / 2);
-  const oy = Math.round((canvas.height - mapH) / 2);
+  const scale = Math.min(canvas.width / mapW, canvas.height / mapH, 1);
+  const effW = canvas.width / scale;
+  const effH = canvas.height / scale;
+  const ox = Math.round((effW - mapW) / 2);
+  const oy = Math.round((effH - mapH) / 2);
+  ctx.save();
+  ctx.scale(scale, scale);
 
   // 1. Tile grid
   renderTiles(ox, oy);
@@ -1151,14 +1156,17 @@ function drawOffice() {
     ctx.textAlign = 'left';
   }
 
+  ctx.restore();
+
   // Store assignments for mouse hit testing
   _lastAssignments = assignments;
   _lastOx = ox;
   _lastOy = oy;
+  _lastScale = scale;
 }
 
 let _lastAssignments = [];
-let _lastOx = 0, _lastOy = 0;
+let _lastOx = 0, _lastOy = 0, _lastScale = 1;
 
 // --- Canvas tooltip ---
 const canvasTooltip = document.createElement('div');
@@ -4615,25 +4623,6 @@ window.importMcpServers = function() {
   } catch { alert('Invalid JSON. Paste a valid mcpServers config.'); }
 };
 
-// --- UI Zoom (Ctrl+/Ctrl- or Ctrl+Scroll) ---
-(function() {
-  const ZOOM_KEY = 'nanoclaw-zoom';
-  const STEP = 0.1;
-  const MIN = 0.6;
-  const MAX = 2.0;
-  let zoom = parseFloat(localStorage.getItem(ZOOM_KEY)) || 1;
-  document.body.style.zoom = zoom;
-
-  function setZoom(z) {
-    zoom = Math.round(Math.min(MAX, Math.max(MIN, z)) * 10) / 10;
-    document.body.style.zoom = zoom;
-    localStorage.setItem(ZOOM_KEY, zoom);
-  }
-
-  document.addEventListener('keydown', (e) => {
-    if (!e.ctrlKey && !e.metaKey) return;
-    if (e.key === '=' || e.key === '+') { e.preventDefault(); setZoom(zoom + STEP); }
-    else if (e.key === '-') { e.preventDefault(); setZoom(zoom - STEP); }
-    else if (e.key === '0') { e.preventDefault(); setZoom(1); }
-  });
-})();
+// Custom CSS zoom removed — use browser zoom (Ctrl+/- or Cmd+/-) instead.
+// Clean up stale localStorage from previous custom zoom.
+localStorage.removeItem('nanoclaw-zoom');

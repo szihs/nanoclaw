@@ -21,12 +21,13 @@
       --font: 'Courier New', monospace;
     }
     * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body { height: 100%; overflow: hidden; }
     body {
       font-family: var(--font);
       background: var(--bg);
       color: var(--text);
-      height: 100vh;
-      overflow: hidden;
+      display: flex;
+      flex-direction: column;
     }
 
     /* --- Header --- */
@@ -39,10 +40,12 @@
       border-bottom: 1px solid var(--border);
       background: var(--bg-card);
       height: 44px;
+      flex-shrink: 0;
+      overflow: hidden;
     }
-    .header h1 { font-size: 13px; font-weight: 600; letter-spacing: 0.5px; }
+    .header h1 { font-size: 13px; font-weight: 600; letter-spacing: 0.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
     .header h1 span { color: var(--accent); }
-    .tabs { display: flex; gap: 2px; }
+    .tabs { display: flex; gap: 2px; flex-shrink: 0; }
     .tab {
       padding: 5px 14px;
       border: 1px solid var(--border);
@@ -92,9 +95,19 @@
     @media (max-width: 1100px) {
       .obs-summary { display: none; }
     }
+    @media (max-width: 800px) {
+      .header h1 { display: none; }
+      .tab { padding: 5px 8px; font-size: 10px; }
+      .cw-sidebar { width: 160px; min-width: 120px; }
+      .cw-detail { width: 200px; min-width: 140px; }
+    }
+    @media (max-width: 600px) {
+      .cw-detail { display: none !important; }
+      .cw-sidebar { width: 140px; min-width: 100px; }
+    }
 
     /* --- Tab Content --- */
-    .tab-content { height: calc(100vh - 44px); display: none; }
+    .tab-content { flex: 1; min-height: 0; display: none; overflow: hidden; }
     .tab-content.active { display: flex; }
 
     /* --- Tab 1: Pixel Office --- */
@@ -682,9 +695,9 @@
     .channel-info .channel-groups { font-size: 9px; color: var(--text-dim); }
 
     /* --- Tab: Coworkers --- */
-    #coworkers { display: none; flex-direction: row; height: calc(100vh - 44px); }
+    #coworkers { display: none; flex-direction: row; }
     #coworkers.active { display: flex; }
-    .cw-sidebar { width: 220px; border-right: 1px solid var(--border); display: flex; flex-direction: column; background: var(--bg-card); }
+    .cw-sidebar { width: 220px; min-width: 140px; flex-shrink: 0; border-right: 1px solid var(--border); display: flex; flex-direction: column; background: var(--bg-card); min-height: 0; overflow: hidden; }
     .cw-sidebar-header { padding: 10px 12px; border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; align-items: center; }
     .cw-sidebar-header h3 { font-size: 12px; margin: 0; }
     .cw-create-btn { background: var(--green); color: #fff; border: none; border-radius: 3px; padding: 2px 8px; font-size: 10px; cursor: pointer; font-family: var(--font); }
@@ -709,11 +722,11 @@
     .approval-banner-label { font-size: 9px; color: #f59e0b; font-weight: bold; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 6px; }
     .approval-banner-item { border-left: 3px solid #f59e0b; padding: 4px 8px; margin-bottom: 6px; font-size: 10px; }
     .approval-banner-item:last-child { margin-bottom: 0; }
-    .cw-chat { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+    .cw-chat { flex: 1; display: flex; flex-direction: column; min-width: 0; min-height: 0; overflow: hidden; }
     .cw-chat-header { padding: 10px 16px; border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 10px; background: var(--bg-card); }
     .cw-chat-header h3 { font-size: 12px; margin: 0; }
     .cw-chat-header .cw-status-badge { font-size: 9px; padding: 1px 6px; border-radius: 3px; }
-    .cw-chat-messages { flex: 1; overflow-y: auto; padding: 12px 16px; }
+    .cw-chat-messages { flex: 1; overflow-y: auto; padding: 12px 16px; min-height: 0; }
     .cw-shell-view { font-size: 11px; }
     .cw-view-toggle { display: flex; gap: 2px; }
     .cw-toggle-btn { background: var(--bg); color: var(--text-muted); border: 1px solid var(--border); padding: 2px 10px; font-size: 9px; font-family: var(--font); cursor: pointer; border-radius: 3px; }
@@ -744,7 +757,7 @@
     .cw-chat-input textarea { flex: 1; background: var(--bg); color: var(--text); border: 1px solid var(--border); border-radius: 4px; padding: 6px 8px; font-family: var(--font); font-size: 10px; resize: none; min-height: 32px; max-height: 100px; }
     .cw-chat-input button { background: var(--green); color: #fff; border: none; border-radius: 4px; padding: 6px 14px; font-family: var(--font); font-size: 10px; cursor: pointer; height: 32px; }
     .cw-chat-input button:hover { opacity: 0.85; }
-    .cw-detail { width: 280px; border-left: 1px solid var(--border); overflow-y: auto; padding: 12px; background: var(--bg-card); }
+    .cw-detail { width: 280px; min-width: 180px; flex-shrink: 1; border-left: 1px solid var(--border); overflow-y: auto; padding: 12px; background: var(--bg-card); }
     .cw-detail h3 { font-size: 12px; margin: 0 0 10px 0; }
     .cw-detail-section { margin-bottom: 14px; }
     .cw-detail-section label { font-size: 9px; color: var(--text-dim); display: block; margin-bottom: 4px; }
