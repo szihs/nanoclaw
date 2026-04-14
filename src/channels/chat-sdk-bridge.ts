@@ -57,10 +57,18 @@ export interface ChatSdkBridgeConfig {
    * way and the default depends on installation style.
    */
   supportsThreads: boolean;
+  /**
+   * Optional transform applied to outbound text/markdown before it reaches the
+   * adapter. Used by channels that need to sanitize for a platform-specific
+   * quirk (e.g. Telegram's legacy Markdown parse mode).
+   */
+  transformOutboundText?: (text: string) => string;
 }
 
 export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter {
   const { adapter } = config;
+  const transformText = (t: string): string =>
+    config.transformOutboundText ? config.transformOutboundText(t) : t;
   let chat: Chat;
   let state: SqliteStateAdapter;
   let setupConfig: ChannelSetup;
@@ -321,7 +329,7 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
 
       if (content.operation === 'edit' && content.messageId) {
         await adapter.editMessage(tid, content.messageId as string, {
-          markdown: (content.text as string) || (content.markdown as string) || '',
+          markdown: transformText((content.text as string) || (content.markdown as string) || ''),
         });
         return;
       }
@@ -370,7 +378,8 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
       }
 
       // Normal message
-      const text = (content.markdown as string) || (content.text as string);
+      const rawText = (content.markdown as string) || (content.text as string);
+      const text = rawText ? transformText(rawText) : rawText;
       if (text) {
         // Attach files if present (FileUpload format: { data, filename })
         const fileUploads = message.files?.map((f: { data: Buffer; filename: string }) => ({

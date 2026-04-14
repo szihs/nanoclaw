@@ -9,6 +9,7 @@ import { readEnvFile } from '../env.js';
 import { log } from '../log.js';
 import { createMessagingGroup, getMessagingGroupByPlatform, updateMessagingGroup } from '../db/messaging-groups.js';
 import { createChatSdkBridge, type ReplyContext } from './chat-sdk-bridge.js';
+import { sanitizeTelegramLegacyMarkdown } from './telegram-markdown-sanitize.js';
 import { registerChannelAdapter } from './channel-registry.js';
 import type { ChannelAdapter, ChannelSetup, InboundMessage } from './adapter.js';
 import { tryConsume } from './telegram-pairing.js';
@@ -155,6 +156,7 @@ registerChannelAdapter('telegram', {
       concurrency: 'concurrent',
       extractReplyContext,
       supportsThreads: false,
+      transformOutboundText: sanitizeTelegramLegacyMarkdown,
     });
 
     const botUsernamePromise = fetchBotUsername(token);
