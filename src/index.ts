@@ -6,6 +6,7 @@ import { OneCLI } from '@onecli-sh/sdk';
 
 import {
   ASSISTANT_NAME,
+  CONTAINER_PREFIX,
   DEFAULT_TRIGGER,
   getTriggerPattern,
   GROUPS_DIR,
@@ -937,7 +938,7 @@ async function main(): Promise<void> {
     // Stop all running nanoclaw containers so systemd doesn't have to SIGKILL them
     try {
       const names = execSync(
-        `docker ps --filter name=nanoclaw- --format '{{.Names}}'`,
+        `docker ps --filter name=${CONTAINER_PREFIX}- --format '{{.Names}}'`,
         { encoding: 'utf-8', timeout: 5000 },
       ).trim();
       if (names) {
