@@ -1,0 +1,46 @@
+capabilities: |
+  ### Slang coworker orchestration
+
+  You can create and coordinate Slang compiler coworkers from the current conversation.
+
+workflow: |
+  ### Available coworker types
+
+  Read `/workspace/project/groups/coworker-types.json` for the full registry of available types and their descriptions.
+
+  When you need the detailed prompt for a type, open the `template` path referenced by that entry.
+
+  Do not assume the current set of types or template files is exhaustive.
+
+  ### Creating a coworker
+
+  Use `mcp__nanoclaw__create_agent` with:
+  - `name`
+  - `coworkerType`
+  - `instructions`
+
+  The host creates the group, composes `CLAUDE.md` from base + sections + overlays + role template + instructions, and wires the coworker to the current channel.
+
+  ### Coordinating coworkers
+
+  - Send work with `<message to="worker-a">...</message>`
+  - Receive results via `<message to="parent">...</message>`
+  - Use `wire_agents("worker-a", "worker-b")` for direct peer communication
+
+  ### Example flow
+
+  1. Choose complementary types from `groups/coworker-types.json`
+  2. Create one coworker per type with a focused brief
+  3. Collect findings from each coworker
+  4. Synthesize results and share durable learnings
+
+resources: |
+  ### Learnings curation
+
+  You have direct write access to `/workspace/global/learnings/`.
+
+  Periodically:
+  1. read `INDEX.md`
+  2. validate existing entries
+  3. remove stale material
+  4. consolidate duplicates

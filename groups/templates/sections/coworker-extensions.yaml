@@ -9,10 +9,11 @@ capabilities: |
 
   ### Available subagents
 
-  Three subagents are available via the `Agent` tool:
+  Four subagents are available via the `Agent` tool:
   - `explorer` for tracing call paths, finding implementations, and grepping patterns
   - `test-runner` for running tests, reproducing failures, and validating fixes
   - `code-modifier` for applying targeted fixes and re-running affected checks
+  - `critique` for reviewing plans, diffs, and outputs at each workflow stage
 
 workflow: |
   ### Brief first

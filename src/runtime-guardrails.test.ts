@@ -70,4 +70,36 @@ describe('runtime guardrails', () => {
     expect(shouldRetainOutboxFiles('dashboard')).toBe(false);
     expect(shouldRetainOutboxFiles('discord', files)).toBe(false);
   });
+
+  it('merges explicit allowlists from derived issue and reporting roles', () => {
+    const projectRoot = makeTempProject({
+      'slang-build': {
+        allowedMcpTools: ['mcp__deepwiki__ask_question'],
+      },
+      'slang-quality': {
+        extends: 'slang-build',
+      },
+      'slang-fix': {
+        extends: ['slang-build', 'slang-quality'],
+        allowedMcpTools: ['mcp__nanoclaw__send_message'],
+      },
+      'slang-maintainer': {
+        extends: ['slang-build', 'slang-quality'],
+        allowedMcpTools: ['mcp__nanoclaw__send_message', 'mcp__nanoclaw__schedule_task'],
+      },
+    });
+
+    process.chdir(projectRoot);
+    resetCoworkerTypesCacheForTests();
+
+    expect(resolveAllowedMcpTools(makeAgentGroup('slang-fix'))).toEqual([
+      'mcp__deepwiki__ask_question',
+      'mcp__nanoclaw__send_message',
+    ]);
+    expect(resolveAllowedMcpTools(makeAgentGroup('slang-maintainer'))).toEqual([
+      'mcp__deepwiki__ask_question',
+      'mcp__nanoclaw__send_message',
+      'mcp__nanoclaw__schedule_task',
+    ]);
+  });
 });

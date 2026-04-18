@@ -9,13 +9,7 @@ interface ManifestConfig {
   project_overlays?: boolean;
 }
 
-export type PromptSectionName =
-  | 'role'
-  | 'capabilities'
-  | 'workflow'
-  | 'constraints'
-  | 'formatting'
-  | 'resources';
+export type PromptSectionName = 'role' | 'capabilities' | 'workflow' | 'constraints' | 'formatting' | 'resources';
 
 const PROMPT_SECTION_ORDER: PromptSectionName[] = [
   'role',
@@ -35,8 +29,21 @@ const PROMPT_SECTION_HEADINGS: Record<PromptSectionName, string> = {
   resources: 'Resources',
 };
 
+/**
+ * Per-section merge mode for type-chain composition.
+ * - 'append': all ancestors contribute, base first then leaf last (default)
+ * - 'leaf': only the leaf (most-derived) type's content is used
+ */
+const SECTION_MERGE_MODE: Record<PromptSectionName, 'append' | 'leaf'> = {
+  role: 'leaf',
+  capabilities: 'append',
+  workflow: 'append',
+  constraints: 'append',
+  formatting: 'leaf',
+  resources: 'append',
+};
+
 interface PromptTemplateConfig {
-  extends?: string | string[];
   role?: string;
   capabilities?: string;
   workflow?: string;
@@ -52,7 +59,6 @@ interface PromptDocument {
 
 interface MergeState {
   seen: Set<string>;
-  visiting: Set<string>;
 }
 
 export interface CoworkerTypeEntry {
@@ -61,6 +67,7 @@ export interface CoworkerTypeEntry {
   focusFiles?: string[];
   allowedMcpTools?: string[];
   description?: string;
+  project?: string;
 }
 
 export interface ComposeClaudeMdOptions {
@@ -71,9 +78,45 @@ export interface ComposeClaudeMdOptions {
 }
 
 export function readCoworkerTypes(projectRoot = process.cwd()): Record<string, CoworkerTypeEntry> {
-  const typesPath = path.join(projectRoot, 'groups', 'coworker-types.json');
-  if (!fs.existsSync(typesPath)) return {};
-  return JSON.parse(fs.readFileSync(typesPath, 'utf-8')) as Record<string, CoworkerTypeEntry>;
+  const registry: Record<string, CoworkerTypeEntry> = {};
+  const skillsDir = path.join(projectRoot, 'container', 'skills');
+
+  // Scan distributed YAML type definitions
+  if (fs.existsSync(skillsDir)) {
+    let dirs: string[];
+    try {
+      dirs = fs.readdirSync(skillsDir).sort();
+    } catch {
+      dirs = [];
+    }
+    for (const dir of dirs) {
+      const typesFile = path.join(skillsDir, dir, 'coworker-types.yaml');
+      if (!fs.existsSync(typesFile)) continue;
+      const loaded = yaml.load(fs.readFileSync(typesFile, 'utf-8'));
+      if (!loaded || typeof loaded !== 'object') continue;
+      for (const [name, entry] of Object.entries(loaded as Record<string, CoworkerTypeEntry>)) {
+        if (registry[name]) {
+          throw new Error(`Duplicate coworker type "${name}" found in ${typesFile}`);
+        }
+        registry[name] = entry;
+      }
+    }
+  }
+
+  // If any YAML types found, use them exclusively
+  if (Object.keys(registry).length > 0) return registry;
+
+  // Fallback: legacy JSON (migration compat)
+  const jsonPath = path.join(projectRoot, 'groups', 'coworker-types.json');
+  if (fs.existsSync(jsonPath)) {
+    try {
+      return JSON.parse(fs.readFileSync(jsonPath, 'utf-8')) as Record<string, CoworkerTypeEntry>;
+    } catch {
+      return {};
+    }
+  }
+
+  return {};
 }
 
 function loadManifest(projectRoot: string, manifestName: string): ManifestConfig {
@@ -149,13 +192,13 @@ function normalizeList(value: string | string[] | undefined): string[] {
 function normalizePromptTemplate(
   template: unknown,
   filePath: string,
-): { extends: string[]; sections: Partial<Record<PromptSectionName, string>> } {
+): { sections: Partial<Record<PromptSectionName, string>> } {
   if (!template || typeof template !== 'object') {
     throw new Error(`Invalid prompt template in ${filePath}`);
   }
 
   const config = template as PromptTemplateConfig;
-  const allowedKeys = new Set<string>(['extends', ...PROMPT_SECTION_ORDER]);
+  const allowedKeys = new Set<string>(PROMPT_SECTION_ORDER);
   for (const key of Object.keys(config)) {
     if (!allowedKeys.has(key)) {
       throw new Error(`Unknown prompt template key "${key}" in ${filePath}`);
@@ -170,13 +213,12 @@ function normalizePromptTemplate(
     }
   }
 
-  return {
-    extends: normalizeList(config.extends),
-    sections,
-  };
+  return { sections };
 }
 
-function loadPromptTemplate(filePath: string): { extends: string[]; sections: Partial<Record<PromptSectionName, string>> } {
+function loadPromptTemplate(filePath: string): {
+  sections: Partial<Record<PromptSectionName, string>>;
+} {
   const text = fs.readFileSync(filePath, 'utf-8');
   const ext = path.extname(filePath).toLowerCase();
   if (ext === '.yaml' || ext === '.yml') {
@@ -184,7 +226,6 @@ function loadPromptTemplate(filePath: string): { extends: string[]; sections: Pa
   }
 
   return {
-    extends: [],
     sections: {
       workflow: text.trimEnd(),
     },
@@ -195,13 +236,8 @@ function mergePromptTemplate(doc: PromptDocument, filePath: string, state: Merge
   if (!fs.existsSync(filePath)) return;
   const resolvedPath = path.resolve(filePath);
   if (state.seen.has(resolvedPath)) return;
-  if (state.visiting.has(resolvedPath)) return;
-  state.visiting.add(resolvedPath);
 
   const template = loadPromptTemplate(resolvedPath);
-  for (const parent of template.extends) {
-    mergePromptTemplate(doc, path.resolve(path.dirname(resolvedPath), parent), state);
-  }
 
   for (const sectionName of PROMPT_SECTION_ORDER) {
     const content = template.sections[sectionName];
@@ -210,8 +246,21 @@ function mergePromptTemplate(doc: PromptDocument, filePath: string, state: Merge
     }
   }
 
-  state.visiting.delete(resolvedPath);
   state.seen.add(resolvedPath);
+}
+
+function validateCrossProjectExtends(types: Record<string, CoworkerTypeEntry>): void {
+  for (const [name, entry] of Object.entries(types)) {
+    if (!entry.project) continue;
+    for (const parent of normalizeList(entry.extends)) {
+      const parentEntry = types[parent];
+      if (parentEntry?.project && parentEntry.project !== entry.project) {
+        throw new Error(
+          `Cross-project extends: "${name}" (project: ${entry.project}) cannot extend "${parent}" (project: ${parentEntry.project})`,
+        );
+      }
+    }
+  }
 }
 
 export function resolveTypeChain(types: Record<string, CoworkerTypeEntry>, typeName: string): CoworkerTypeEntry[] {
@@ -262,25 +311,45 @@ export function resolveTypeFields(
   };
 }
 
-function appendRoleTemplates(
-  doc: PromptDocument,
-  projectRoot: string,
-  coworkerType: string,
-  state: MergeState,
-): void {
+function appendRoleTemplates(doc: PromptDocument, projectRoot: string, coworkerType: string, state: MergeState): void {
   const types = readCoworkerTypes(projectRoot);
   if (Object.keys(types).length === 0) return;
+
+  // Validate cross-project extends
+  validateCrossProjectExtends(types);
+
+  const roles = coworkerType
+    .split('+')
+    .map((item) => item.trim())
+    .filter(Boolean);
+
+  // Warn on cross-project + composition
+  if (roles.length > 1) {
+    const projects = new Set<string>();
+    for (const role of roles) {
+      const chain = resolveTypeChain(types, role);
+      for (const entry of chain) {
+        if (entry.project) projects.add(entry.project);
+      }
+    }
+    if (projects.size > 1) {
+      console.warn(`Cross-project composition: "${coworkerType}" mixes projects: ${Array.from(projects).join(', ')}`);
+    }
+  }
 
   const allTemplates: string[] = [];
   const allFocusFiles: string[] = [];
 
-  for (const role of coworkerType
-    .split('+')
-    .map((item) => item.trim())
-    .filter(Boolean)) {
+  for (const role of roles) {
     const resolved = resolveTypeFields(types, role);
     allTemplates.push(...resolved.templates);
     allFocusFiles.push(...resolved.focusFiles);
+  }
+
+  // Snapshot section lengths before merging role templates (for leaf-only sections)
+  const preMergeLengths: Record<PromptSectionName, number> = {} as Record<PromptSectionName, number>;
+  for (const sectionName of PROMPT_SECTION_ORDER) {
+    preMergeLengths[sectionName] = doc.sections[sectionName].length;
   }
 
   for (const templatePath of [...new Set(allTemplates)]) {
@@ -289,12 +358,28 @@ function appendRoleTemplates(
     doc.title = humanizeIdentifier(templateStem);
   }
 
+  // Apply leaf-only merge mode: for leaf sections, keep only the last entry
+  // added by the type chain (discard ancestor contributions for that section)
+  for (const sectionName of PROMPT_SECTION_ORDER) {
+    if (SECTION_MERGE_MODE[sectionName] !== 'leaf') continue;
+    const entries = doc.sections[sectionName];
+    const preLen = preMergeLengths[sectionName];
+    const typeEntries = entries.slice(preLen);
+    if (typeEntries.length > 1) {
+      // Keep pre-type entries + only the last type entry (the leaf)
+      doc.sections[sectionName] = [...entries.slice(0, preLen), typeEntries[typeEntries.length - 1]];
+    }
+  }
+
   const uniqueFocus = [...new Set(allFocusFiles)];
   if (uniqueFocus.length > 0) {
     doc.sections.resources.push(
-      ['### Priority Files', '', 'Focus your work on these paths first:', ...uniqueFocus.map((file) => `- \`${file}\``)].join(
-        '\n',
-      ),
+      [
+        '### Priority Files',
+        '',
+        'Focus your work on these paths first:',
+        ...uniqueFocus.map((file) => `- \`${file}\``),
+      ].join('\n'),
     );
   }
 }
@@ -347,7 +432,7 @@ export function composeClaudeMd(options: ComposeClaudeMdOptions): string {
   const templatesDir = path.join(projectRoot, 'groups', 'templates');
   const manifest = loadManifest(projectRoot, options.manifestName);
   const doc = createPromptDocument(defaultDocumentTitle(options.manifestName));
-  const state: MergeState = { seen: new Set<string>(), visiting: new Set<string>() };
+  const state: MergeState = { seen: new Set<string>() };
 
   mergePromptTemplate(doc, resolveBasePath(projectRoot, manifest.base), state);
 

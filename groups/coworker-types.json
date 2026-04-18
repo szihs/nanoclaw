@@ -1,1 +1,119 @@
-{}
+{
+  "slang-build": {
+    "description": "Build system, CI/CD, development environment \u2014 foundation for all Slang coworkers",
+    "template": "container/skills/slang-templates/templates/slang-setup.yaml",
+    "focusFiles": [
+      "CMakeLists.txt",
+      "CMakePresets.json",
+      "cmake/",
+      ".github/workflows/",
+      "extras/",
+      "tools/"
+    ],
+    "allowedMcpTools": [
+      "mcp__deepwiki__ask_question",
+      "mcp__slang-mcp__github_get_issue",
+      "mcp__slang-mcp__github_get_pull_request",
+      "mcp__slang-mcp__github_get_pull_request_comments",
+      "mcp__slang-mcp__github_get_pull_request_reviews"
+    ]
+  },
+  "slang-compiler": {
+    "description": "Compiler pipeline: parsing, IR generation, optimization, code generation",
+    "extends": "slang-build",
+    "template": "container/skills/slang-templates/templates/slang-compiler.yaml",
+    "focusFiles": [
+      "source/compiler-core/slang-lexer.cpp",
+      "source/slang/slang-preprocessor.cpp",
+      "source/slang/slang-parser*.cpp",
+      "source/slang/slang-check-*.cpp",
+      "source/slang/slang-ast-*.h",
+      "source/slang/slang-ir*.h",
+      "source/slang/slang-ir*.cpp",
+      "source/slang/slang-lower-to-ir.cpp",
+      "source/slang/slang-emit-*.cpp"
+    ]
+  },
+  "slang-language": {
+    "description": "Language semantics: type system, capabilities, generics, interfaces, autodiff",
+    "extends": "slang-build",
+    "template": "container/skills/slang-templates/templates/slang-language.yaml",
+    "focusFiles": [
+      "source/slang/slang-type-layout.cpp",
+      "source/slang/slang-parameter-binding.cpp",
+      "source/slang/slang-capability.*",
+      "source/slang/slang-check-generics.cpp",
+      "source/slang/slang-check-conformance.cpp",
+      "source/slang/slang-check-expr.cpp",
+      "source/slang/slang-ir-specialize.cpp",
+      "source/slang/slang-ir-autodiff*.cpp"
+    ]
+  },
+  "slang-quality": {
+    "description": "Testing, API surface, and documentation",
+    "extends": "slang-build",
+    "template": "container/skills/slang-templates/templates/slang-quality.yaml",
+    "focusFiles": [
+      "tests/",
+      "tools/slang-test/",
+      "tools/render-test/",
+      "include/slang.h",
+      "source/slang/slang.cpp",
+      "source/slang/slang-reflection.cpp",
+      "docs/",
+      "prelude/",
+      "source/slang/*.meta.slang"
+    ]
+  },
+  "slang-triage": {
+    "description": "Issue triage for incoming Slang bugs and feature reports, with subsystem mapping and saved triage reports",
+    "extends": [
+      "slang-compiler",
+      "slang-quality"
+    ],
+    "template": "container/skills/slang-templates/templates/slang-triage-workflow.yaml",
+    "allowedMcpTools": [
+      "mcp__nanoclaw__send_message",
+      "mcp__nanoclaw__schedule_task",
+      "mcp__nanoclaw__list_tasks",
+      "mcp__nanoclaw__pause_task",
+      "mcp__nanoclaw__resume_task",
+      "mcp__nanoclaw__cancel_task"
+    ]
+  },
+  "slang-fix": {
+    "description": "Issue-to-fix workflow for turning triaged Slang reports into repros, minimal fixes, tests, and PR-ready changes",
+    "extends": [
+      "slang-compiler",
+      "slang-quality"
+    ],
+    "template": "container/skills/slang-templates/templates/slang-fix-workflow.yaml",
+    "allowedMcpTools": [
+      "mcp__nanoclaw__send_message"
+    ]
+  },
+  "slang-maintainer": {
+    "description": "Maintainer sweep role for recurring multi-repo/community reports and prioritized action summaries",
+    "extends": [
+      "slang-build",
+      "slang-quality"
+    ],
+    "template": "container/skills/slang-templates/templates/slang-maintainer-workflow.yaml",
+    "allowedMcpTools": [
+      "mcp__nanoclaw__send_message",
+      "mcp__nanoclaw__schedule_task",
+      "mcp__nanoclaw__list_tasks",
+      "mcp__nanoclaw__pause_task",
+      "mcp__nanoclaw__resume_task",
+      "mcp__nanoclaw__cancel_task"
+    ]
+  },
+  "slang-ci-babysitter": {
+    "description": "CI babysitter that classifies flaky Slang failures, reruns only safe jobs, and requeues merge candidates when warranted",
+    "extends": "slang-build",
+    "template": "container/skills/slang-templates/templates/slang-ci-babysitter-workflow.yaml",
+    "allowedMcpTools": [
+      "mcp__nanoclaw__send_message"
+    ]
+  }
+}

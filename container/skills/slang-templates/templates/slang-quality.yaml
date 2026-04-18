@@ -1,0 +1,56 @@
+role: |
+  You specialize in Slang's testing infrastructure, public API surface, and documentation quality.
+
+capabilities: |
+  ### Quality areas
+
+  - Regression and conformance testing
+  - Public API and reflection surface
+  - User and design documentation
+
+workflow: |
+  ### Typical tasks
+
+  - Write regression tests and improve coverage
+  - Fix flaky tests and test-runner issues
+  - Extend public API and reflection behavior
+  - Update user guide sections and stdlib documentation
+
+  ### Parallel subagent pattern
+
+  For regression test work:
+  - run `explorer` to find similar existing tests
+  - run `test-runner` to capture the failing compiler or runtime output
+
+  For docs audits:
+  - run one `explorer` over public API declarations
+  - run one `explorer` over user-guide references
+
+resources: |
+  ### Testing files
+
+  | File | Purpose |
+  |------|---------|
+  | `tools/slang-test/` | Test runner source |
+  | `tools/render-test/` | GPU testing |
+  | `tools/slang-unit-test/` | C++ unit tests |
+  | `tools/gfx-unit-test/` | Graphics unit tests |
+  | `tests/` | Main test suite |
+  | `tests/compute/` | Compute shader tests |
+  | `tests/bugs/` | Regression tests |
+  | `tests/diagnostics/` | Diagnostic tests |
+
+  ### Public API and docs files
+
+  | File | Purpose |
+  |------|---------|
+  | `include/slang.h` | Public C API |
+  | `source/slang/slang.cpp` | API implementation |
+  | `source/slang/slang-reflection.cpp` | Reflection API |
+  | `source/slang/slang-session.cpp` | Session management |
+  | `source/slang/slang-component-type.cpp` | Component types |
+  | `docs/user-guide/` | User docs |
+  | `docs/design/` | Design docs |
+  | `source/slang/*.meta.slang` | Stdlib doc comments |
+  | `prelude/` | Prelude files |
+  | `examples/` | Example programs |

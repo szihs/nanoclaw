@@ -4,7 +4,13 @@ import path from 'path';
 
 import { afterEach, describe, expect, it } from 'vitest';
 
-import { composeClaudeMd, resolveTypeChain, resolveTypeFields, type CoworkerTypeEntry } from './claude-composer.js';
+import {
+  composeClaudeMd,
+  readCoworkerTypes,
+  resolveTypeChain,
+  resolveTypeFields,
+  type CoworkerTypeEntry,
+} from './claude-composer.js';
 
 const tempDirs: string[] = [];
 
@@ -180,50 +186,23 @@ formatting: |
     expect(generatedMain).toContain('Dashboard formatting.');
   });
 
-  it('supports prompt template extends arrays and dedupes shared ancestors', () => {
+  it('rejects template-level extends as an unknown key', () => {
     const projectRoot = makeTempProject();
     writeYaml(
       path.join(projectRoot, 'groups', 'templates', 'base', 'global.yaml'),
       `
+extends: some-other.yaml
 role: |
   Base role.
 `,
     );
-    const sharedDir = path.join(projectRoot, 'groups', 'templates', 'shared');
-    writeYaml(
-      path.join(sharedDir, 'common.yaml'),
-      `
-workflow: |
-  Common workflow.
-`,
-    );
-    writeYaml(
-      path.join(sharedDir, 'formatting.yaml'),
-      `
-extends: common.yaml
-formatting: |
-  Shared formatting.
-`,
-    );
-    writeYaml(
-      path.join(projectRoot, 'groups', 'templates', 'projects', 'slang', 'global-overlay.yaml'),
-      `
-extends:
-  - ../../shared/common.yaml
-  - ../../shared/formatting.yaml
-workflow: |
-  Slang workflow.
-`,
-    );
 
-    const generated = composeClaudeMd({ projectRoot, manifestName: 'global' });
-
-    expect(generated.match(/Common workflow\./g)).toHaveLength(1);
-    expect(generated).toContain('Slang workflow.');
-    expect(generated).toContain('Shared formatting.');
+    expect(() => composeClaudeMd({ projectRoot, manifestName: 'global' })).toThrow(
+      'Unknown prompt template key "extends"',
+    );
   });
 
-  it('rejects prompt template keys outside extends and the six supported sections', () => {
+  it('rejects prompt template keys outside the six supported sections', () => {
     const projectRoot = makeTempProject();
     writeYaml(
       path.join(projectRoot, 'groups', 'templates', 'base', 'global.yaml'),
@@ -256,16 +235,10 @@ workflow: |
 `,
     );
     writeYaml(
-      path.join(projectRoot, 'groups', 'templates', 'shared', 'common-role.yaml'),
+      path.join(projectRoot, 'groups', 'templates', 'foundation-role.yaml'),
       `
 capabilities: |
   Common capabilities.
-`,
-    );
-    writeYaml(
-      path.join(projectRoot, 'groups', 'templates', 'foundation-role.yaml'),
-      `
-extends: shared/common-role.yaml
 workflow: |
   Foundation workflow.
 `,
@@ -273,7 +246,8 @@ workflow: |
     writeYaml(
       path.join(projectRoot, 'groups', 'templates', 'review-role.yaml'),
       `
-extends: shared/common-role.yaml
+capabilities: |
+  Common capabilities.
 constraints: |
   Review constraints.
 `,
@@ -313,10 +287,9 @@ role: |
     );
 
     const generated = composeClaudeMd({ projectRoot, manifestName: 'coworker', coworkerType: 'specialist' });
-    const types = JSON.parse(fs.readFileSync(path.join(projectRoot, 'groups', 'coworker-types.json'), 'utf-8')) as Record<
-      string,
-      CoworkerTypeEntry
-    >;
+    const types = JSON.parse(
+      fs.readFileSync(path.join(projectRoot, 'groups', 'coworker-types.json'), 'utf-8'),
+    ) as Record<string, CoworkerTypeEntry>;
     const resolved = resolveTypeFields(types, 'specialist');
 
     expect(generated).toContain('# Leaf Role');
@@ -324,7 +297,6 @@ role: |
     expect(generated).toContain('Foundation workflow.');
     expect(generated).toContain('Review constraints.');
     expect(generated).toContain('Leaf role.');
-    expect(generated.match(/Common capabilities\./g)).toHaveLength(1);
     expect(resolved.templates).toEqual([
       'groups/templates/foundation-role.yaml',
       'groups/templates/review-role.yaml',
@@ -345,5 +317,390 @@ role: |
 
     const resolved = resolveTypeFields(types, 'alpha');
     expect(resolved.templates).toEqual(['beta.yaml', 'alpha.yaml']);
+  });
+
+  it('discovers coworker types from distributed YAML files in container/skills/', () => {
+    const projectRoot = makeTempProject();
+    // Remove legacy JSON
+    fs.rmSync(path.join(projectRoot, 'groups', 'coworker-types.json'));
+
+    writeYaml(
+      path.join(projectRoot, 'container', 'skills', 'base-templates', 'coworker-types.yaml'),
+      `
+base-build:
+  description: "Build system"
+  template: container/skills/base-templates/templates/base-build.yaml
+`,
+    );
+    writeYaml(
+      path.join(projectRoot, 'container', 'skills', 'slang-templates', 'coworker-types.yaml'),
+      `
+slang-build:
+  project: slang
+  extends: base-build
+  description: "Slang build"
+  template: container/skills/slang-templates/templates/slang-setup.yaml
+  focusFiles: [CMakeLists.txt]
+`,
+    );
+
+    const types = readCoworkerTypes(projectRoot);
+    expect(Object.keys(types)).toEqual(['base-build', 'slang-build']);
+    expect(types['slang-build'].project).toBe('slang');
+    expect(types['base-build'].project).toBeUndefined();
+  });
+
+  it('throws on duplicate type names across YAML files', () => {
+    const projectRoot = makeTempProject();
+    fs.rmSync(path.join(projectRoot, 'groups', 'coworker-types.json'));
+
+    writeYaml(
+      path.join(projectRoot, 'container', 'skills', 'alpha', 'coworker-types.yaml'),
+      `
+duplicate-type:
+  description: "First"
+  template: a.yaml
+`,
+    );
+    writeYaml(
+      path.join(projectRoot, 'container', 'skills', 'beta', 'coworker-types.yaml'),
+      `
+duplicate-type:
+  description: "Second"
+  template: b.yaml
+`,
+    );
+
+    expect(() => readCoworkerTypes(projectRoot)).toThrow('Duplicate coworker type "duplicate-type"');
+  });
+
+  it('throws on cross-project extends', () => {
+    const projectRoot = makeTempProject();
+    fs.rmSync(path.join(projectRoot, 'groups', 'coworker-types.json'));
+
+    writeYaml(
+      path.join(projectRoot, 'groups', 'templates', 'base', 'global.yaml'),
+      `
+role: |
+  Base role.
+`,
+    );
+    writeYaml(
+      path.join(projectRoot, 'container', 'skills', 'base-templates', 'coworker-types.yaml'),
+      `
+base-build:
+  description: "Build"
+  template: container/skills/base-templates/templates/base-build.yaml
+`,
+    );
+    writeYaml(
+      path.join(projectRoot, 'container', 'skills', 'base-templates', 'templates', 'base-build.yaml'),
+      `
+role: |
+  Base build role.
+`,
+    );
+    writeYaml(
+      path.join(projectRoot, 'container', 'skills', 'slang-templates', 'coworker-types.yaml'),
+      `
+slang-quality:
+  project: slang
+  description: "Slang quality"
+  template: container/skills/slang-templates/templates/quality.yaml
+`,
+    );
+    writeYaml(
+      path.join(projectRoot, 'container', 'skills', 'slang-templates', 'templates', 'quality.yaml'),
+      `
+role: |
+  Slang quality.
+`,
+    );
+    writeYaml(
+      path.join(projectRoot, 'container', 'skills', 'gfx-templates', 'coworker-types.yaml'),
+      `
+gfx-test:
+  project: graphics
+  extends: slang-quality
+  description: "Graphics test"
+  template: container/skills/gfx-templates/templates/test.yaml
+`,
+    );
+    writeYaml(
+      path.join(projectRoot, 'container', 'skills', 'gfx-templates', 'templates', 'test.yaml'),
+      `
+role: |
+  Graphics test.
+`,
+    );
+
+    expect(() => composeClaudeMd({ projectRoot, manifestName: 'coworker', coworkerType: 'gfx-test' })).toThrow(
+      'Cross-project extends',
+    );
+  });
+
+  it('allows project types to extend base types (no project)', () => {
+    const projectRoot = makeTempProject();
+    fs.rmSync(path.join(projectRoot, 'groups', 'coworker-types.json'));
+
+    writeYaml(
+      path.join(projectRoot, 'groups', 'templates', 'base', 'global.yaml'),
+      `
+role: |
+  Base role.
+`,
+    );
+    writeYaml(
+      path.join(projectRoot, 'container', 'skills', 'base-templates', 'coworker-types.yaml'),
+      `
+base-build:
+  description: "Build"
+  template: container/skills/base-templates/templates/base-build.yaml
+`,
+    );
+    writeYaml(
+      path.join(projectRoot, 'container', 'skills', 'base-templates', 'templates', 'base-build.yaml'),
+      `
+capabilities: |
+  Build capabilities from base.
+workflow: |
+  Build workflow from base.
+`,
+    );
+    writeYaml(
+      path.join(projectRoot, 'container', 'skills', 'slang-templates', 'coworker-types.yaml'),
+      `
+slang-build:
+  project: slang
+  extends: base-build
+  description: "Slang build"
+  template: container/skills/slang-templates/templates/slang-build.yaml
+`,
+    );
+    writeYaml(
+      path.join(projectRoot, 'container', 'skills', 'slang-templates', 'templates', 'slang-build.yaml'),
+      `
+role: |
+  Slang build specialist.
+capabilities: |
+  Slang-specific build capabilities.
+`,
+    );
+
+    const generated = composeClaudeMd({ projectRoot, manifestName: 'coworker', coworkerType: 'slang-build' });
+
+    // Role is leaf-only: only slang-build's role appears
+    expect(generated).toContain('Slang build specialist.');
+    // Capabilities append: base then slang
+    expect(generated).toContain('Build capabilities from base.');
+    expect(generated).toContain('Slang-specific build capabilities.');
+    // Workflow from base appears
+    expect(generated).toContain('Build workflow from base.');
+  });
+
+  it('applies leaf-only merge for role section in type chains', () => {
+    const projectRoot = makeTempProject();
+    fs.rmSync(path.join(projectRoot, 'groups', 'coworker-types.json'));
+
+    writeYaml(
+      path.join(projectRoot, 'groups', 'templates', 'base', 'global.yaml'),
+      `
+role: |
+  Global base.
+`,
+    );
+    writeYaml(
+      path.join(projectRoot, 'container', 'skills', 'base-templates', 'coworker-types.yaml'),
+      `
+base-understand:
+  description: "Understand"
+  template: container/skills/base-templates/templates/understand.yaml
+`,
+    );
+    writeYaml(
+      path.join(projectRoot, 'container', 'skills', 'base-templates', 'templates', 'understand.yaml'),
+      `
+role: |
+  You analyze problems.
+capabilities: |
+  Problem analysis capabilities.
+`,
+    );
+    writeYaml(
+      path.join(projectRoot, 'container', 'skills', 'slang-templates', 'coworker-types.yaml'),
+      `
+slang-triage:
+  project: slang
+  extends: base-understand
+  description: "Triage"
+  template: container/skills/slang-templates/templates/triage.yaml
+`,
+    );
+    writeYaml(
+      path.join(projectRoot, 'container', 'skills', 'slang-templates', 'templates', 'triage.yaml'),
+      `
+role: |
+  You triage Slang issues.
+capabilities: |
+  Slang triage capabilities.
+`,
+    );
+
+    const generated = composeClaudeMd({ projectRoot, manifestName: 'coworker', coworkerType: 'slang-triage' });
+
+    // Role: leaf-only — only slang-triage's role, NOT base-understand's
+    expect(generated).toContain('You triage Slang issues.');
+    expect(generated).not.toContain('You analyze problems.');
+    // Capabilities: append — both appear
+    expect(generated).toContain('Problem analysis capabilities.');
+    expect(generated).toContain('Slang triage capabilities.');
+  });
+
+  it('deduplicates diamond inheritance (base-build via two paths)', () => {
+    const projectRoot = makeTempProject();
+    fs.rmSync(path.join(projectRoot, 'groups', 'coworker-types.json'));
+
+    writeYaml(
+      path.join(projectRoot, 'groups', 'templates', 'base', 'global.yaml'),
+      `
+role: |
+  Base.
+`,
+    );
+    writeYaml(
+      path.join(projectRoot, 'container', 'skills', 'base-templates', 'coworker-types.yaml'),
+      `
+base-build:
+  description: "Build"
+  template: container/skills/base-templates/templates/build.yaml
+`,
+    );
+    writeYaml(
+      path.join(projectRoot, 'container', 'skills', 'base-templates', 'templates', 'build.yaml'),
+      `
+capabilities: |
+  Base build capabilities.
+`,
+    );
+    writeYaml(
+      path.join(projectRoot, 'container', 'skills', 'slang-templates', 'coworker-types.yaml'),
+      `
+slang-build:
+  project: slang
+  extends: base-build
+  description: "Slang build"
+  template: container/skills/slang-templates/templates/build.yaml
+slang-compiler:
+  project: slang
+  extends: slang-build
+  description: "Compiler"
+  template: container/skills/slang-templates/templates/compiler.yaml
+slang-language:
+  project: slang
+  extends: slang-build
+  description: "Language"
+  template: container/skills/slang-templates/templates/language.yaml
+`,
+    );
+    writeYaml(
+      path.join(projectRoot, 'container', 'skills', 'slang-templates', 'templates', 'build.yaml'),
+      `
+capabilities: |
+  Slang build capabilities.
+`,
+    );
+    writeYaml(
+      path.join(projectRoot, 'container', 'skills', 'slang-templates', 'templates', 'compiler.yaml'),
+      `
+role: |
+  Compiler specialist.
+capabilities: |
+  Compiler capabilities.
+`,
+    );
+    writeYaml(
+      path.join(projectRoot, 'container', 'skills', 'slang-templates', 'templates', 'language.yaml'),
+      `
+role: |
+  Language specialist.
+capabilities: |
+  Language capabilities.
+`,
+    );
+
+    const generated = composeClaudeMd({
+      projectRoot,
+      manifestName: 'coworker',
+      coworkerType: 'slang-compiler+slang-language',
+    });
+
+    // Base build appears only once (diamond dedup)
+    expect(generated.match(/Base build capabilities\./g)).toHaveLength(1);
+    // Slang build appears only once
+    expect(generated.match(/Slang build capabilities\./g)).toHaveLength(1);
+    // Both leaf capabilities appear
+    expect(generated).toContain('Compiler capabilities.');
+    expect(generated).toContain('Language capabilities.');
+    // Role is leaf-only: last template wins
+    expect(generated).toContain('Language specialist.');
+  });
+
+  it('falls back to legacy JSON when no YAML files exist', () => {
+    const projectRoot = makeTempProject();
+    // Keep JSON, ensure no container/skills/ dir with YAML
+    fs.rmSync(path.join(projectRoot, 'container'), { recursive: true, force: true });
+
+    const types = readCoworkerTypes(projectRoot);
+    // Should load from JSON — check that slang-build exists
+    expect(types['slang-build']).toBeDefined();
+  });
+
+  it('preserves full extra instructions when workflow templates are used', () => {
+    const projectRoot = makeTempProject();
+    writeYaml(
+      path.join(projectRoot, 'groups', 'templates', 'base', 'global.yaml'),
+      `
+role: |
+  Base role.
+`,
+    );
+    writeYaml(
+      path.join(projectRoot, 'container', 'skills', 'slang-templates', 'templates', 'fix-workflow.yaml'),
+      `
+workflow: |
+  Shared issue workflow.
+constraints: |
+  Fix constraints.
+`,
+    );
+    fs.writeFileSync(
+      path.join(projectRoot, 'groups', 'coworker-types.json'),
+      JSON.stringify(
+        {
+          base: {
+            template: 'groups/templates/base/global.yaml',
+          },
+          fixer: {
+            extends: 'base',
+            template: 'container/skills/slang-templates/templates/fix-workflow.yaml',
+          },
+        },
+        null,
+        2,
+      ),
+    );
+
+    const extraInstructions = ['# Original Export', '', 'Keep every line from the export body.'].join('\n');
+    const generated = composeClaudeMd({
+      projectRoot,
+      manifestName: 'coworker',
+      coworkerType: 'fixer',
+      extraInstructions,
+    });
+
+    expect(generated).toContain('Shared issue workflow.');
+    expect(generated).toContain('Fix constraints.');
+    expect(generated).toContain('### Additional Instructions');
+    expect(generated).toContain(extraInstructions);
   });
 });

@@ -16,6 +16,10 @@ Help with tasks, answer questions, and carry forward durable context for the gro
 - Schedule tasks to run later or on a recurring basis
 - Send messages back to the active chat
 
+### Slang compiler project
+
+This workspace includes a Slang compiler specialization for `shader-slang/slang`.
+
 ## Workflow
 
 ### Communication
@@ -38,6 +42,12 @@ When you learn something important:
 - create files for structured data such as `customers.md` or `preferences.md`
 - split files larger than 500 lines into folders
 - keep an index in memory for the files you create
+
+Use `/slang-build` for cloning, building, and navigating the Slang compiler.
+
+If the repo is not already present at `/workspace/group/slang`, clone it there before starting code work.
+
+Read the Slang repo's own `CLAUDE.md` before making changes.
 
 ## Constraints
 
@@ -72,6 +82,19 @@ Avoid `##` headings, Markdown links, and double-asterisk bold.
 
 Standard Markdown works: `**bold**`, `*italic*`, `[links](url)`, `# headings`.
 
+### Dashboard and web UI (`dashboard:*`)
+
+Use standard Markdown:
+- `**bold**`
+- `*italic*`
+- `[links](url)`
+- `## headings`
+- fenced code blocks
+
+Use Unicode emoji directly (`✅ ❌ ⚠️ 🚀`) instead of `:emoji:` shortcodes because the web renderer does not expand shortcode syntax.
+
+When you are unsure which channel you are on, prefer standard Markdown with Unicode emoji.
+
 ## Resources
 
 ### Workspace
@@ -93,3 +116,7 @@ Use `add_mcp_server` to register an MCP server, then `request_rebuild` to apply 
 ### Task scripts
 
 For frequent recurring tasks, add a `script` to `schedule_task` so the agent only wakes up when the condition actually needs work.
+
+- Detailed build, structure, and gotchas guides live in `/home/node/.claude/skills/slang-build/`
+- Use `mcp__deepwiki__*` tools for `shader-slang/slang` documentation
+- Share durable learnings through `append_learning`

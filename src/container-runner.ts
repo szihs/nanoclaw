@@ -47,16 +47,38 @@ import type { AgentGroup, Session } from './types.js';
 
 const onecli = new OneCLI({ url: ONECLI_URL });
 
-/** Cached coworker-types.json — reloaded when mtime changes. */
-let coworkerTypesCache: { data: Record<string, CoworkerTypeEntry>; mtime: number } | null = null;
+/** Cached coworker types — reloaded when any coworker-types.yaml mtime changes. */
+let coworkerTypesCache: { data: Record<string, CoworkerTypeEntry>; fingerprint: number } | null = null;
+
+function typesFingerprint(): number {
+  const skillsDir = path.join(process.cwd(), 'container', 'skills');
+  let maxMtime = 0;
+  try {
+    for (const dir of fs.readdirSync(skillsDir)) {
+      const typesFile = path.join(skillsDir, dir, 'coworker-types.yaml');
+      try {
+        maxMtime = Math.max(maxMtime, fs.statSync(typesFile).mtimeMs);
+      } catch {
+        /* file does not exist */
+      }
+    }
+  } catch {
+    /* skills dir does not exist — check legacy JSON */
+    try {
+      maxMtime = fs.statSync(path.join(process.cwd(), 'groups', 'coworker-types.json')).mtimeMs;
+    } catch {
+      /* no types at all */
+    }
+  }
+  return maxMtime;
+}
 
 function loadCoworkerTypes(): Record<string, CoworkerTypeEntry> {
-  const filePath = path.join(process.cwd(), 'groups', 'coworker-types.json');
   try {
-    const mtime = fs.statSync(filePath).mtimeMs;
-    if (coworkerTypesCache && coworkerTypesCache.mtime === mtime) return coworkerTypesCache.data;
+    const fp = typesFingerprint();
+    if (coworkerTypesCache && coworkerTypesCache.fingerprint === fp) return coworkerTypesCache.data;
     const data = readCoworkerTypes();
-    coworkerTypesCache = { data, mtime };
+    coworkerTypesCache = { data, fingerprint: fp };
     return data;
   } catch {
     return {};
@@ -130,7 +152,7 @@ export function resolveAllowedMcpTools(agentGroup: AgentGroup): string[] {
     }
   }
 
-  // 2. Coworker type lookup (walks extends chain, uses mtime-cached coworker-types.json)
+  // 2. Coworker type lookup (walks extends chain, uses mtime-cached coworker-types.yaml)
   if (agentGroup.coworker_type) {
     const types = loadCoworkerTypes();
     const allTools: string[] = [];
