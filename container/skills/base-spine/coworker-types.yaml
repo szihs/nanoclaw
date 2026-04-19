@@ -13,6 +13,8 @@ base-common:
   context:
     - container/skills/base-spine/context/workspace.md
     - container/skills/base-spine/context/invocation.md
+  skills:
+    - base-nanoclaw
   workflows:
     - base-triage
     - base-fix

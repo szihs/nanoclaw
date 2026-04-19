@@ -11,11 +11,67 @@ import type { AgentGroup } from './types.js';
 const originalCwd = process.cwd();
 const tempDirs: string[] = [];
 
-function makeTempProject(coworkerTypes: Record<string, unknown>): string {
+interface SkillFrontmatter {
+  name: string;
+  type?: 'capability' | 'workflow';
+  description?: string;
+  allowedTools?: string[];
+  usesSkills?: string[];
+  usesWorkflows?: string[];
+}
+
+/**
+ * Build a temp project with the lego layout the registry expects:
+ *   container/skills/<dir>/coworker-types.yaml — type registry
+ *   container/skills/<dir>/SKILL.md            — capability/workflow skills
+ *
+ * Tool derivation walks skill + workflow frontmatter, so the MCP allowlists
+ * that used to live in coworker-types.json now live in SKILL.md `allowed-tools`.
+ */
+function makeTempProject(types: Record<string, unknown>, skills: SkillFrontmatter[]): string {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'nanoclaw-runtime-guardrails-'));
   tempDirs.push(dir);
-  fs.mkdirSync(path.join(dir, 'groups'), { recursive: true });
-  fs.writeFileSync(path.join(dir, 'groups', 'coworker-types.json'), JSON.stringify(coworkerTypes, null, 2));
+  const skillsRoot = path.join(dir, 'container', 'skills');
+  fs.mkdirSync(skillsRoot, { recursive: true });
+
+  // One registry file per project to keep the fixture simple.
+  const registryDir = path.join(skillsRoot, 'test-registry');
+  fs.mkdirSync(registryDir, { recursive: true });
+  const typeLines: string[] = [];
+  for (const [name, entry] of Object.entries(types)) {
+    typeLines.push(`${name}:`);
+    const e = entry as Record<string, unknown>;
+    if (e.extends !== undefined) {
+      typeLines.push(`  extends: ${JSON.stringify(e.extends)}`);
+    }
+    if (Array.isArray(e.skills)) {
+      typeLines.push(`  skills: ${JSON.stringify(e.skills)}`);
+    }
+    if (Array.isArray(e.workflows)) {
+      typeLines.push(`  workflows: ${JSON.stringify(e.workflows)}`);
+    }
+  }
+  fs.writeFileSync(path.join(registryDir, 'coworker-types.yaml'), typeLines.join('\n') + '\n');
+
+  // Each skill gets its own directory under container/skills/<name>/SKILL.md.
+  for (const skill of skills) {
+    const skillDir = path.join(skillsRoot, skill.name);
+    fs.mkdirSync(skillDir, { recursive: true });
+    const fm: string[] = ['---', `name: ${skill.name}`];
+    if (skill.type) fm.push(`type: ${skill.type}`);
+    fm.push(`description: ${JSON.stringify(skill.description ?? skill.name)}`);
+    if (skill.allowedTools && skill.allowedTools.length > 0) {
+      fm.push(`allowed-tools: ${JSON.stringify(skill.allowedTools.join(', '))}`);
+    }
+    if ((skill.usesSkills && skill.usesSkills.length > 0) || (skill.usesWorkflows && skill.usesWorkflows.length > 0)) {
+      fm.push('uses:');
+      fm.push(`  skills: ${JSON.stringify(skill.usesSkills ?? [])}`);
+      fm.push(`  workflows: ${JSON.stringify(skill.usesWorkflows ?? [])}`);
+    }
+    fm.push('---', '', `# ${skill.name}`, '');
+    fs.writeFileSync(path.join(skillDir, 'SKILL.md'), fm.join('\n'));
+  }
+
   return dir;
 }
 
@@ -42,16 +98,23 @@ afterEach(() => {
 });
 
 describe('runtime guardrails', () => {
-  it('inherits MCP allowlists through coworker type extends chains', () => {
-    const projectRoot = makeTempProject({
-      'slang-build': {
-        allowedMcpTools: ['mcp__deepwiki__ask_question', 'mcp__slang-mcp__github_get_issue'],
+  it('derives MCP allowlists from skill frontmatter across an extends chain', () => {
+    const projectRoot = makeTempProject(
+      {
+        'slang-build': {
+          skills: ['cap-deepwiki', 'cap-github-issue'],
+        },
+        'slang-compiler': {
+          extends: 'slang-build',
+          skills: ['cap-github-pr'],
+        },
       },
-      'slang-compiler': {
-        extends: 'slang-build',
-        allowedMcpTools: ['mcp__slang-mcp__github_get_pull_request'],
-      },
-    });
+      [
+        { name: 'cap-deepwiki', allowedTools: ['mcp__deepwiki__ask_question'] },
+        { name: 'cap-github-issue', allowedTools: ['mcp__slang-mcp__github_get_issue'] },
+        { name: 'cap-github-pr', allowedTools: ['mcp__slang-mcp__github_get_pull_request'] },
+      ],
+    );
 
     process.chdir(projectRoot);
     resetCoworkerTypesCacheForTests();
@@ -71,23 +134,35 @@ describe('runtime guardrails', () => {
     expect(shouldRetainOutboxFiles('discord', files)).toBe(false);
   });
 
-  it('merges explicit allowlists from derived issue and reporting roles', () => {
-    const projectRoot = makeTempProject({
-      'slang-build': {
-        allowedMcpTools: ['mcp__deepwiki__ask_question'],
+  it('merges tools across diamond-shaped extends and transitively through workflow uses', () => {
+    const projectRoot = makeTempProject(
+      {
+        'slang-build': {
+          skills: ['cap-deepwiki'],
+        },
+        'slang-quality': {
+          extends: 'slang-build',
+        },
+        'slang-fix': {
+          extends: ['slang-build', 'slang-quality'],
+          skills: ['cap-send-message'],
+        },
+        'slang-maintainer': {
+          extends: ['slang-build', 'slang-quality'],
+          workflows: ['wf-maintain'],
+        },
       },
-      'slang-quality': {
-        extends: 'slang-build',
-      },
-      'slang-fix': {
-        extends: ['slang-build', 'slang-quality'],
-        allowedMcpTools: ['mcp__nanoclaw__send_message'],
-      },
-      'slang-maintainer': {
-        extends: ['slang-build', 'slang-quality'],
-        allowedMcpTools: ['mcp__nanoclaw__send_message', 'mcp__nanoclaw__schedule_task'],
-      },
-    });
+      [
+        { name: 'cap-deepwiki', allowedTools: ['mcp__deepwiki__ask_question'] },
+        { name: 'cap-send-message', allowedTools: ['mcp__nanoclaw__send_message'] },
+        { name: 'cap-schedule', allowedTools: ['mcp__nanoclaw__schedule_task'] },
+        {
+          name: 'wf-maintain',
+          type: 'workflow',
+          usesSkills: ['cap-send-message', 'cap-schedule'],
+        },
+      ],
+    );
 
     process.chdir(projectRoot);
     resetCoworkerTypesCacheForTests();
@@ -98,8 +173,8 @@ describe('runtime guardrails', () => {
     ]);
     expect(resolveAllowedMcpTools(makeAgentGroup('slang-maintainer'))).toEqual([
       'mcp__deepwiki__ask_question',
-      'mcp__nanoclaw__send_message',
       'mcp__nanoclaw__schedule_task',
+      'mcp__nanoclaw__send_message',
     ]);
   });
 });

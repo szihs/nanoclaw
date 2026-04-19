@@ -6,11 +6,16 @@ capabilities: |
 workflow: |
   ### Available coworker types
 
-  Read `/workspace/project/groups/coworker-types.json` for the full registry of available types and their descriptions.
+  The coworker type registry lives under `container/skills/*/coworker-types.yaml`. Each entry declares `identity`, `invariants`, `context`, and references to `workflows` and `skills` (`type: workflow` SKILL.md or `type: capability` SKILL.md).
 
-  When you need the detailed prompt for a type, open the `template` path referenced by that entry.
+  To see the current catalog:
 
-  Do not assume the current set of types or template files is exhaustive.
+  ```bash
+  ls container/skills/*/coworker-types.yaml
+  ls container/skills/*/SKILL.md
+  ```
+
+  Do not assume the set is fixed — scan at read time.
 
   ### Creating a coworker
 
@@ -19,7 +24,7 @@ workflow: |
   - `coworkerType`
   - `instructions`
 
-  The host creates the group, composes `CLAUDE.md` from base + sections + overlays + role template + instructions, and wires the coworker to the current channel.
+  The host composes the coworker's `CLAUDE.md` as a thin spine: identity + invariants + context + an index of available workflows and skills. Workflow bodies load on demand when invoked (e.g. `/slang-triage`).
 
   ### Coordinating coworkers
 
@@ -29,7 +34,7 @@ workflow: |
 
   ### Example flow
 
-  1. Choose complementary types from `groups/coworker-types.json`
+  1. Pick a coworker type from the registry
   2. Create one coworker per type with a focused brief
   3. Collect findings from each coworker
   4. Synthesize results and share durable learnings

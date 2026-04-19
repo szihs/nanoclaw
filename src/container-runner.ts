@@ -9,7 +9,14 @@ import path from 'path';
 
 import { OneCLI } from '@onecli-sh/sdk';
 
-import { composeClaudeMd, readCoworkerTypes, resolveTypeFields, type CoworkerTypeEntry } from './claude-composer.js';
+import {
+  composeClaudeMd,
+  readCoworkerTypes,
+  readSkillCatalog,
+  resolveCoworkerManifest,
+  type CoworkerTypeEntry,
+  type SkillMeta,
+} from './claude-composer.js';
 
 import {
   CONTAINER_IMAGE,
@@ -47,46 +54,54 @@ import type { AgentGroup, Session } from './types.js';
 
 const onecli = new OneCLI({ url: ONECLI_URL });
 
-/** Cached coworker types — reloaded when any coworker-types.yaml mtime changes. */
-let coworkerTypesCache: { data: Record<string, CoworkerTypeEntry>; fingerprint: number } | null = null;
+/**
+ * Cached coworker types + skill catalog — reloaded when any coworker-types.yaml
+ * or SKILL.md mtime changes. Tool derivation walks the catalog so both inputs
+ * participate in the fingerprint.
+ */
+let registryCache: {
+  types: Record<string, CoworkerTypeEntry>;
+  catalog: Record<string, SkillMeta>;
+  fingerprint: number;
+} | null = null;
 
-function typesFingerprint(): number {
+function registryFingerprint(): number {
   const skillsDir = path.join(process.cwd(), 'container', 'skills');
   let maxMtime = 0;
   try {
     for (const dir of fs.readdirSync(skillsDir)) {
-      const typesFile = path.join(skillsDir, dir, 'coworker-types.yaml');
-      try {
-        maxMtime = Math.max(maxMtime, fs.statSync(typesFile).mtimeMs);
-      } catch {
-        /* file does not exist */
+      for (const file of ['coworker-types.yaml', 'SKILL.md']) {
+        try {
+          maxMtime = Math.max(maxMtime, fs.statSync(path.join(skillsDir, dir, file)).mtimeMs);
+        } catch {
+          /* file does not exist */
+        }
       }
     }
   } catch {
-    /* skills dir does not exist — check legacy JSON */
-    try {
-      maxMtime = fs.statSync(path.join(process.cwd(), 'groups', 'coworker-types.json')).mtimeMs;
-    } catch {
-      /* no types at all */
-    }
+    /* skills dir does not exist */
   }
   return maxMtime;
 }
 
-function loadCoworkerTypes(): Record<string, CoworkerTypeEntry> {
+function loadRegistry(): { types: Record<string, CoworkerTypeEntry>; catalog: Record<string, SkillMeta> } {
   try {
-    const fp = typesFingerprint();
-    if (coworkerTypesCache && coworkerTypesCache.fingerprint === fp) return coworkerTypesCache.data;
-    const data = readCoworkerTypes();
-    coworkerTypesCache = { data, fingerprint: fp };
-    return data;
-  } catch {
-    return {};
+    const fp = registryFingerprint();
+    if (registryCache && registryCache.fingerprint === fp) {
+      return { types: registryCache.types, catalog: registryCache.catalog };
+    }
+    const types = readCoworkerTypes();
+    const catalog = readSkillCatalog();
+    registryCache = { types, catalog, fingerprint: fp };
+    return { types, catalog };
+  } catch (err) {
+    log.warn('Failed to load coworker type registry', { err });
+    return { types: {}, catalog: {} };
   }
 }
 
 export function resetCoworkerTypesCacheForTests(): void {
-  coworkerTypesCache = null;
+  registryCache = null;
 }
 
 /**
@@ -140,7 +155,9 @@ function composeCoworkerClaudeMd(agentGroup: AgentGroup): void {
 
 /**
  * Resolve allowed MCP tools for an agent group.
- * Priority: explicit DB override > coworker-types.json > ADMIN_MCP_TOOLS/all discovered tools > DEFAULT_MCP_TOOLS env.
+ * Priority: explicit DB override > coworker type manifest (derived from
+ * skill/workflow SKILL.md frontmatter) > ADMIN_MCP_TOOLS/all discovered tools
+ * > DEFAULT_MCP_TOOLS env.
  */
 export function resolveAllowedMcpTools(agentGroup: AgentGroup): string[] {
   // 1. Explicit DB override (filter to mcp__ prefixed tools only)
@@ -152,16 +169,21 @@ export function resolveAllowedMcpTools(agentGroup: AgentGroup): string[] {
     }
   }
 
-  // 2. Coworker type lookup (walks extends chain, uses mtime-cached coworker-types.yaml)
+  // 2. Coworker type lookup — derived from skills + workflows frontmatter.
   if (agentGroup.coworker_type) {
-    const types = loadCoworkerTypes();
-    const allTools: string[] = [];
-    for (const role of agentGroup.coworker_type.split('+')) {
-      const resolved = resolveTypeFields(types, role.trim());
-      allTools.push(...resolved.allowedMcpTools);
+    const { types, catalog } = loadRegistry();
+    if (Object.keys(types).length > 0) {
+      try {
+        const manifest = resolveCoworkerManifest(types, agentGroup.coworker_type, catalog, process.cwd());
+        const filtered = manifest.tools.filter((t) => t.startsWith('mcp__'));
+        if (filtered.length > 0) return filtered;
+      } catch (err) {
+        log.warn('Failed to resolve coworker manifest for tool derivation', {
+          coworkerType: agentGroup.coworker_type,
+          err,
+        });
+      }
     }
-    const filtered = allTools.filter((t) => t.startsWith('mcp__'));
-    if (filtered.length > 0) return [...new Set(filtered)];
   }
 
   // 3. Admin groups: explicit allowlist via ADMIN_MCP_TOOLS env, or all discovered tools

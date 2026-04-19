@@ -27,6 +27,20 @@ slang-fix:
   project: slang
   extends: slang-common
   skills:
-    - slang-fix
+    - slang-patch
   workflows:
-    - base-fix
+    - slang-fix
+
+slang-maintainer:
+  description: "Periodic Slang maintainer sweep — inventory, rank, and report across issues, PRs, CI, and release tracks."
+  project: slang
+  extends: slang-common
+  workflows:
+    - slang-maintainer
+
+slang-ci-babysitter:
+  description: "Classify Slang CI failures as flake vs. real and rerun only safe jobs. Requeues merge candidates when warranted."
+  project: slang
+  extends: slang-common
+  workflows:
+    - slang-ci-babysitter

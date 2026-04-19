@@ -19,11 +19,6 @@ function makeTempProject(): string {
   return dir;
 }
 
-function writeYaml(filePath: string, contents: string): void {
-  fs.mkdirSync(path.dirname(filePath), { recursive: true });
-  fs.writeFileSync(filePath, `${contents.trim()}\n`);
-}
-
 afterEach(() => {
   for (const dir of tempDirs.splice(0)) {
     fs.rmSync(dir, { recursive: true, force: true });
@@ -31,41 +26,46 @@ afterEach(() => {
 });
 
 describe('v1 migration helpers', () => {
-  it('reconstructs a typed coworker from YAML templates and extracts only the legacy custom tail', () => {
+  it('reconstructs a typed coworker from the lego spine and extracts only the legacy custom tail', () => {
     const projectRoot = makeTempProject();
-    writeYaml(
-      path.join(projectRoot, 'groups', 'templates', 'leaf-role.yaml'),
-      `
-role: |
-  Leaf role.
-workflow: |
-  Leaf workflow.
-`,
+
+    // Wire up a minimal lego registry for type "leaf": one spine identity
+    // fragment + one capability skill. This mirrors the real container/skills/
+    // layout that readCoworkerTypes + readSkillCatalog scan.
+    const legoDir = path.join(projectRoot, 'container', 'skills', 'leaf-spine');
+    fs.mkdirSync(legoDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(legoDir, 'identity.md'),
+      'You are Leaf Role, the reference coworker for the migration test.',
     );
     fs.writeFileSync(
-      path.join(projectRoot, 'groups', 'coworker-types.json'),
-      JSON.stringify(
-        {
-          leaf: {
-            template: 'groups/templates/leaf-role.yaml',
-          },
-        },
-        null,
-        2,
-      ),
+      path.join(legoDir, 'coworker-types.yaml'),
+      [
+        'leaf:',
+        '  identity: container/skills/leaf-spine/identity.md',
+        '  skills: [leaf-cap]',
+        '',
+      ].join('\n'),
+    );
+    const capDir = path.join(projectRoot, 'container', 'skills', 'leaf-cap');
+    fs.mkdirSync(capDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(capDir, 'SKILL.md'),
+      ['---', 'name: leaf-cap', 'description: Leaf capability.', '---', '', '# Leaf cap body', ''].join('\n'),
     );
 
     const template = recomposeLegacyTemplate(projectRoot, { isMain: false, coworkerType: 'leaf' });
     expect(template).not.toBeNull();
-    expect(template).toContain('# Leaf Role');
-    expect(template).toContain('## Workflow');
-    expect(template).toContain('Leaf workflow.');
+    expect(template).toContain('# Leaf');
+    expect(template).toContain('## Identity');
+    expect(template).toContain('Leaf Role, the reference coworker');
+    expect(template).toContain('## Skills Available');
 
     const legacyCustomTail = [
       '### Legacy custom instructions',
       '',
       '- Keep this raw markdown block intact',
-      '- Do not force it into the six template sections during export',
+      '- Do not force it into the spine sections during export',
     ].join('\n');
 
     const actualClaudeMd = `${template!.trimEnd()}\n\n---\n\n${legacyCustomTail}\n`;
