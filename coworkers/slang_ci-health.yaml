@@ -2,11 +2,11 @@ version: 3
 exportedAt: "2026-04-16T15:25:05.114Z"
 requires:
   coworkerTypes:
-    - slang-ci-babysitter
+    - slang-ci-health
 agent:
-  name: Slang CI Babysitter
-  folder: slang_ci-babysitter
-  coworkerType: slang-ci-babysitter
+  name: Slang CI Health
+  folder: slang_ci-health
+  coworkerType: slang-ci-health
   allowedMcpTools: null
   agentProvider: null
   containerConfig: null
@@ -170,11 +170,11 @@ instructions: >
 
   ```
 instructionTemplate: null
-trigger: "@CIBabysitter"
+trigger: "@CIHealth"
 destinations:
-  - name: slang-ci-babysitter-dashboard
+  - name: slang-ci-health-dashboard
     type: channel
     channelType: dashboard
-    platformId: dashboard:slang_ci-babysitter
+    platformId: dashboard:slang_ci-health
 memory: null
 archive: /home/ubuntu/haaggarwal/nanoclaw_v2/data/exports/agent-slang_ci-babysitter-2026-04-16-full.tar.gz

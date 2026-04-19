@@ -2,6 +2,7 @@
 name: base-triage
 type: workflow
 description: Triage an incoming issue, bug report, or task into a subsystem + severity + next-step report. Use when a new issue is assigned, when a user says "triage this", or when a report needs to be classified and routed before any fix work.
+requires: [issue-tracker, code-read]
 uses:
   skills: []
   workflows: []
@@ -27,24 +28,24 @@ Project-agnostic triage. Specialize by picking the project's investigation skill
 
 ## Steps
 
-1. **Ingest** — read the target (`{{target}}`) end-to-end: description, comments, attachments, prior triage notes. Write a one-paragraph summary of the reported behavior.
+1. **Ingest** {#ingest} — read the target (`{{target}}`) end-to-end: description, comments, attachments, prior triage notes. Write a one-paragraph summary of the reported behavior.
 
-2. **Classify** — assign:
+2. **Classify** {#classify} — assign:
    - **Category** (bug / regression / feature / task / question / duplicate).
    - **Severity** (default `{{severityDefault}}`; raise with evidence).
    - **Affected surface** — subsystem, component, or area of the codebase/product.
 
-3. **Investigate** — use the calling workflow's declared skills to locate:
+3. **Investigate** {#investigate} — use the calling workflow's declared skills to locate:
    - Likely affected files or modules.
    - Related prior issues, PRs, or incidents.
    - A first reproduction hypothesis if applicable.
 
-4. **Decide next step** — exactly one of:
+4. **Decide next step** {#decide} — exactly one of:
    - **Ready for fix** — enough evidence to hand off to a fix workflow.
    - **Needs more info** — blockers listed, questions posed back to the reporter.
    - **Duplicate / won't-fix / out-of-scope** — with justification.
 
-5. **Report** — write the structured report to `{{triage_report.path}}`:
+5. **Report** {#report} — write the structured report to `{{triage_report.path}}`:
 
 ```md
 # Triage: <target>
@@ -60,7 +61,7 @@ Project-agnostic triage. Specialize by picking the project's investigation skill
 
    Append a line to `{{triage_index.path}}` linking the new report.
 
-6. **Summarize upstream** — post a concise (≤5 bullet) summary to whoever requested the triage. Link the full report. Do not paste the report body.
+6. **Summarize upstream** {#summarize} — post a concise (≤5 bullet) summary to whoever requested the triage. Link the full report. Do not paste the report body.
 
 ## Resumability
 

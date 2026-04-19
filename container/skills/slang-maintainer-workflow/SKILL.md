@@ -2,6 +2,8 @@
 name: slang-maintainer
 type: workflow
 description: Periodic Slang compiler maintainer sweep — scan open issues, PRs, CI health, and release-track status, producing a ranked action-first report. Use for scheduled maintainer check-ins or when asked "what needs attention across slang?". Specialization of `/base-sweep`.
+extends: base-sweep
+requires: [vcs-read, issue-tracker, ci-inspect]
 uses:
   skills: [slang-build, slang-explore, slang-github]
   workflows: [base-sweep]

@@ -10,4 +10,4 @@
 - `tests/` — test corpus. Ground truth for reproduction.
 - `tools/slang-test/`, `tools/render-test/` — test runners.
 - `CMakeLists.txt`, `CMakePresets.json`, `cmake/` — build. See `/slang-build` to build/test.
-- `.github/workflows/` — CI. See `/slang-ci-babysitter` for CI issues.
+- `.github/workflows/` — CI. See `/slang-ci-health` for CI issues.

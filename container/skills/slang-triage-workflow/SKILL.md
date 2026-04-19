@@ -2,6 +2,10 @@
 name: slang-triage
 type: workflow
 description: Triage an incoming Slang compiler issue into a subsystem + severity + next-step report. Use when a new GitHub issue is filed on shader-slang/slang or a user asks to triage a Slang bug. Specialization of /base-triage with Slang subsystem mapping.
+extends: base-triage
+requires: [issue-tracker, code-read]
+overrides:
+  investigate: "Use `/slang-explore` to map symptoms onto Slang subsystems (lexer, parser, semantic-check, IR, emit, reflection). Record one primary subsystem + up to two secondaries."
 uses:
   skills: [slang-github, slang-explore]
   workflows: [base-triage]

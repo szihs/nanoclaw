@@ -1,6 +1,7 @@
 ---
 name: slang-explore
 description: "Investigate the Slang compiler codebase before making changes. Trigger when you need to trace a feature through the pipeline, understand how code works, or plan an implementation. Read-only — no edits. Keywords: investigate, trace, explore, analyze, git log -S, pipeline."
+provides: [code-read, doc-read]
 allowed-tools: Bash, Read, Grep, Glob, mcp__deepwiki__ask_question
 ---
 

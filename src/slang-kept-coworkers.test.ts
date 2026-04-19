@@ -20,7 +20,7 @@ describe('kept slang coworker exports', () => {
     expect(files).toEqual([
       'dashboard_slang-fixer.yaml',
       'dashboard_slang-triage.yaml',
-      'slang_ci-babysitter.yaml',
+      'slang_ci-health.yaml',
       'slang_maintainer.yaml',
     ]);
   });
@@ -42,8 +42,8 @@ describe('kept slang coworker exports', () => {
         coworkerType: 'slang-maintainer',
         markers: ['# Slang Maintainer Workflow', '## Report Structure'],
       },
-      'coworkers/slang_ci-babysitter.yaml': {
-        coworkerType: 'slang-ci-babysitter',
+      'coworkers/slang_ci-health.yaml': {
+        coworkerType: 'slang-ci-health',
         markers: ['# Slang CI Babysitter', '## Merge Queue Recovery'],
       },
     };

@@ -1,6 +1,7 @@
 ---
 name: slang-patch
 description: "Implement a code change, bug fix, or new test in the Slang compiler. Trigger after investigation is complete and you know what to change. Requires /slang-build (repo built) and /slang-explore (code understood). Keywords: patch, implement, edit, branch, commit, test, write code."
+provides: [code-edit, test-gen]
 allowed-tools: Bash, Read, Write, Edit, Grep, Glob
 argument-hint: "[brief description of what to change]"
 ---

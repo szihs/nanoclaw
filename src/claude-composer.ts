@@ -71,15 +71,56 @@ export interface CoworkerTypeEntry {
   // Skill catalog references (SKILL.md `name` values under container/skills/).
   workflows?: string[];
   skills?: string[];
+
+  // Trait bindings: abstract trait name → concrete skill name that provides it.
+  // Leaf-wins across the type chain. Lets a type inherit a workflow that
+  // declares `requires: [vcs-pr]` without hard-coding which skill satisfies it.
+  bindings?: Record<string, string>;
+
+  // Overlays (SKILL.md `type: overlay` entries) to apply to this coworker's
+  // workflows at compose time. Union-merged across the type chain.
+  overlays?: string[];
+}
+
+export interface OverlayMeta {
+  // Which workflows this overlay attaches to (by workflow name).
+  appliesToWorkflows: string[];
+  // Alternative targeting: any workflow that requires one of these traits.
+  appliesToTraits: string[];
+  // Step-id anchors. Overlay body is inserted AFTER each listed step id.
+  insertAfter: string[];
+  // Step-id anchors. Overlay body is inserted BEFORE each listed step id.
+  insertBefore: string[];
+  // Inline step markdown (body of the overlay after the frontmatter).
+  step: string;
 }
 
 export interface SkillMeta {
   name: string;
-  type: 'capability' | 'workflow';
+  type: 'capability' | 'workflow' | 'overlay';
   description: string;
   allowedTools: string[];
   uses: { skills: string[]; workflows: string[] };
   path: string;
+
+  // Trait system.
+  provides: string[]; // Traits this skill provides (capability skills).
+  requires: string[]; // Traits this workflow needs (workflow skills).
+
+  // Workflow inheritance — this workflow extends another workflow;
+  // step-level `overrides` replace the body under the matching step id.
+  extendsWorkflow?: string;
+  overrides: Record<string, string>;
+
+  // Overlay metadata (only populated for type: overlay skills).
+  overlay?: OverlayMeta;
+}
+
+export interface WorkflowCustomization {
+  workflow: string; // Target workflow name.
+  kind: 'extends' | 'override' | 'overlay';
+  summary: string; // One-line description rendered into the spine.
+  detail?: string; // Optional longer form (step body / override body).
 }
 
 export interface CoworkerManifest {
@@ -88,9 +129,13 @@ export interface CoworkerManifest {
   identity: string;
   invariants: string[];
   context: string[];
-  workflows: { name: string; description: string; uses: string[] }[];
-  skills: { name: string; description: string }[];
+  workflows: { name: string; description: string; uses: string[]; requires: string[] }[];
+  skills: { name: string; description: string; provides: string[] }[];
   tools: string[];
+
+  // Trait layer.
+  bindings: Record<string, string>;
+  customizations: WorkflowCustomization[];
 }
 
 export interface ComposeClaudeMdOptions {
@@ -166,7 +211,8 @@ function parseSkillMeta(filePath: string): SkillMeta | null {
   const fm = raw as Record<string, unknown>;
   const name = typeof fm.name === 'string' ? fm.name.trim() : '';
   if (!name) return null;
-  const type = fm.type === 'workflow' ? 'workflow' : 'capability';
+  const type: SkillMeta['type'] =
+    fm.type === 'workflow' ? 'workflow' : fm.type === 'overlay' ? 'overlay' : 'capability';
   const description = typeof fm.description === 'string' ? fm.description.trim() : '';
   const allowedTools = extractAllowedTools(fm['allowed-tools']);
   const usesRaw = fm.uses && typeof fm.uses === 'object' ? (fm.uses as Record<string, unknown>) : {};
@@ -174,7 +220,47 @@ function parseSkillMeta(filePath: string): SkillMeta | null {
     skills: Array.isArray(usesRaw.skills) ? (usesRaw.skills as unknown[]).map(String) : [],
     workflows: Array.isArray(usesRaw.workflows) ? (usesRaw.workflows as unknown[]).map(String) : [],
   };
-  return { name, type, description, allowedTools, uses, path: filePath };
+
+  const provides = Array.isArray(fm.provides) ? (fm.provides as unknown[]).map(String) : [];
+  const requires = Array.isArray(fm.requires) ? (fm.requires as unknown[]).map(String) : [];
+  const extendsWorkflow = typeof fm.extends === 'string' ? fm.extends.trim() || undefined : undefined;
+
+  const overridesRaw =
+    fm.overrides && typeof fm.overrides === 'object' ? (fm.overrides as Record<string, unknown>) : {};
+  const overrides: Record<string, string> = {};
+  for (const [stepId, value] of Object.entries(overridesRaw)) {
+    if (typeof value === 'string') overrides[stepId] = value;
+  }
+
+  let overlay: OverlayMeta | undefined;
+  if (type === 'overlay') {
+    const appliesTo =
+      fm['applies-to'] && typeof fm['applies-to'] === 'object' ? (fm['applies-to'] as Record<string, unknown>) : {};
+    const insertAfter = Array.isArray(fm['insert-after']) ? (fm['insert-after'] as unknown[]).map(String) : [];
+    const insertBefore = Array.isArray(fm['insert-before']) ? (fm['insert-before'] as unknown[]).map(String) : [];
+    const body = text.slice(match[0].length).trim();
+    overlay = {
+      appliesToWorkflows: Array.isArray(appliesTo.workflows) ? (appliesTo.workflows as unknown[]).map(String) : [],
+      appliesToTraits: Array.isArray(appliesTo.traits) ? (appliesTo.traits as unknown[]).map(String) : [],
+      insertAfter,
+      insertBefore,
+      step: body,
+    };
+  }
+
+  return {
+    name,
+    type,
+    description,
+    allowedTools,
+    uses,
+    path: filePath,
+    provides,
+    requires,
+    extendsWorkflow,
+    overrides,
+    overlay,
+  };
 }
 
 function extractAllowedTools(raw: unknown): string[] {
@@ -269,6 +355,8 @@ export function resolveCoworkerManifest(
   const contextFiles: string[] = [];
   const workflowNames: string[] = [];
   const skillNames: string[] = [];
+  const overlayNames: string[] = [];
+  const bindings: Record<string, string> = {};
 
   for (const role of roles) {
     const chain = resolveTypeChain(types, role);
@@ -282,13 +370,21 @@ export function resolveCoworkerManifest(
       if (entry.context) contextFiles.push(...entry.context);
       if (entry.workflows) workflowNames.push(...entry.workflows);
       if (entry.skills) skillNames.push(...entry.skills);
+      if (entry.overlays) overlayNames.push(...entry.overlays);
+      if (entry.bindings) {
+        // Leaf wins: later entries in the chain override earlier bindings for
+        // the same trait. Chain order goes ancestors → descendants.
+        for (const [trait, skillName] of Object.entries(entry.bindings)) {
+          bindings[trait] = skillName;
+        }
+      }
     }
     if (leafIdentity) identityParts.push(leafIdentity);
   }
 
   // Validate references. Actionable errors naming the exact offender.
   const unknownRefs: string[] = [];
-  for (const name of [...workflowNames, ...skillNames]) {
+  for (const name of [...workflowNames, ...skillNames, ...overlayNames]) {
     if (!catalog[name]) unknownRefs.push(name);
   }
   if (unknownRefs.length > 0) {
@@ -303,21 +399,118 @@ export function resolveCoworkerManifest(
   const invariants = readFragments(dedupRelative(invariantFiles, projectRoot), projectRoot);
   const context = readFragments(dedupRelative(contextFiles, projectRoot), projectRoot);
 
-  // Classify workflow vs skill by the catalog's declared type.
+  // Classify workflow vs skill by the catalog's declared type. Overlays are
+  // not directly invocable; they appear in ## Workflow Customizations only.
   const workflowEntries: CoworkerManifest['workflows'] = [];
   const skillEntries: CoworkerManifest['skills'] = [];
   const uniqueRefs = [...new Set([...workflowNames, ...skillNames])];
+  const workflowSet = new Set<string>();
   for (const name of uniqueRefs) {
     const meta = catalog[name];
     if (meta.type === 'workflow') {
       const uses = [...meta.uses.skills, ...meta.uses.workflows];
-      workflowEntries.push({ name: meta.name, description: meta.description, uses });
-    } else {
-      skillEntries.push({ name: meta.name, description: meta.description });
+      workflowEntries.push({ name: meta.name, description: meta.description, uses, requires: meta.requires });
+      workflowSet.add(meta.name);
+    } else if (meta.type === 'capability') {
+      skillEntries.push({ name: meta.name, description: meta.description, provides: meta.provides });
     }
   }
 
-  // Derive tool allowlist: direct refs + transitive workflow `uses`.
+  // Validate bindings. For every required trait on every workflow, either a
+  // concrete skill that `provides:` the trait must be directly in the skill
+  // set, or the coworker type must `bindings: { trait → skill }` to one.
+  const requiredTraits = new Set<string>();
+  for (const wf of workflowEntries) {
+    for (const trait of wf.requires) requiredTraits.add(trait);
+  }
+  const directlyProvided = new Map<string, string>();
+  for (const s of skillEntries) {
+    for (const trait of s.provides) {
+      if (!directlyProvided.has(trait)) directlyProvided.set(trait, s.name);
+    }
+  }
+  const resolvedBindings: Record<string, string> = { ...bindings };
+  const unresolvedTraits: string[] = [];
+  for (const trait of requiredTraits) {
+    if (resolvedBindings[trait]) {
+      const skill = catalog[resolvedBindings[trait]];
+      if (!skill) {
+        throw new Error(
+          `Coworker type "${typeName}" binds trait "${trait}" → "${resolvedBindings[trait]}" but that skill is not in the catalog.`,
+        );
+      }
+      if (!skill.provides.includes(trait)) {
+        throw new Error(
+          `Coworker type "${typeName}" binds trait "${trait}" → "${skill.name}", but "${skill.name}" does not declare \`provides: [${trait}]\` in its frontmatter.`,
+        );
+      }
+    } else if (directlyProvided.has(trait)) {
+      resolvedBindings[trait] = directlyProvided.get(trait)!;
+    } else {
+      unresolvedTraits.push(trait);
+    }
+  }
+  if (unresolvedTraits.length > 0) {
+    throw new Error(
+      `Coworker type "${typeName}" requires trait(s) with no binding: ${[...new Set(unresolvedTraits)].join(', ')}. ` +
+        `Either include a skill whose frontmatter declares \`provides: [<trait>]\`, or add a \`bindings: { <trait>: <skill-name> }\` mapping to the coworker type.`,
+    );
+  }
+
+  // Collect workflow customizations: extends-chains, overrides, and overlays.
+  const customizations: WorkflowCustomization[] = [];
+  for (const wf of workflowEntries) {
+    const meta = catalog[wf.name];
+    if (meta.extendsWorkflow) {
+      customizations.push({
+        workflow: wf.name,
+        kind: 'extends',
+        summary: `\`/${wf.name}\` extends \`/${meta.extendsWorkflow}\` — run base steps, then the specialized steps.`,
+      });
+    }
+    for (const [stepId, body] of Object.entries(meta.overrides)) {
+      customizations.push({
+        workflow: wf.name,
+        kind: 'override',
+        summary: `In \`/${wf.name}\`, step \`${stepId}\` is overridden.`,
+        detail: body.trim(),
+      });
+    }
+  }
+  const uniqueOverlayNames = [...new Set(overlayNames)];
+  for (const overlayName of uniqueOverlayNames) {
+    const overlayMeta = catalog[overlayName];
+    if (!overlayMeta || overlayMeta.type !== 'overlay' || !overlayMeta.overlay) {
+      throw new Error(
+        `Coworker type "${typeName}" references overlay "${overlayName}" but it is not a \`type: overlay\` SKILL.md.`,
+      );
+    }
+    const overlay = overlayMeta.overlay;
+    const targets = new Set<string>();
+    for (const wfName of overlay.appliesToWorkflows) {
+      if (workflowSet.has(wfName)) targets.add(wfName);
+    }
+    for (const wf of workflowEntries) {
+      for (const trait of wf.requires) {
+        if (overlay.appliesToTraits.includes(trait)) targets.add(wf.name);
+      }
+    }
+    for (const target of targets) {
+      const anchors: string[] = [];
+      for (const step of overlay.insertAfter) anchors.push(`after step \`${step}\``);
+      for (const step of overlay.insertBefore) anchors.push(`before step \`${step}\``);
+      const where = anchors.length > 0 ? anchors.join(' and ') : 'at the end';
+      customizations.push({
+        workflow: target,
+        kind: 'overlay',
+        summary: `\`/${target}\` is augmented by \`${overlayName}\` ${where}.`,
+        detail: overlay.step,
+      });
+    }
+  }
+
+  // Derive tool allowlist: direct refs + transitive workflow `uses` + bound
+  // trait skills + overlays that attach to any referenced workflow.
   const tools = new Set<string>();
   const visited = new Set<string>();
   function collectTools(ref: string): void {
@@ -328,9 +521,12 @@ export function resolveCoworkerManifest(
     for (const t of meta.allowedTools) tools.add(t);
     if (meta.type === 'workflow') {
       for (const sub of [...meta.uses.skills, ...meta.uses.workflows]) collectTools(sub);
+      if (meta.extendsWorkflow) collectTools(meta.extendsWorkflow);
     }
   }
   for (const name of uniqueRefs) collectTools(name);
+  for (const skillName of Object.values(resolvedBindings)) collectTools(skillName);
+  for (const overlayName of uniqueOverlayNames) collectTools(overlayName);
 
   const title = humanize(roles[roles.length - 1]);
 
@@ -343,6 +539,8 @@ export function resolveCoworkerManifest(
     workflows: workflowEntries,
     skills: skillEntries,
     tools: [...tools].sort(),
+    bindings: resolvedBindings,
+    customizations,
   };
 }
 
@@ -383,6 +581,14 @@ function defaultIdentity(title: string): string {
   return `You are ${title}, a specialist coworker.`;
 }
 
+function indentBlock(text: string, spaces: number): string {
+  const pad = ' '.repeat(spaces);
+  return text
+    .split('\n')
+    .map((line) => (line.length === 0 ? '' : pad + line))
+    .join('\n');
+}
+
 // ---------------------------------------------------------------------------
 // Spine composition (typed coworker CLAUDE.md)
 // ---------------------------------------------------------------------------
@@ -418,7 +624,8 @@ function composeCoworkerSpine(
       manifest.workflows
         .map((w) => {
           const uses = w.uses.length > 0 ? ` Uses: ${w.uses.join(', ')}.` : '';
-          return `- \`/${w.name}\` — ${w.description}${uses}`;
+          const requires = w.requires.length > 0 ? ` Requires traits: ${w.requires.join(', ')}.` : '';
+          return `- \`/${w.name}\` — ${w.description}${uses}${requires}`;
         })
         .join('\n'),
     );
@@ -426,7 +633,33 @@ function composeCoworkerSpine(
 
   if (manifest.skills.length > 0) {
     parts.push('## Skills Available');
-    parts.push(manifest.skills.map((s) => `- \`/${s.name}\` — ${s.description}`).join('\n'));
+    parts.push(
+      manifest.skills
+        .map((s) => {
+          const provides = s.provides.length > 0 ? ` Provides: ${s.provides.join(', ')}.` : '';
+          return `- \`/${s.name}\` — ${s.description}${provides}`;
+        })
+        .join('\n'),
+    );
+  }
+
+  const bindingKeys = Object.keys(manifest.bindings).sort();
+  if (bindingKeys.length > 0) {
+    parts.push('## Trait Bindings');
+    parts.push(bindingKeys.map((trait) => `- \`${trait}\` → \`/${manifest.bindings[trait]}\``).join('\n'));
+  }
+
+  if (manifest.customizations.length > 0) {
+    parts.push('## Workflow Customizations');
+    const blocks: string[] = [];
+    for (const c of manifest.customizations) {
+      if (c.detail && c.detail.trim()) {
+        blocks.push(`- ${c.summary}\n\n${indentBlock(c.detail.trim(), 2)}`);
+      } else {
+        blocks.push(`- ${c.summary}`);
+      }
+    }
+    parts.push(blocks.join('\n\n'));
   }
 
   if (manifest.workflows.length > 0 || manifest.skills.length > 0) {

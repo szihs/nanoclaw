@@ -2,6 +2,12 @@
 name: slang-fix
 type: workflow
 description: "Turn a triaged Slang compiler issue into a reproducing test, a minimal fix, and a PR-ready branch. Use after `/slang-triage` has produced a report with `status: ready-for-fix`. Specialization of `/base-fix` with Slang build + test conventions."
+extends: base-fix
+requires: [code-read, code-edit, test-run, vcs-pr]
+overrides:
+  reproduce: "Extract the failing case into `tests/bugs/issue-{{issueNumber}}.slang` (or the category directory implied by triage's subsystem mapping). Commit the failing test first so CI can show the delta."
+  patch: "Use `/slang-patch` to implement the minimum change. Keep the patch inside one subsystem when possible. If the cause spans subsystems, stop and re-triage."
+  validate: "Rebuild with `/slang-build`, then run `./build/Debug/bin/slang-test tests/bugs/issue-{{issueNumber}}.slang` and `./extras/formatting.sh`. Run the wider affected test category (e.g. `tests/compute/`) and confirm no regressions."
 uses:
   skills: [slang-build, slang-explore, slang-github, slang-patch]
   workflows: [base-fix]

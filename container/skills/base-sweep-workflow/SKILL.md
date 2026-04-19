@@ -2,6 +2,7 @@
 name: base-sweep
 type: workflow
 description: Periodic scan across a set of repos, channels, or sources to produce a ranked, action-first summary. Use when asked for a status report, weekly sweep, or "catch me up" across multiple sources. Not for deep-diving a single issue.
+requires: [vcs-read, issue-tracker]
 uses:
   skills: []
   workflows: []
@@ -28,18 +29,18 @@ Project-agnostic recurring sweep. Specialize by declaring the project's source s
 
 ## Steps
 
-1. **Determine window** — if `{{since}}` is set, use it. Otherwise read `{{sweep_index.path}}` for the last sweep timestamp; fall back to 7 days.
+1. **Determine window** {#window} — if `{{since}}` is set, use it. Otherwise read `{{sweep_index.path}}` for the last sweep timestamp; fall back to 7 days.
 
-2. **Collect** — for each source in `{{scope}}`, enumerate items updated in the window. Use the calling workflow's declared skills.
+2. **Collect** {#collect} — for each source in `{{scope}}`, enumerate items updated in the window. Use the calling workflow's declared skills.
 
-3. **Filter + rank** — drop items that need no attention. Rank remaining by impact × recency × blocked-on-us. Take top `{{topK}}`.
+3. **Filter + rank** {#rank} — drop items that need no attention. Rank remaining by impact × recency × blocked-on-us. Take top `{{topK}}`.
 
-4. **Propose action** — for each surfaced item, write one of:
+4. **Propose action** {#propose} — for each surfaced item, write one of:
    - `action: <concrete next step>` — route to the right workflow or person.
    - `watch` — keep tracking, no action this cycle.
    - `stale` — should be closed or revisited; do not close from sweep.
 
-5. **Write the report** to `{{sweep_report.path}}`:
+5. **Write the report** {#report} to `{{sweep_report.path}}`:
 
 ```md
 # Sweep: {{scope}} ({{sweep_date}})
@@ -56,4 +57,4 @@ Project-agnostic recurring sweep. Specialize by declaring the project's source s
 
    Append the sweep to `{{sweep_index.path}}`.
 
-6. **Summarize upstream** — post the top 3 items with proposed actions. Link the full report. Do not paste appendix.
+6. **Summarize upstream** {#summarize} — post the top 3 items with proposed actions. Link the full report. Do not paste appendix.

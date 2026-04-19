@@ -2,6 +2,7 @@
 name: base-fix
 type: workflow
 description: Take a triaged issue (or well-scoped fix request) from reproduction through minimal patch, tests, and PR-ready state. Use after triage is complete and a fix is authorized. Do not use for exploratory investigation — that is triage's job.
+requires: [code-read, code-edit, test-run, vcs-pr]
 uses:
   skills: []
   workflows: [base-triage]
@@ -28,19 +29,19 @@ Project-agnostic fix lifecycle. Specialize by declaring the project's build + ex
 
 ## Steps
 
-1. **Load context** — read the triage report for `{{target}}`. If none exists, run `/base-triage` first; do not proceed without one.
+1. **Load context** {#load-context} — read the triage report for `{{target}}`. If none exists, run `/base-triage` first; do not proceed without one.
 
-2. **Reproduce** — create a minimal repro:
+2. **Reproduce** {#reproduce} — create a minimal repro:
    - A failing test is the preferred form. Commit it first.
    - If a test cannot express the failure, write a step-by-step repro into `{{fix_log.path}}`.
 
-3. **Root-cause** — investigate until the cause is identified with evidence (file + line + mechanism). Record the finding in `{{fix_log.path}}`. If the cause ends up broader than the triage suggested, stop and re-triage.
+3. **Root-cause** {#root-cause} — investigate until the cause is identified with evidence (file + line + mechanism). Record the finding in `{{fix_log.path}}`. If the cause ends up broader than the triage suggested, stop and re-triage.
 
-4. **Patch** — implement the minimum change. Keep unrelated edits out. If the patch touches more than 3 areas, reconsider scope.
+4. **Patch** {#patch} — implement the minimum change. Keep unrelated edits out. If the patch touches more than 3 areas, reconsider scope.
 
-5. **Validate** — run the project test suite + format/lint/typecheck. Re-run the repro test: it must now pass. Add additional tests for adjacent cases only if they catch real regressions.
+5. **Validate** {#validate} — run the project test suite + format/lint/typecheck. Re-run the repro test: it must now pass. Add additional tests for adjacent cases only if they catch real regressions.
 
-6. **Commit + prepare PR** — descriptive commit message referencing `{{target}}`. Fill in `{{fix_log.path}}` with: root cause, patch summary, test coverage, risks. PR body summarizes the log — does not paste it.
+6. **Commit + prepare PR** {#commit} — descriptive commit message referencing `{{target}}`. Fill in `{{fix_log.path}}` with: root cause, patch summary, test coverage, risks. PR body summarizes the log — does not paste it.
 
 ## Handoff
 

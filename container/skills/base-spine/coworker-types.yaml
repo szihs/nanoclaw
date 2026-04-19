@@ -15,8 +15,14 @@ base-common:
     - container/skills/base-spine/context/invocation.md
   skills:
     - base-nanoclaw
+    - deep-research
+  # Workflows that every project type can reasonably run. Write-capable
+  # workflows (base-fix, base-docs, base-test-gen, base-pr-update) are
+  # opt-in per type — they require `code-edit` / `doc-write` / `test-gen`
+  # bindings that only write-capable types declare.
   workflows:
     - base-triage
-    - base-fix
     - base-review
     - base-sweep
+    - base-ci-health
+    - base-research

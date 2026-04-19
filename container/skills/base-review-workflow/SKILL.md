@@ -2,6 +2,7 @@
 name: base-review
 type: workflow
 description: Review a proposed change (PR, diff, or patch) against project conventions and produce actionable feedback. Use when asked to review, critique, or approve a change. Do not use for investigation of an open bug — that is triage's job.
+requires: [vcs-read, code-read]
 uses:
   skills: []
   workflows: []
@@ -26,19 +27,19 @@ Project-agnostic review. Specialize by declaring the project's code-navigation s
 
 ## Steps
 
-1. **Load the change** — read the full diff for `{{target}}`. Identify the intent (commit message, PR description, linked issue).
+1. **Load the change** {#load} — read the full diff for `{{target}}`. Identify the intent (commit message, PR description, linked issue).
 
-2. **Map impact** — list files changed, subsystems touched, and externally visible surface (APIs, config, schemas).
+2. **Map impact** {#map} — list files changed, subsystems touched, and externally visible surface (APIs, config, schemas).
 
-3. **Assess** each file in the diff:
+3. **Assess** {#assess} each file in the diff:
    - **Security** — input validation, auth, secret handling, injection vectors.
    - **Correctness** — matches stated intent; edge cases handled; no off-by-one / null / race.
    - **Performance** — obvious hot-path issues only; no speculation.
    - **Style** — project convention, naming, comments only when they add information.
 
-4. **Check tests** — does the change include tests proportionate to risk? Do they cover the intent, not just the implementation?
+4. **Check tests** {#check-tests} — does the change include tests proportionate to risk? Do they cover the intent, not just the implementation?
 
-5. **Write the review** to `{{review_log.path}}`:
+5. **Write the review** {#write} to `{{review_log.path}}`:
 
 ```md
 # Review: <target>
@@ -49,7 +50,7 @@ Project-agnostic review. Specialize by declaring the project's code-navigation s
 - questions: <list>
 ```
 
-6. **Post upstream** — submit review comments at the concrete lines. Use the log's `verdict` as the overall state. Do not paste the log.
+6. **Post upstream** {#post} — submit review comments at the concrete lines. Use the log's `verdict` as the overall state. Do not paste the log.
 
 ## Handoff
 
