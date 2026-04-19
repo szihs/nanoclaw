@@ -158,12 +158,11 @@ function buildConversationConfigs(channelType: string): ConversationConfig[] {
   for (const mg of groups) {
     const agents = getMessagingGroupAgents(mg.id);
     for (const agent of agents) {
-      const triggerRules = agent.trigger_rules ? JSON.parse(agent.trigger_rules) : null;
       configs.push({
         platformId: mg.platform_id,
         agentGroupId: agent.agent_group_id,
-        triggerPattern: triggerRules?.pattern,
-        requiresTrigger: triggerRules?.requiresTrigger ?? false,
+        engageMode: agent.engage_mode,
+        engagePattern: agent.engage_pattern,
         sessionMode: agent.session_mode,
       });
     }

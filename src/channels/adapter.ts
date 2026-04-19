@@ -9,8 +9,19 @@
 export interface ConversationConfig {
   platformId: string;
   agentGroupId: string;
-  triggerPattern?: string; // regex string (for native channels)
-  requiresTrigger: boolean;
+  /**
+   * When does the agent engage on messages from this conversation?
+   *
+   *   'pattern'        — regex test against message text; engagePattern='.'
+   *                      means "always" (match everything)
+   *   'mention'        — fires only on @mention
+   *   'mention-sticky' — fires on @mention, then auto-subscribes to the thread
+   *                      and treats subsequent messages as engage-all.
+   *                      Threaded platforms only (Slack/Discord/Linear).
+   */
+  engageMode: 'pattern' | 'mention' | 'mention-sticky';
+  /** Regex source when engageMode='pattern'. '.' is the "always" sentinel. */
+  engagePattern?: string | null;
   sessionMode: 'shared' | 'per-thread' | 'agent-shared';
 }
 

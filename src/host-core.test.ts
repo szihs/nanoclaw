@@ -199,8 +199,10 @@ describe('router', () => {
       id: 'mga-1',
       messaging_group_id: 'mg-1',
       agent_group_id: 'ag-1',
-      trigger_rules: null,
-      response_scope: 'all',
+      engage_mode: 'pattern',
+      engage_pattern: '.',
+      sender_scope: 'all',
+      ignored_message_policy: 'drop',
       session_mode: 'shared',
       priority: 0,
       created_at: now(),
@@ -294,6 +296,106 @@ describe('router', () => {
     db.close();
 
     expect(rows).toHaveLength(2);
+  });
+
+  it('fans out to every matching agent, each in its own session', async () => {
+    const { routeInbound } = await import('./router.js');
+    const { wakeContainer } = await import('./container-runner.js');
+    (wakeContainer as unknown as ReturnType<typeof vi.fn>).mockClear();
+
+    // Wire a second agent to the same messaging group.
+    createAgentGroup({
+      id: 'ag-2',
+      name: 'Secondary Agent',
+      folder: 'secondary-agent',
+      agent_provider: null,
+      created_at: now(),
+    });
+    createMessagingGroupAgent({
+      id: 'mga-2',
+      messaging_group_id: 'mg-1',
+      agent_group_id: 'ag-2',
+      engage_mode: 'pattern',
+      engage_pattern: '.',
+      sender_scope: 'all',
+      ignored_message_policy: 'drop',
+      session_mode: 'shared',
+      priority: 0,
+      created_at: now(),
+    });
+
+    await routeInbound({
+      channelType: 'discord',
+      platformId: 'chan-123',
+      threadId: null,
+      message: { id: 'msg-fan', kind: 'chat', content: JSON.stringify({ text: 'hello all' }), timestamp: now() },
+    });
+
+    // Both agents should now have their own session and be woken.
+    expect(wakeContainer).toHaveBeenCalledTimes(2);
+
+    const { getSessionsByAgentGroup } = await import('./db/sessions.js');
+    expect(getSessionsByAgentGroup('ag-1')).toHaveLength(1);
+    expect(getSessionsByAgentGroup('ag-2')).toHaveLength(1);
+  });
+
+  it('accumulates without waking when engage fails + ignored_message_policy=accumulate', async () => {
+    const { routeInbound } = await import('./router.js');
+    const { wakeContainer } = await import('./container-runner.js');
+    (wakeContainer as unknown as ReturnType<typeof vi.fn>).mockClear();
+
+    // Replace the seed row with a mention-only wiring whose accumulate
+    // policy should store context even when the message doesn't mention us.
+    const { updateMessagingGroupAgent } = await import('./db/messaging-groups.js');
+    updateMessagingGroupAgent('mga-1', {
+      engage_mode: 'mention',
+      ignored_message_policy: 'accumulate',
+    });
+
+    await routeInbound({
+      channelType: 'discord',
+      platformId: 'chan-123',
+      threadId: null,
+      message: {
+        id: 'msg-nomatch',
+        kind: 'chat',
+        content: JSON.stringify({ text: 'no mention here' }),
+        timestamp: now(),
+      },
+    });
+
+    expect(wakeContainer).not.toHaveBeenCalled();
+
+    const session = findSession('mg-1', null);
+    expect(session).toBeDefined();
+    const db = new Database(inboundDbPath('ag-1', session!.id));
+    const rows = db.prepare('SELECT id, trigger FROM messages_in').all() as Array<{
+      id: string;
+      trigger: number;
+    }>;
+    db.close();
+    expect(rows).toHaveLength(1);
+    expect(rows[0].trigger).toBe(0);
+  });
+
+  it('drops silently when engage fails + ignored_message_policy=drop', async () => {
+    const { routeInbound } = await import('./router.js');
+    const { wakeContainer } = await import('./container-runner.js');
+    (wakeContainer as unknown as ReturnType<typeof vi.fn>).mockClear();
+
+    const { updateMessagingGroupAgent } = await import('./db/messaging-groups.js');
+    updateMessagingGroupAgent('mga-1', { engage_mode: 'mention' }); // drop is the default
+
+    await routeInbound({
+      channelType: 'discord',
+      platformId: 'chan-123',
+      threadId: null,
+      message: { id: 'msg-drop', kind: 'chat', content: JSON.stringify({ text: 'ignored' }), timestamp: now() },
+    });
+
+    expect(wakeContainer).not.toHaveBeenCalled();
+    // No session should have been created for this agent.
+    expect(findSession('mg-1', null)).toBeUndefined();
   });
 });
 

@@ -195,8 +195,13 @@ async function main(): Promise<void> {
       id: generateId('mga'),
       messaging_group_id: mg.id,
       agent_group_id: ag.id,
-      trigger_rules: null,
-      response_scope: 'all',
+      // DM (is_group=0) defaults to "respond to everything" via the '.' pattern.
+      // Group chats default to mention-only; admins can upgrade to
+      // mention-sticky via /manage-channels once the agent is in use.
+      engage_mode: mg.is_group === 0 ? 'pattern' : 'mention',
+      engage_pattern: mg.is_group === 0 ? '.' : null,
+      sender_scope: 'all',
+      ignored_message_policy: 'drop',
       session_mode: 'shared',
       priority: 0,
       created_at: now,
@@ -248,8 +253,11 @@ async function main(): Promise<void> {
       id: generateId('mga'),
       messaging_group_id: cliMg.id,
       agent_group_id: ag.id,
-      trigger_rules: null,
-      response_scope: 'all',
+      // CLI is a local single-user DM — always respond.
+      engage_mode: 'pattern',
+      engage_pattern: '.',
+      sender_scope: 'all',
+      ignored_message_policy: 'drop',
       session_mode: 'shared',
       priority: 0,
       created_at: now,

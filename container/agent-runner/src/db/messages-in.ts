@@ -18,16 +18,33 @@ export interface MessageInRow {
   process_after: string | null;
   recurrence: string | null;
   tries: number;
+  /** 1 = wake-eligible (default); 0 = accumulated context only */
+  trigger: number;
   platform_id: string | null;
   channel_type: string | null;
   thread_id: string | null;
   content: string;
 }
 
+// Cap on how many messages reach the agent in one prompt, including any
+// accumulated-but-not-triggered context. Host controls the cap via the
+// NANOCLAW_MAX_MESSAGES_PER_PROMPT env var; default mirrors the host's
+// config.ts default of 10.
+const MAX_MESSAGES_PER_PROMPT = Math.max(
+  1,
+  parseInt(process.env.NANOCLAW_MAX_MESSAGES_PER_PROMPT || '10', 10) || 10,
+);
+
 /**
  * Fetch pending messages that are due for processing.
  * Reads from inbound.db (read-only), filters against processing_ack in outbound.db
  * to skip messages already picked up by this or a previous container run.
+ *
+ * Returns the most recent `MAX_MESSAGES_PER_PROMPT` pending rows in
+ * chronological order, regardless of their `trigger` flag: accumulated
+ * context (trigger=0) rides along with the wake-eligible rows so the agent
+ * sees the prior context it missed. Host's countDueMessages gates waking on
+ * trigger=1 separately (see src/db/session-db.ts).
  */
 export function getPendingMessages(): MessageInRow[] {
   const inbound = getInboundDb();
@@ -38,9 +55,10 @@ export function getPendingMessages(): MessageInRow[] {
       `SELECT * FROM messages_in
        WHERE status = 'pending'
          AND (process_after IS NULL OR datetime(process_after) <= datetime('now'))
-       ORDER BY timestamp ASC`,
+       ORDER BY seq DESC
+       LIMIT ?`,
     )
-    .all() as MessageInRow[];
+    .all(MAX_MESSAGES_PER_PROMPT) as MessageInRow[];
 
   if (pending.length === 0) return [];
 
@@ -51,7 +69,9 @@ export function getPendingMessages(): MessageInRow[] {
     ),
   );
 
-  return pending.filter((m) => !ackedIds.has(m.id));
+  // Reverse: we fetched DESC to take the most recent N, but the agent
+  // should see them in chronological order (oldest first).
+  return pending.filter((m) => !ackedIds.has(m.id)).reverse();
 }
 
 /** Mark messages as processing — writes to processing_ack in outbound.db. */

@@ -30,16 +30,23 @@ CREATE TABLE messaging_groups (
   UNIQUE(channel_type, platform_id)
 );
 
--- Which agent groups handle which messaging groups
+-- Which agent groups handle which messaging groups.
+-- engage_mode / engage_pattern / sender_scope / ignored_message_policy are
+-- the four orthogonal axes that together replace v1's opaque trigger_rules
+-- JSON + response_scope enum. See docs/v1-vs-v2/ACTION-ITEMS.md item 1.
 CREATE TABLE messaging_group_agents (
-  id                 TEXT PRIMARY KEY,
-  messaging_group_id TEXT NOT NULL REFERENCES messaging_groups(id),
-  agent_group_id     TEXT NOT NULL REFERENCES agent_groups(id),
-  trigger_rules      TEXT,
-  response_scope     TEXT DEFAULT 'all',
-  session_mode       TEXT DEFAULT 'shared',
-  priority           INTEGER DEFAULT 0,
-  created_at         TEXT NOT NULL,
+  id                     TEXT PRIMARY KEY,
+  messaging_group_id     TEXT NOT NULL REFERENCES messaging_groups(id),
+  agent_group_id         TEXT NOT NULL REFERENCES agent_groups(id),
+  engage_mode            TEXT NOT NULL DEFAULT 'mention',
+                         -- 'pattern' | 'mention' | 'mention-sticky'
+  engage_pattern         TEXT,   -- regex; required when engage_mode='pattern';
+                                 -- '.' means "match every message" (the "always" flavor)
+  sender_scope           TEXT NOT NULL DEFAULT 'all',    -- 'all' | 'known'
+  ignored_message_policy TEXT NOT NULL DEFAULT 'drop',   -- 'drop' | 'accumulate'
+  session_mode           TEXT DEFAULT 'shared',
+  priority               INTEGER DEFAULT 0,
+  created_at             TEXT NOT NULL,
   UNIQUE(messaging_group_id, agent_group_id)
 );
 
@@ -138,6 +145,8 @@ CREATE TABLE IF NOT EXISTS messages_in (
   recurrence     TEXT,
   series_id      TEXT,
   tries          INTEGER DEFAULT 0,
+  trigger        INTEGER NOT NULL DEFAULT 1,
+                 -- 0 = accumulated context (don't wake), 1 = wake agent
   platform_id    TEXT,
   channel_type   TEXT,
   thread_id      TEXT,

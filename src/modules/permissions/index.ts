@@ -16,9 +16,15 @@
  * access gate is not registered and core defaults to allow-all.
  */
 import { recordDroppedMessage } from '../../db/dropped-messages.js';
-import { setAccessGate, setSenderResolver, type AccessGateResult, type InboundEvent } from '../../router.js';
+import {
+  setAccessGate,
+  setSenderResolver,
+  setSenderScopeGate,
+  type AccessGateResult,
+  type InboundEvent,
+} from '../../router.js';
 import { log } from '../../log.js';
-import type { MessagingGroup } from '../../types.js';
+import type { MessagingGroup, MessagingGroupAgent } from '../../types.js';
 import { canAccessAgentGroup } from './access.js';
 import { getUser, upsertUser } from './db/users.js';
 
@@ -132,3 +138,21 @@ setAccessGate((event, userId, mg, agentGroupId): AccessGateResult => {
   handleUnknownSender(mg, userId, agentGroupId, decision.reason, event);
   return { allowed: false, reason: decision.reason };
 });
+
+/**
+ * Per-wiring sender-scope enforcement. Stricter than the messaging-group
+ * `unknown_sender_policy` — a wiring can require `sender_scope='known'`
+ * (explicit owner / admin / member) even on a 'public' messaging group.
+ *
+ * 'all' is a no-op; any sender passes. 'known' requires a userId that
+ * canAccessAgentGroup accepts (owner, admin, or group member).
+ */
+setSenderScopeGate(
+  (_event: InboundEvent, userId: string | null, _mg: MessagingGroup, agent: MessagingGroupAgent): AccessGateResult => {
+    if (agent.sender_scope === 'all') return { allowed: true };
+    if (!userId) return { allowed: false, reason: 'unknown_user_scope' };
+    const decision = canAccessAgentGroup(userId, agent.agent_group_id);
+    if (decision.allowed) return { allowed: true };
+    return { allowed: false, reason: `sender_scope_${decision.reason}` };
+  },
+);

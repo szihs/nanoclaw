@@ -87,8 +87,16 @@ export function deleteMessagingGroup(id: string): void {
 export function createMessagingGroupAgent(mga: MessagingGroupAgent): void {
   getDb()
     .prepare(
-      `INSERT INTO messaging_group_agents (id, messaging_group_id, agent_group_id, trigger_rules, response_scope, session_mode, priority, created_at)
-       VALUES (@id, @messaging_group_id, @agent_group_id, @trigger_rules, @response_scope, @session_mode, @priority, @created_at)`,
+      `INSERT INTO messaging_group_agents (
+         id, messaging_group_id, agent_group_id,
+         engage_mode, engage_pattern, sender_scope, ignored_message_policy,
+         session_mode, priority, created_at
+       )
+       VALUES (
+         @id, @messaging_group_id, @agent_group_id,
+         @engage_mode, @engage_pattern, @sender_scope, @ignored_message_policy,
+         @session_mode, @priority, @created_at
+       )`,
     )
     .run(mga);
 
@@ -160,7 +168,12 @@ export function getMessagingGroupAgent(id: string): MessagingGroupAgent | undefi
 
 export function updateMessagingGroupAgent(
   id: string,
-  updates: Partial<Pick<MessagingGroupAgent, 'trigger_rules' | 'response_scope' | 'session_mode' | 'priority'>>,
+  updates: Partial<
+    Pick<
+      MessagingGroupAgent,
+      'engage_mode' | 'engage_pattern' | 'sender_scope' | 'ignored_message_policy' | 'session_mode' | 'priority'
+    >
+  >,
 ): void {
   const fields: string[] = [];
   const values: Record<string, unknown> = { id };

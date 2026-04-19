@@ -27,6 +27,31 @@ export function findSession(messagingGroupId: string, threadId: string | null): 
     .get(messagingGroupId, 'active') as Session | undefined;
 }
 
+/**
+ * Session lookup scoped to a specific agent group. Needed when multiple
+ * agents are wired to the same messaging group + thread (fan-out) — the
+ * plain `findSession` would return whichever agent's session happened to
+ * be first and route to the wrong container.
+ */
+export function findSessionForAgent(
+  agentGroupId: string,
+  messagingGroupId: string,
+  threadId: string | null,
+): Session | undefined {
+  if (threadId) {
+    return getDb()
+      .prepare(
+        "SELECT * FROM sessions WHERE agent_group_id = ? AND messaging_group_id = ? AND thread_id = ? AND status = 'active'",
+      )
+      .get(agentGroupId, messagingGroupId, threadId) as Session | undefined;
+  }
+  return getDb()
+    .prepare(
+      "SELECT * FROM sessions WHERE agent_group_id = ? AND messaging_group_id = ? AND thread_id IS NULL AND status = 'active'",
+    )
+    .get(agentGroupId, messagingGroupId) as Session | undefined;
+}
+
 /** Find an active session scoped to an agent group (ignoring messaging group). */
 export function findSessionByAgentGroup(agentGroupId: string): Session | undefined {
   return getDb()

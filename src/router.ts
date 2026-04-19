@@ -18,14 +18,16 @@
  * for policy refusals.
  */
 import { getChannelAdapter } from './channels/channel-registry.js';
+import { getAgentGroup } from './db/agent-groups.js';
 import { recordDroppedMessage } from './db/dropped-messages.js';
 import { getMessagingGroupByPlatform, createMessagingGroup, getMessagingGroupAgents } from './db/messaging-groups.js';
+import { findSessionForAgent } from './db/sessions.js';
 import { startTypingRefresh } from './modules/typing/index.js';
 import { log } from './log.js';
 import { resolveSession, writeSessionMessage } from './session-manager.js';
 import { wakeContainer } from './container-runner.js';
 import { getSession } from './db/sessions.js';
-import type { MessagingGroup, MessagingGroupAgent } from './types.js';
+import type { AgentGroup, MessagingGroup, MessagingGroupAgent } from './types.js';
 
 function generateId(): string {
   return `msg-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -87,6 +89,29 @@ export function setAccessGate(fn: AccessGateFn): void {
     log.warn('Access gate overwritten');
   }
   accessGate = fn;
+}
+
+/**
+ * Per-wiring sender-scope hook. Runs alongside the access gate for each
+ * agent that would otherwise engage — lets the permissions module enforce
+ * `sender_scope='known'` on wirings that are stricter than the messaging
+ * group's `unknown_sender_policy`. When the hook isn't registered (module
+ * not installed), sender_scope is a no-op.
+ */
+export type SenderScopeGateFn = (
+  event: InboundEvent,
+  userId: string | null,
+  mg: MessagingGroup,
+  agent: MessagingGroupAgent,
+) => AccessGateResult;
+
+let senderScopeGate: SenderScopeGateFn | null = null;
+
+export function setSenderScopeGate(fn: SenderScopeGateFn): void {
+  if (senderScopeGate) {
+    log.warn('Sender-scope gate overwritten');
+  }
+  senderScopeGate = fn;
 }
 
 function safeParseContent(raw: string): { text?: string; sender?: string; senderId?: string } {
@@ -158,91 +183,167 @@ export async function routeInbound(event: InboundEvent): Promise<void> {
     return;
   }
 
-  const match = pickAgent(agents, event);
-  if (!match) {
-    log.warn('MESSAGE DROPPED — no agent matched trigger rules', {
-      messagingGroupId: mg.id,
-      channelType: event.channelType,
-    });
-    const parsed = safeParseContent(event.message.content);
+  // 4. Fan-out: evaluate each wired agent independently against engage_mode,
+  //    sender_scope, and access gate. An agent that engages gets its own
+  //    session and container wake. An agent that declines but has
+  //    ignored_message_policy='accumulate' still gets the message stored in
+  //    its session (trigger=0) so the context is available when it does
+  //    engage later. Drop policy = skip silently.
+  const parsed = safeParseContent(event.message.content);
+  const messageText = parsed.text ?? '';
+
+  let engagedCount = 0;
+  let accumulatedCount = 0;
+
+  for (const agent of agents) {
+    const agentGroup = getAgentGroup(agent.agent_group_id);
+    if (!agentGroup) continue;
+
+    const engages = evaluateEngage(agent, agentGroup, messageText, mg, event.threadId);
+
+    const accessOk = engages && (!accessGate || accessGate(event, userId, mg, agent.agent_group_id).allowed);
+    const scopeOk = engages && (!senderScopeGate || senderScopeGate(event, userId, mg, agent).allowed);
+
+    if (engages && accessOk && scopeOk) {
+      await deliverToAgent(agent, agentGroup, mg, event, userId, adapter?.supportsThreads === true, true);
+      engagedCount++;
+    } else if (agent.ignored_message_policy === 'accumulate') {
+      await deliverToAgent(agent, agentGroup, mg, event, userId, adapter?.supportsThreads === true, false);
+      accumulatedCount++;
+    } else {
+      log.debug('Message not engaged for agent (drop policy)', {
+        agentGroupId: agent.agent_group_id,
+        engage_mode: agent.engage_mode,
+        engages,
+        accessOk,
+        scopeOk,
+      });
+    }
+  }
+
+  if (engagedCount + accumulatedCount === 0) {
     recordDroppedMessage({
       channel_type: event.channelType,
       platform_id: event.platformId,
       user_id: userId,
       sender_name: parsed.sender ?? null,
-      reason: 'no_trigger_match',
+      reason: 'no_agent_engaged',
       messaging_group_id: mg.id,
       agent_group_id: null,
     });
-    return;
   }
+}
 
-  // 4. Access gate (if the permissions module is loaded). Otherwise
-  //    allow-all.
-  if (accessGate) {
-    const result = accessGate(event, userId, mg, match.agent_group_id);
-    if (!result.allowed) {
-      log.info('MESSAGE DROPPED — access gate refused', {
-        messagingGroupId: mg.id,
-        agentGroupId: match.agent_group_id,
-        userId,
-        reason: result.reason,
-      });
-      return;
+/**
+ * Decide whether a given wired agent should engage on this message.
+ *
+ *   'pattern'        — regex test on text; '.' = always
+ *   'mention'        — bot must be @-mentioned by its agent-group name
+ *   'mention-sticky' — @mention OR an active per-thread session already
+ *                      exists for this (agent, mg, thread). The session
+ *                      existence IS our subscription state; once a thread
+ *                      has engaged us once, follow-ups arrive with no
+ *                      mention and should still fire.
+ */
+function evaluateEngage(
+  agent: MessagingGroupAgent,
+  agentGroup: AgentGroup,
+  text: string,
+  mg: MessagingGroup,
+  threadId: string | null,
+): boolean {
+  switch (agent.engage_mode) {
+    case 'pattern': {
+      const pat = agent.engage_pattern ?? '.';
+      if (pat === '.') return true;
+      try {
+        return new RegExp(pat).test(text);
+      } catch {
+        // Bad regex: fail open so admin sees the agent responding + can fix.
+        return true;
+      }
     }
+    case 'mention':
+      return hasMention(text, agentGroup.name);
+    case 'mention-sticky': {
+      if (hasMention(text, agentGroup.name)) return true;
+      // Sticky follow-up: session already exists for this (agent, mg, thread)
+      // — the thread was activated before, keep firing.
+      if (mg.is_group === 0) return false; // DMs never use mention-sticky sensibly
+      const existing = findSessionForAgent(agent.agent_group_id, mg.id, threadId);
+      return existing !== undefined;
+    }
+    default:
+      return false;
   }
+}
 
-  // 5. Resolve or create session.
-  //
-  // Adapter thread policy overrides the wiring's session_mode: if the adapter
-  // is threaded, each thread gets its own session regardless of what the
-  // wiring says. Agent-shared is preserved because it expresses a
-  // cross-channel intent the adapter can't know about.
-  //
-  // Exception: DMs (is_group=0). Sub-threads within a DM are a UX affordance,
-  // not a conversation boundary — treat the whole DM as one session and let
-  // threadId flow through to delivery so replies land in the right sub-thread.
-  let effectiveSessionMode = match.session_mode;
-  if (adapter && adapter.supportsThreads && effectiveSessionMode !== 'agent-shared' && mg.is_group !== 0) {
+function hasMention(text: string, agentName: string): boolean {
+  if (!agentName) return false;
+  const escaped = agentName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return new RegExp(`@${escaped}\\b`, 'i').test(text);
+}
+
+async function deliverToAgent(
+  agent: MessagingGroupAgent,
+  agentGroup: AgentGroup,
+  mg: MessagingGroup,
+  event: InboundEvent,
+  userId: string | null,
+  adapterSupportsThreads: boolean,
+  wake: boolean,
+): Promise<void> {
+  // Apply the adapter thread policy: threaded adapter in a group chat →
+  // per-thread session regardless of wiring. agent-shared preserved (it's
+  // a cross-channel directive the adapter doesn't know about). DMs collapse
+  // sub-threads to one session (is_group=0 short-circuit).
+  let effectiveSessionMode = agent.session_mode;
+  if (adapterSupportsThreads && effectiveSessionMode !== 'agent-shared' && mg.is_group !== 0) {
     effectiveSessionMode = 'per-thread';
   }
-  const { session, created } = resolveSession(match.agent_group_id, mg.id, event.threadId, effectiveSessionMode);
 
-  // 6. Write message to session DB
+  const { session, created } = resolveSession(agent.agent_group_id, mg.id, event.threadId, effectiveSessionMode);
+
   writeSessionMessage(session.agent_group_id, session.id, {
-    id: event.message.id || generateId(),
+    id: messageIdForAgent(event.message.id, agent.agent_group_id),
     kind: event.message.kind,
     timestamp: event.message.timestamp,
     platformId: event.platformId,
     channelType: event.channelType,
     threadId: event.threadId,
     content: event.message.content,
+    trigger: wake ? 1 : 0,
   });
 
   log.info('Message routed', {
     sessionId: session.id,
-    agentGroup: match.agent_group_id,
+    agentGroup: agent.agent_group_id,
+    engage_mode: agent.engage_mode,
     kind: event.message.kind,
     userId,
+    wake,
     created,
+    agentGroupName: agentGroup.name,
   });
 
-  // 7. Show typing indicator while the agent processes.
-  startTypingRefresh(session.id, session.agent_group_id, event.channelType, event.platformId, event.threadId);
-
-  // 8. Wake container
-  const freshSession = getSession(session.id);
-  if (freshSession) {
-    await wakeContainer(freshSession);
+  if (wake) {
+    // Typing indicator + wake are only for the engaged branch; accumulated
+    // messages sit silently until a real trigger fires.
+    startTypingRefresh(session.id, session.agent_group_id, event.channelType, event.platformId, event.threadId);
+    const freshSession = getSession(session.id);
+    if (freshSession) {
+      await wakeContainer(freshSession);
+    }
   }
 }
 
 /**
- * Pick the matching agent for an inbound event.
- * Currently: highest priority agent. Future: trigger rule matching.
+ * When fanning out, the same inbound message lands in multiple per-agent
+ * session DBs. messages_in.id is PRIMARY KEY, so reuse of the raw id would
+ * collide across sessions (or, more subtly, within one session if re-routed
+ * after a retry). Namespace by agent_group_id to keep ids unique per session.
  */
-function pickAgent(agents: MessagingGroupAgent[], _event: InboundEvent): MessagingGroupAgent | null {
-  // Agents are already ordered by priority DESC from the DB query
-  // TODO: apply trigger_rules matching (pattern, mentionOnly, etc.)
-  return agents[0] ?? null;
+function messageIdForAgent(baseId: string | undefined, agentGroupId: string): string {
+  const id = baseId && baseId.length > 0 ? baseId : generateId();
+  return `${id}:${agentGroupId}`;
 }
