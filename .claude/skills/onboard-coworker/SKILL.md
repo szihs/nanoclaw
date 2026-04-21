@@ -81,19 +81,6 @@ mcp__nanoclaw__create_agent(
 )
 ```
 
-5. **Import scheduled tasks** — if the bundle has a `scheduledTasks` array, import each task into the coworker's session. The dashboard API handles this automatically:
-
-```bash
-# For bundles with scheduledTasks, POST the full YAML to the dashboard import endpoint:
-curl -s -X POST http://localhost:${DASHBOARD_PORT:-3737}/api/coworkers/import \
-  -H 'Content-Type: application/json' \
-  -d @coworkers/{name}.yaml
-```
-
-Alternatively, if the dashboard is not running, insert tasks directly into the coworker's session `inbound.db` using the scheduling module's `insertTask()` function. Tasks from bundles should be created with `status: 'pending'`.
-
-**Important:** `mcp__nanoclaw__create_agent` does NOT import scheduledTasks — this must be done separately after creation.
-
 ### Batch creation
 
 If the user selects multiple bundles, create them in sequence. After all are created, optionally wire peers for direct coworker-to-coworker messaging:
@@ -192,12 +179,5 @@ destinations:
     type: "agent"
     targetFolder: "main"
 ```
-
-scheduledTasks:                   # optional — recurring or one-time tasks
-  - recurrence: "0 9 * * 1-5"    # cron expression (omit for one-time)
-    processAfter: "2026-04-17 13:00:00"
-    content:
-      prompt: "Run the daily triage..."
-      script: null                # optional pre-flight script
 
 Exported bundles (produced by an export tool) may additionally contain `memory:` and `archive:` fields — a snapshot of the coworker's persistent state at export time.
