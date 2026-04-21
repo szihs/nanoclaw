@@ -1,0 +1,85 @@
+# Slang project spine. Types extend base-common and compose identity/invariants/context
+# fragments with workflow + skill references. See docs/lego-coworker-workflows.md.
+
+# Slang-specific addons to the main/global flat types (contributed by duplicate-
+# type merging across skills). The nanoclaw-base skill owns the base body; this
+# file only appends `context:` so the main assistant learns how to orchestrate
+# Slang coworkers and the global assistant knows about the compiler workspace.
+main:
+  context:
+    - container/skills/slang-spine/prompts/main-addon.md
+
+global:
+  context:
+    - container/skills/slang-spine/prompts/global-addon.md
+
+slang-common:
+  description: "Slang compiler spine — identity, public-API invariants, repo layout. Every Slang coworker type extends this."
+  project: slang
+  extends: base-common
+  identity: container/skills/slang-spine/identity/compiler.md
+  invariants:
+    - container/skills/slang-spine/invariants/public-api.md
+  context:
+    - container/skills/slang-spine/context/layout.md
+  skills:
+    - slang-build
+    - slang-explore
+    - slang-github
+  # `base-pr-update` is safe on every Slang coworker — it only needs vcs
+  # traits that `slang-github` provides. Write-code workflows are opt-in.
+  workflows:
+    - base-pr-update
+  # Default trait bindings for Slang coworkers. Leaf types may override.
+  bindings:
+    vcs-read: slang-github
+    vcs-write: slang-github
+    vcs-pr: slang-github
+    issue-tracker: slang-github
+    code-read: slang-explore
+    doc-read: slang-explore
+    code-build: slang-build
+    test-run: slang-build
+    ci-inspect: slang-build
+    ci-rerun: slang-github
+
+slang-triage:
+  description: "Triage incoming Slang compiler issues — subsystem mapping, severity classification, structured reports."
+  project: slang
+  extends: slang-common
+  workflows:
+    - slang-triage
+
+slang-fix:
+  description: "Turn triaged Slang reports into minimal fixes with tests."
+  project: slang
+  extends: slang-common
+  # `codex-critique` is pulled in by the overlay; listing it here makes the
+  # skill visible in the spine index and derives its tool allowlist.
+  skills:
+    - slang-patch
+    - codex-critique
+  workflows:
+    - slang-fix
+    - base-fix
+    - base-test-gen
+  overlays:
+    - critique-overlay
+  bindings:
+    code-edit: slang-patch
+    test-gen: slang-patch
+    critique: codex-critique
+
+slang-maintainer:
+  description: "Periodic Slang maintainer sweep — inventory, rank, and report across issues, PRs, CI, and release tracks."
+  project: slang
+  extends: slang-common
+  workflows:
+    - slang-maintainer
+
+slang-ci-health:
+  description: "Slang CI maintainer — classify failures as flake vs. real, safely requeue merge candidates, and surface real regressions. Replaces the older per-PR babysitter shape."
+  project: slang
+  extends: slang-common
+  workflows:
+    - slang-ci-health
