@@ -797,8 +797,8 @@ async function buildContainerArgs(
   }
 
   // Bypass proxy for host-local traffic (dashboard hooks, MCP proxy)
-  args.push('-e', 'NO_PROXY=host.docker.internal,localhost,127.0.0.1');
-  args.push('-e', 'no_proxy=host.docker.internal,localhost,127.0.0.1');
+  args.push('-e', 'NO_PROXY=host.docker.internal,localhost,127.0.0.1,discord.com,api.github.com,raw.githubusercontent.com');
+  args.push('-e', 'no_proxy=host.docker.internal,localhost,127.0.0.1,discord.com,api.github.com,raw.githubusercontent.com');
 
   // Host gateway
   args.push(...hostGatewayArgs());
@@ -853,9 +853,25 @@ async function buildContainerArgs(
   const imageTag = containerConfig.imageTag || CONTAINER_IMAGE;
   args.push(imageTag);
 
+<<<<<<< HEAD
   args.push(
     '-c',
     'if [ -f /tmp/codex-config.toml ]; then mkdir -p ~/.codex && cp /tmp/codex-config.toml ~/.codex/config.toml; fi && exec bun run /app/src/index.ts',
+=======
+  const mounts = buildVolumeMounts(group, input.isMain);
+  const safeName = group.folder.replace(/[^a-zA-Z0-9-]/g, '-');
+  const containerName = `${process.env.CONTAINER_PREFIX || 'nanoclaw'}-${safeName}-${Date.now()}`;
+  // Main group uses the default OneCLI agent; others use their own agent.
+  const agentIdentifier = input.isMain
+    ? undefined
+    : group.folder.toLowerCase().replace(/_/g, '-');
+  const { args: containerArgs, mcpToken } = await buildContainerArgs(
+    mounts,
+    containerName,
+    group.folder,
+    input.allowedMcpTools || [],
+    agentIdentifier,
+>>>>>>> 1aa13af (feat: standalone Discord feedback collector service)
   );
 
   return args;
