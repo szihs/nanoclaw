@@ -3299,6 +3299,7 @@ export async function handleRequest(
       if (isAdmin) {
         const dashUserId = 'dashboard:dashboard-admin';
         try {
+          wdb.prepare("INSERT OR IGNORE INTO users (id, kind, display_name, created_at) VALUES ('system', 'system', 'System', ?)").run(now);
           wdb.prepare("INSERT OR IGNORE INTO users (id, kind, display_name, created_at) VALUES (?, 'dashboard', 'Dashboard Admin', ?)").run(dashUserId, now);
           wdb.prepare("INSERT OR IGNORE INTO user_roles (user_id, role, agent_group_id, granted_by, granted_at) VALUES (?, 'owner', NULL, 'system', ?)").run(dashUserId, now);
         } catch { /* tables may not exist if permissions module not installed */ }
