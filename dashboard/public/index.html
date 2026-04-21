@@ -1,0 +1,1126 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>NVIDIA Coworker Dashboard</title>
+  <style>
+    :root {
+      --bg: #0f172a;
+      --bg-card: #1e293b;
+      --bg-hover: #334155;
+      --border: #334155;
+      --text: #e2e8f0;
+      --text-dim: #94a3b8;
+      --text-muted: #64748b;
+      --accent: #3b82f6;
+      --green: #10b981;
+      --yellow: #f59e0b;
+      --red: #ef4444;
+      --purple: #8b5cf6;
+      --font: 'Courier New', monospace;
+    }
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: var(--font);
+      background: var(--bg);
+      color: var(--text);
+      height: 100vh;
+      overflow: hidden;
+    }
+
+    /* --- Header --- */
+    .header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      padding: 8px 16px;
+      border-bottom: 1px solid var(--border);
+      background: var(--bg-card);
+      height: 44px;
+    }
+    .header h1 { font-size: 13px; font-weight: 600; letter-spacing: 0.5px; }
+    .header h1 span { color: var(--accent); }
+    .tabs { display: flex; gap: 2px; }
+    .tab {
+      padding: 5px 14px;
+      border: 1px solid var(--border);
+      background: transparent;
+      color: var(--text-dim);
+      cursor: pointer;
+      font-family: var(--font);
+      font-size: 11px;
+      transition: all 0.15s;
+    }
+    .tab:first-child { border-radius: 4px 0 0 4px; }
+    .tab:last-child { border-radius: 0 4px 4px 0; }
+    .tab.active { background: var(--accent); color: white; border-color: var(--accent); }
+    .tab:hover:not(.active) { background: var(--bg-hover); }
+    .header-right {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      min-width: 0;
+    }
+    .obs-summary {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      justify-content: flex-end;
+    }
+    .obs-chip {
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      padding: 1px 8px;
+      font-size: 9px;
+      color: var(--text-dim);
+      white-space: nowrap;
+    }
+    .obs-chip b {
+      color: var(--text);
+      font-weight: 700;
+      margin-left: 4px;
+    }
+    .obs-chip.working b { color: var(--green); }
+    .obs-chip.thinking b { color: var(--yellow); }
+    .obs-chip.idle b { color: var(--text); }
+    .obs-chip.error b { color: var(--red); }
+    .status-indicator { display: flex; align-items: center; gap: 6px; font-size: 10px; color: var(--text-dim); }
+    .status-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--green); animation: pulse 2s infinite; }
+    @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
+    @media (max-width: 1100px) {
+      .obs-summary { display: none; }
+    }
+
+    /* --- Tab Content --- */
+    .tab-content { height: calc(100vh - 44px); display: none; }
+    .tab-content.active { display: flex; }
+
+    /* --- Tab 1: Pixel Office --- */
+    #pixel-office { flex-direction: column; position: relative; }
+    #office-canvas {
+      flex: 1 1 auto;
+      min-height: 0;
+      width: 100%;
+      display: block;
+      image-rendering: pixelated;
+      cursor: default;
+    }
+    .office-bar {
+      display: flex; align-items: center; gap: 12px;
+      padding: 5px 12px; background: var(--bg-card);
+      border-top: 1px solid var(--border);
+      font-size: 10px; color: var(--text-dim); min-height: 28px;
+    }
+    .office-bar .stat { display: flex; align-items: center; gap: 4px; }
+    .office-bar .dot { width: 6px; height: 6px; border-radius: 50%; }
+
+    /* --- Detail Panel --- */
+    .detail-panel {
+      position: absolute; right: 0; top: 0; bottom: 28px; width: min(380px, 34vw);
+      background: var(--bg-card); border-left: 1px solid var(--border);
+      overflow-y: auto; display: none; padding: 14px; font-size: 11px; z-index: 10;
+    }
+    .detail-panel.visible { display: block; }
+    .detail-panel h2 {
+      font-size: 13px; margin-bottom: 10px;
+      display: flex; align-items: center; justify-content: space-between;
+    }
+    .detail-panel .close-btn {
+      background: none; border: none; color: var(--text-dim);
+      cursor: pointer; font-size: 14px; font-family: var(--font);
+    }
+    .detail-panel .field { margin-bottom: 6px; }
+    .detail-panel .field label { color: var(--text-dim); font-size: 9px; text-transform: uppercase; letter-spacing: 0.5px; }
+    .detail-panel .field .value { margin-top: 1px; }
+    .detail-panel .status-badge {
+      display: inline-block; padding: 2px 8px; border-radius: 3px;
+      font-size: 10px; font-weight: 600;
+    }
+    .detail-panel .memory-preview {
+      background: var(--bg); padding: 8px; border-radius: 4px;
+      max-height: 80px; overflow-y: hidden; font-size: 9px;
+      margin-top: 6px; color: var(--text-dim);
+    }
+    .detail-panel .hook-log { margin-top: 10px; }
+    .detail-panel .hook-entry { padding: 2px 0; border-bottom: 1px solid var(--border); font-size: 9px; }
+    .detail-panel .hook-entry .tool-name { color: var(--yellow); }
+    .detail-panel .hook-entry .ts { color: var(--text-muted); }
+    .detail-panel .hook-entry-link {
+      width: 100%; text-align: left; background: none; border: none; color: inherit;
+      cursor: pointer; font-family: var(--font);
+    }
+    .detail-panel .hook-entry-link:hover { background: var(--bg-hover); }
+    /* Reuse hook-entry styles in Coworkers detail panel */
+    #cw-detail-tools .hook-entry { padding: 2px 0; border-bottom: 1px solid var(--border); font-size: 9px; }
+    #cw-detail-tools .hook-entry .tool-name { color: var(--yellow); }
+    #cw-detail-tools .hook-entry .ts { color: var(--text-muted); }
+    #cw-detail-tools .hook-entry-link {
+      width: 100%; text-align: left; background: none; border: none; color: inherit;
+      cursor: pointer; font-family: var(--font); display: block; padding: 3px 0;
+    }
+    #cw-detail-tools .hook-entry-link:hover { background: var(--bg-hover); }
+    #cw-detail-tools .field { margin-bottom: 4px; }
+    #cw-detail-tools .field label { color: var(--text-dim); font-size: 9px; text-transform: uppercase; }
+    .detail-panel .subagent-list { display: flex; flex-direction: column; gap: 6px; margin-top: 4px; }
+    .detail-panel .subagent-card {
+      border: 1px solid var(--border); border-radius: 4px; padding: 6px 8px;
+      background: rgba(15, 23, 42, 0.45);
+    }
+    .detail-panel .subagent-head {
+      display: flex; align-items: center; justify-content: space-between; gap: 8px;
+      margin-bottom: 3px;
+    }
+    .detail-panel .subagent-name { color: var(--text); font-size: 10px; }
+    .detail-panel .subagent-type { color: var(--text-muted); font-size: 8px; text-transform: uppercase; }
+    .detail-panel .subagent-meta { color: var(--text-dim); font-size: 9px; line-height: 1.35; }
+
+    /* ============================== */
+    /* Tab 2: Timeline / Audit Log    */
+    /* ============================== */
+    #observability { flex-direction: column; overflow: hidden; }
+
+    /* Stats bar */
+    .stats-row { display: flex; gap: 1px; background: var(--border); flex-shrink: 0; }
+    .stat-box { background: var(--bg); padding: 10px 16px; flex: 1; text-align: center; }
+    .stat-box .num { font-size: 20px; font-weight: 700; }
+    .stat-box .label { font-size: 9px; color: var(--text-dim); text-transform: uppercase; margin-top: 2px; }
+
+    /* Sparkline row */
+    .sparkline-row {
+      background: var(--bg); border-bottom: 1px solid var(--border);
+      padding: 4px 16px; flex-shrink: 0;
+    }
+    .sparkline-row h3 {
+      font-size: 9px; color: var(--text-muted); text-transform: uppercase;
+      letter-spacing: 0.5px; margin-bottom: 2px;
+    }
+
+    /* Timeline list */
+    .timeline-container {
+      flex: 1; overflow-y: auto; padding: 0 16px;
+    }
+    .tl-entry {
+      display: flex; gap: 0; padding: 0; min-height: 44px;
+    }
+    .tl-time {
+      width: 64px; flex-shrink: 0; padding: 8px 0;
+      font-size: 10px; color: var(--text-muted); text-align: right; padding-right: 10px;
+    }
+    .tl-line {
+      width: 20px; flex-shrink: 0; display: flex; flex-direction: column; align-items: center;
+    }
+    .tl-dot {
+      width: 8px; height: 8px; border-radius: 50%; margin-top: 10px; flex-shrink: 0;
+    }
+    .tl-connector {
+      width: 1px; flex: 1; background: var(--border); min-height: 10px;
+    }
+    .tl-content {
+      flex: 1; padding: 6px 0 10px 8px; border-bottom: 1px solid var(--border);
+      min-width: 0;
+    }
+    .tl-header { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+    .tl-group { font-size: 11px; font-weight: 600; }
+    .tl-type {
+      font-size: 8px; padding: 1px 5px; border-radius: 2px; font-weight: 700;
+      text-transform: uppercase; letter-spacing: 0.5px;
+    }
+    .tl-type-task-run { background: var(--accent); color: white; }
+    .tl-type-hook { background: var(--yellow); color: #1a1a2e; }
+    .tl-title { font-size: 11px; color: var(--text); }
+    .tl-prompt {
+      font-size: 10px; color: var(--text-dim); margin-top: 2px;
+      font-style: italic; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    .tl-detail {
+      font-size: 10px; color: var(--text-muted); margin-top: 2px;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    .tl-empty {
+      padding: 40px 0; text-align: center; color: var(--text-muted); font-size: 12px;
+    }
+
+    /* --- Timeline expand buttons --- */
+    .tl-expand-btn {
+      background: none; border: 1px solid var(--border); color: var(--text-dim);
+      cursor: pointer; font-family: var(--font); font-size: 9px; padding: 0 4px;
+      border-radius: 2px; margin-left: auto; flex-shrink: 0;
+    }
+    .tl-expand-btn:hover { background: var(--bg-hover); color: var(--text); }
+    .tl-expand-content { margin-top: 6px; }
+    .tl-code-block { margin-bottom: 6px; }
+    .tl-code-block label {
+      font-size: 8px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.5px;
+    }
+    .tl-code-block pre {
+      background: var(--bg); padding: 6px 8px; border-radius: 3px; border: 1px solid var(--border);
+      font-size: 9px; color: var(--text-dim); white-space: pre-wrap; word-break: break-all;
+      max-height: 200px; overflow-y: auto; margin-top: 2px;
+    }
+
+    /* --- Timeline badge colors --- */
+    .tl-type-error { background: var(--red); color: white; }
+    .tl-type-subagent { background: var(--purple); color: white; }
+    .tl-type-session { background: var(--green); color: white; }
+    .tl-type-message { background: var(--accent); color: white; }
+    .tl-type-prompt { background: #06b6d4; color: white; }
+    .tl-type-compact { background: #f97316; color: white; }
+    .tl-type-stop { background: var(--text-muted); color: white; }
+    .tl-duration { font-size: 9px; color: var(--text-muted); margin-left: 6px; }
+    .tl-session-link { cursor: pointer; font-size: 8px; color: var(--accent); margin-left: 6px; }
+    .tl-session-link:hover { text-decoration: underline; }
+
+    /* --- Session Flow View --- */
+    .session-selector-bar {
+      display: flex; align-items: center; gap: 8px;
+      padding: 6px 16px; background: var(--bg-card); border-bottom: 1px solid var(--border);
+      font-size: 10px; flex-shrink: 0;
+    }
+    .session-selector-bar select {
+      background: var(--bg); color: var(--text); border: 1px solid var(--border);
+      border-radius: 3px; padding: 2px 8px; font-family: var(--font); font-size: 10px;
+      max-width: 300px;
+    }
+    .session-back-btn {
+      background: none; border: 1px solid var(--border); color: var(--text-dim);
+      cursor: pointer; font-family: var(--font); font-size: 9px; padding: 2px 8px;
+      border-radius: 3px; display: none;
+    }
+    .session-back-btn:hover { background: var(--bg-hover); color: var(--text); }
+    .flow-entry { padding: 8px 16px; border-bottom: 1px solid var(--border); }
+    .flow-session-marker {
+      font-size: 10px; color: var(--green); font-weight: 600;
+      padding: 6px 16px; border-bottom: 1px solid var(--border);
+      display: flex; align-items: center; gap: 8px;
+    }
+    .flow-session-marker .flow-label {
+      background: var(--green); color: white; padding: 1px 6px; border-radius: 2px;
+      font-size: 8px; font-weight: 700; text-transform: uppercase;
+    }
+    .flow-session-marker.end .flow-label { background: var(--text-muted); }
+    .flow-user-prompt {
+      padding: 8px 16px; border-bottom: 1px solid var(--border);
+      display: flex; align-items: flex-start; gap: 8px;
+    }
+    .flow-user-prompt .flow-label {
+      background: #06b6d4; color: white; padding: 1px 6px; border-radius: 2px;
+      font-size: 8px; font-weight: 700; text-transform: uppercase; flex-shrink: 0;
+    }
+    .flow-user-prompt .flow-text {
+      font-size: 10px; color: var(--text); font-style: italic;
+      white-space: pre-wrap; word-break: break-word; max-height: 200px; overflow-y: auto;
+    }
+    .flow-tool-call {
+      padding: 6px 16px; border-bottom: 1px solid var(--border);
+      display: flex; flex-direction: column; gap: 4px;
+    }
+    .flow-tool-call.failed { border-left: 3px solid var(--red); }
+    .flow-tool-header {
+      display: flex; align-items: center; gap: 8px; font-size: 10px;
+    }
+    .flow-tool-name { color: var(--yellow); font-weight: 600; }
+    .flow-duration { font-size: 9px; color: var(--text-muted); }
+    .flow-tool-io { font-size: 9px; color: var(--text-dim); }
+    .flow-tool-io label {
+      font-size: 8px; color: var(--text-muted); text-transform: uppercase;
+      letter-spacing: 0.5px; margin-right: 4px;
+    }
+    .flow-tool-io .flow-preview {
+      color: var(--text-dim); max-width: 600px; overflow: hidden;
+      text-overflow: ellipsis; white-space: nowrap; display: inline;
+    }
+    .flow-expand-btn {
+      background: none; border: 1px solid var(--border); color: var(--text-dim);
+      cursor: pointer; font-family: var(--font); font-size: 8px; padding: 0 4px;
+      border-radius: 2px; margin-left: 4px;
+    }
+    .flow-expand-btn:hover { background: var(--bg-hover); color: var(--text); }
+    .flow-expanded-content {
+      display: none; background: var(--bg); padding: 6px 8px; border-radius: 3px;
+      border: 1px solid var(--border); font-size: 9px; color: var(--text-dim);
+      white-space: pre-wrap; word-break: break-all; max-height: 400px; overflow-y: auto;
+      margin-top: 4px;
+    }
+    .flow-subagent-block {
+      margin: 4px 0 4px 16px; border-left: 3px solid var(--purple);
+      padding-left: 12px;
+    }
+    .flow-subagent-header {
+      font-size: 10px; color: var(--purple); font-weight: 600;
+      padding: 4px 0; display: flex; align-items: center; gap: 6px;
+    }
+    .flow-subagent-header .flow-label {
+      background: var(--purple); color: white; padding: 1px 6px; border-radius: 2px;
+      font-size: 8px; font-weight: 700; text-transform: uppercase;
+    }
+    .flow-compact {
+      padding: 6px 16px; border-bottom: 1px solid var(--border);
+      font-size: 10px; color: #f97316; display: flex; align-items: center; gap: 8px;
+    }
+    .flow-compact .flow-label {
+      background: #f97316; color: white; padding: 1px 6px; border-radius: 2px;
+      font-size: 8px; font-weight: 700; text-transform: uppercase;
+    }
+    .flow-notification {
+      padding: 6px 16px; border-bottom: 1px solid var(--border);
+      font-size: 10px; color: var(--text-dim);
+    }
+
+    /* --- Clickable group names --- */
+    .tl-group-link { cursor: pointer; }
+    .tl-group-link:hover { text-decoration: underline; }
+    .tl-entry-focus {
+      border-radius: 4px;
+      box-shadow: 0 0 0 1px var(--accent);
+      background: rgba(91, 141, 239, 0.08);
+    }
+
+    /* --- Timeline filter bar --- */
+    .timeline-filter-bar {
+      display: none; align-items: center; gap: 8px;
+      padding: 6px 16px; background: var(--bg-card); border-bottom: 1px solid var(--border);
+      font-size: 10px; flex-shrink: 0;
+    }
+    .timeline-filter-bar .filter-label { color: var(--text-muted); }
+    .timeline-filter-bar .filter-group { color: var(--accent); font-weight: 600; }
+    .filter-clear-btn {
+      background: none; border: 1px solid var(--border); color: var(--text-dim);
+      cursor: pointer; font-family: var(--font); font-size: 9px; padding: 2px 8px;
+      border-radius: 3px;
+    }
+    .filter-clear-btn:hover { background: var(--bg-hover); color: var(--text); }
+
+    /* --- Memory panel improvements --- */
+    .detail-panel .memory-preview {
+      background: var(--bg); padding: 8px; border-radius: 4px;
+      max-height: 200px; overflow-y: auto; font-size: 9px;
+      margin-top: 6px; color: var(--text-dim); line-height: 1.4;
+    }
+    .detail-panel .memory-preview p { margin: 0 0 4px 0; }
+    .detail-panel .memory-preview p:last-child { margin-bottom: 0; }
+    .detail-panel .memory-preview strong { color: var(--text); }
+    .detail-panel .memory-preview code { background: rgba(0,0,0,0.3); padding: 1px 3px; border-radius: 2px; font-size: 8px; }
+    .detail-panel .memory-preview pre { background: rgba(0,0,0,0.3); padding: 6px; border-radius: 3px; overflow-x: auto; margin: 4px 0; }
+    .detail-panel .memory-preview pre code { background: none; padding: 0; }
+    .detail-panel .memory-preview table { border-collapse: collapse; width: 100%; margin: 4px 0; font-size: 8px; }
+    .detail-panel .memory-preview th, .detail-panel .memory-preview td { border: 1px solid var(--border); padding: 2px 4px; text-align: left; }
+    .detail-panel .memory-preview th { background: rgba(0,0,0,0.2); }
+    .detail-panel .memory-preview ul { margin: 2px 0; padding-left: 14px; list-style: disc; }
+    .detail-panel .memory-preview li { margin: 1px 0; }
+    .detail-panel .memory-preview hr { border: none; border-top: 1px solid var(--border); margin: 6px 0; }
+    .detail-panel .memory-preview a { color: #60a5fa; text-decoration: none; }
+    .detail-panel .memory-preview a:hover { text-decoration: underline; }
+    .detail-panel .memory-preview.expanded { max-height: none; overflow-y: auto; }
+    .memory-header { display: flex; align-items: center; justify-content: space-between; }
+    .memory-toggle-btn {
+      background: none; border: 1px solid var(--border); color: var(--text-dim);
+      cursor: pointer; font-family: var(--font); font-size: 8px; padding: 1px 6px;
+      border-radius: 2px;
+    }
+    .memory-toggle-btn:hover { background: var(--bg-hover); color: var(--text); }
+
+    /* --- Markdown rendering in memory --- */
+    .md-h1 { font-size: 12px; font-weight: 700; color: var(--text); margin: 6px 0 3px; }
+    .md-h2 { font-size: 11px; font-weight: 600; color: var(--text); margin: 5px 0 2px; }
+    .md-h3 { font-size: 10px; font-weight: 600; color: var(--text); margin: 4px 0 2px; }
+    .md-li { padding-left: 8px; }
+    .md-code {
+      background: var(--bg-hover); padding: 1px 4px; border-radius: 2px;
+      font-size: 9px; color: var(--yellow);
+    }
+
+    /* --- View Timeline button in detail panel --- */
+    .detail-timeline-btn {
+      display: inline-block; margin-top: 8px; padding: 4px 10px;
+      background: var(--accent); color: white; border: none; border-radius: 3px;
+      cursor: pointer; font-family: var(--font); font-size: 10px; font-weight: 600;
+    }
+    .detail-timeline-btn:hover { opacity: 0.85; }
+
+    /* ============================== */
+    /* Tab 3: Admin Panel             */
+    /* ============================== */
+    #admin { flex-direction: column; overflow: hidden; }
+    .admin-nav {
+      display: flex; gap: 2px; padding: 8px 16px; background: var(--bg-card);
+      border-bottom: 1px solid var(--border); flex-shrink: 0; flex-wrap: wrap;
+    }
+    .admin-pill {
+      padding: 4px 12px; border: 1px solid var(--border); background: transparent;
+      color: var(--text-dim); cursor: pointer; font-family: var(--font); font-size: 10px;
+      border-radius: 12px; transition: all 0.15s;
+    }
+    .admin-pill.active { background: var(--accent); color: white; border-color: var(--accent); }
+    .admin-pill:hover:not(.active) { background: var(--bg-hover); }
+    .admin-panels { flex: 1; overflow-y: auto; padding: 0; }
+    .admin-panel { display: none; }
+    .admin-panel.active { display: block; }
+    .admin-panel-header {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 10px 16px; border-bottom: 1px solid var(--border);
+      background: var(--bg); position: sticky; top: 0; z-index: 2;
+    }
+    .admin-panel-header h3 { font-size: 12px; font-weight: 600; }
+    .admin-refresh-btn {
+      background: none; border: 1px solid var(--border); color: var(--text-dim);
+      cursor: pointer; font-family: var(--font); font-size: 9px; padding: 3px 10px;
+      border-radius: 3px;
+    }
+    .admin-refresh-btn:hover { background: var(--bg-hover); color: var(--text); }
+    .admin-panel-body { padding: 12px 16px; }
+    .admin-loading { color: var(--text-muted); font-size: 11px; padding: 20px 0; text-align: center; }
+
+    /* Admin stat grid */
+    .admin-stat-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 10px; margin-bottom: 16px; }
+    .admin-stat-card {
+      background: var(--bg-card); border: 1px solid var(--border); border-radius: 6px;
+      padding: 14px; text-align: center;
+    }
+    .admin-stat-card .num { font-size: 24px; font-weight: 700; color: var(--text); }
+    .admin-stat-card .label { font-size: 9px; color: var(--text-dim); text-transform: uppercase; margin-top: 4px; }
+
+    /* Admin table */
+    .admin-table { width: 100%; border-collapse: collapse; font-size: 10px; }
+    .admin-table th {
+      text-align: left; padding: 6px 10px; background: var(--bg-card);
+      color: var(--text-dim); font-size: 9px; text-transform: uppercase;
+      letter-spacing: 0.5px; border-bottom: 1px solid var(--border);
+      position: sticky; top: 0;
+    }
+    .admin-table td { padding: 6px 10px; border-bottom: 1px solid var(--border); vertical-align: top; }
+    .admin-table tr:hover td { background: var(--bg-card); }
+
+    /* Admin action buttons */
+    .admin-action-btn {
+      background: none; border: 1px solid var(--border); color: var(--text-dim);
+      cursor: pointer; font-family: var(--font); font-size: 9px; padding: 2px 8px;
+      border-radius: 3px; margin-right: 4px;
+    }
+    .admin-action-btn:hover { background: var(--bg-hover); color: var(--text); }
+    .admin-action-btn.danger { border-color: var(--red); color: var(--red); }
+    .admin-action-btn.danger:hover { background: #ef444420; }
+    .admin-action-btn.success { border-color: var(--green); color: var(--green); }
+    .admin-action-btn.success:hover { background: #10b98120; }
+
+    /* Admin chips */
+    .admin-chip {
+      display: inline-block; padding: 1px 6px; border-radius: 3px;
+      font-size: 9px; font-weight: 600;
+    }
+    .admin-chip.active { background: #10b98120; color: var(--green); }
+    .admin-chip.paused { background: #f59e0b20; color: var(--yellow); }
+    .admin-chip.enabled { background: #10b98120; color: var(--green); }
+    .admin-chip.disabled { background: #ef444420; color: var(--red); }
+    .admin-chip.running { background: #3b82f620; color: var(--accent); }
+    .admin-chip.stopped { background: #64748b20; color: var(--text-muted); }
+    .admin-chip.auto-update { background: #8b5cf620; color: #a78bfa; }
+    .admin-chip.static { background: #64748b15; color: var(--text-dim); }
+
+    /* Type update indicator — subtle dot */
+    .update-dot {
+      display: inline-block; width: 6px; height: 6px; border-radius: 50%;
+      margin-left: 5px; vertical-align: middle; position: relative; top: -1px;
+    }
+    .update-dot.auto { background: #a78bfa; box-shadow: 0 0 4px #a78bfa60; }
+    .update-dot.frozen { background: #475569; }
+    .update-dot[title] { cursor: help; }
+
+    /* Type update label — for detail panels */
+    .update-indicator {
+      display: inline-block; padding: 1px 6px; border-radius: 3px;
+      font-size: 9px; font-weight: 500; margin-left: 4px; vertical-align: middle; cursor: help;
+    }
+    .update-indicator.auto { background: #8b5cf615; color: #a78bfa; }
+    .update-indicator.frozen { background: #47556910; color: #64748b; }
+
+    /* MCP tool tags */
+    .mcp-tag {
+      display: inline-block; padding: 1px 5px; border-radius: 3px;
+      font-size: 8px; margin: 1px 2px; font-family: var(--font-mono, monospace);
+    }
+    .mcp-tag.allowed { background: #10b98115; color: #6ee7b7; }
+    .mcp-tag.blocked { background: #ef444410; color: #64748b; text-decoration: line-through; }
+
+    /* Admin code block */
+    .admin-code {
+      background: var(--bg); border: 1px solid var(--border); border-radius: 4px;
+      padding: 8px 10px; font-size: 9px; color: var(--text-dim);
+      white-space: pre-wrap; word-break: break-all; max-height: 200px; overflow-y: auto;
+      margin-top: 4px;
+    }
+
+    /* Markdown content rendering (skills, groups, config previews) */
+    .md-content { font-size: 10px; line-height: 1.5; color: var(--text-dim); }
+    .md-content p { margin: 0 0 6px 0; }
+    .md-content p:last-child { margin-bottom: 0; }
+    .md-content strong { color: var(--text); }
+    .md-content em { font-style: italic; }
+    .md-content hr { border: none; border-top: 1px solid var(--border); margin: 8px 0; }
+    .md-content code { background: rgba(0,0,0,0.3); padding: 1px 4px; border-radius: 3px; font-size: 9px; }
+    .md-content pre { background: rgba(0,0,0,0.3); padding: 8px; border-radius: 4px; overflow-x: auto; margin: 6px 0; }
+    .md-content pre code { background: none; padding: 0; }
+    .md-content table { border-collapse: collapse; width: 100%; margin: 6px 0; font-size: 9px; }
+    .md-content th, .md-content td { border: 1px solid var(--border); padding: 3px 6px; text-align: left; }
+    .md-content th { background: rgba(0,0,0,0.2); font-weight: bold; }
+    .md-content ul { margin: 4px 0; padding-left: 16px; list-style: disc; }
+    .md-content li { margin: 2px 0; }
+    .md-content a { color: #60a5fa; text-decoration: none; }
+    .md-content a:hover { text-decoration: underline; }
+    .md-preview { background: var(--bg); padding: 10px; border-radius: 4px; border: 1px solid var(--border); }
+
+    /* Admin memory editor */
+    .admin-editor {
+      width: 100%; min-height: 150px; background: var(--bg); border: 1px solid var(--border);
+      border-radius: 4px; padding: 8px; font-family: var(--font); font-size: 10px;
+      color: var(--text); resize: vertical; margin-top: 4px;
+    }
+    .admin-editor:focus { outline: none; border-color: var(--accent); }
+    .admin-save-btn {
+      background: var(--accent); color: white; border: none; border-radius: 3px;
+      padding: 4px 12px; cursor: pointer; font-family: var(--font); font-size: 10px;
+      font-weight: 600; margin-top: 4px;
+    }
+    .admin-save-btn:hover { opacity: 0.85; }
+    .admin-save-btn:disabled { opacity: 0.5; cursor: default; }
+
+    /* Admin group card */
+    .admin-group-card {
+      background: var(--bg-card); border: 1px solid var(--border); border-radius: 6px;
+      padding: 12px; margin-bottom: 10px;
+    }
+    .admin-group-card h4 { font-size: 12px; margin-bottom: 6px; display: flex; align-items: center; gap: 8px; }
+    .admin-group-meta { font-size: 9px; color: var(--text-dim); margin-bottom: 6px; }
+    .admin-group-meta span { margin-right: 12px; }
+
+    /* Load more button */
+    .admin-load-more {
+      display: block; width: 100%; padding: 8px; margin-top: 8px;
+      background: var(--bg-card); border: 1px solid var(--border); border-radius: 4px;
+      color: var(--text-dim); cursor: pointer; font-family: var(--font); font-size: 10px;
+      text-align: center;
+    }
+    .admin-load-more:hover { background: var(--bg-hover); color: var(--text); }
+
+    /* Admin empty state */
+    .admin-empty { color: var(--text-muted); font-size: 11px; padding: 20px 0; text-align: center; }
+
+    /* Chat bubbles */
+    .chat-bubble {
+      max-width: 75%; padding: 8px 12px; border-radius: 12px; margin-bottom: 6px;
+      font-size: 10px; line-height: 1.4; word-break: break-word; position: relative;
+    }
+    .chat-bubble.user {
+      background: var(--accent); color: white; margin-left: auto;
+      border-bottom-right-radius: 4px;
+    }
+    .chat-bubble.assistant {
+      background: var(--bg-card); color: var(--text); border: 1px solid var(--border);
+      border-bottom-left-radius: 4px;
+    }
+    .chat-bubble .chat-meta {
+      font-size: 8px; color: var(--text-muted); margin-top: 4px;
+    }
+    .chat-bubble.user .chat-meta { color: rgba(255,255,255,0.6); }
+    /* Markdown rendering in admin chat assistant bubbles */
+    .chat-bubble.assistant p { margin: 0 0 6px 0; }
+    .chat-bubble.assistant p:last-child { margin-bottom: 0; }
+    .chat-bubble.assistant strong { color: #e2e8f0; }
+    .chat-bubble.assistant hr { border: none; border-top: 1px solid var(--border); margin: 6px 0; }
+    .chat-bubble.assistant code { background: rgba(0,0,0,0.3); padding: 1px 4px; border-radius: 3px; font-size: 9px; }
+    .chat-bubble.assistant pre { background: rgba(0,0,0,0.3); padding: 6px; border-radius: 4px; overflow-x: auto; margin: 4px 0; }
+    .chat-bubble.assistant pre code { background: none; padding: 0; }
+    .chat-bubble.assistant table { border-collapse: collapse; width: 100%; margin: 4px 0; font-size: 9px; }
+    .chat-bubble.assistant th, .chat-bubble.assistant td { border: 1px solid var(--border); padding: 2px 4px; text-align: left; }
+    .chat-bubble.assistant th { background: rgba(0,0,0,0.2); font-weight: bold; }
+    .chat-bubble.assistant ul { margin: 4px 0; padding-left: 16px; list-style: disc; }
+    .chat-bubble.assistant li { margin: 2px 0; }
+    .chat-bubble.assistant a { color: #60a5fa; text-decoration: none; }
+    .chat-bubble.assistant a:hover { text-decoration: underline; }
+    .chat-typing {
+      display: inline-flex; gap: 3px; padding: 8px 12px;
+      background: var(--bg-card); border: 1px solid var(--border); border-radius: 12px;
+    }
+    .chat-typing span {
+      width: 5px; height: 5px; border-radius: 50%; background: var(--text-muted);
+      animation: typing 1.2s infinite;
+    }
+    .chat-typing span:nth-child(2) { animation-delay: 0.2s; }
+    .chat-typing span:nth-child(3) { animation-delay: 0.4s; }
+    @keyframes typing { 0%, 60%, 100% { opacity: 0.3; } 30% { opacity: 1; } }
+
+    /* Log lines */
+    .log-line { padding: 1px 0; }
+    .log-line.log-error { color: var(--red); }
+    .log-line.log-warn { color: var(--yellow); }
+    .log-line.log-info { color: var(--text-dim); }
+    .log-line.log-debug { color: var(--text-muted); }
+
+    /* Channel cards */
+    .channel-card {
+      display: inline-flex; align-items: flex-start; gap: 10px;
+      background: var(--bg-card); border: 1px solid var(--border); border-radius: 6px;
+      padding: 14px; margin: 0 10px 10px 0; min-width: 200px;
+    }
+    .channel-status-dot {
+      width: 8px; height: 8px; border-radius: 50%; margin-top: 2px; flex-shrink: 0;
+    }
+    .channel-info h4 { font-size: 12px; margin-bottom: 4px; }
+    .channel-info .channel-groups { font-size: 9px; color: var(--text-dim); }
+
+    /* --- Tab: Coworkers --- */
+    #coworkers { display: none; flex-direction: row; height: calc(100vh - 44px); }
+    #coworkers.active { display: flex; }
+    .cw-sidebar { width: 220px; border-right: 1px solid var(--border); display: flex; flex-direction: column; background: var(--bg-card); }
+    .cw-sidebar-header { padding: 10px 12px; border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; align-items: center; }
+    .cw-sidebar-header h3 { font-size: 12px; margin: 0; }
+    .cw-create-btn { background: var(--green); color: #fff; border: none; border-radius: 3px; padding: 2px 8px; font-size: 10px; cursor: pointer; font-family: var(--font); }
+    .cw-create-btn:hover { opacity: 0.85; }
+    .cw-list { flex: 1; overflow-y: auto; }
+    .cw-item { padding: 8px 12px; cursor: pointer; display: flex; align-items: center; gap: 8px; border-bottom: 1px solid var(--border); }
+    .cw-item:hover { background: var(--bg-hover); }
+    .cw-item.selected { background: var(--bg-hover); border-left: 2px solid var(--green); }
+    .cw-dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
+    .cw-dot.working, .cw-dot.active { background: var(--green); }
+    .cw-dot.thinking { background: var(--yellow); }
+    .cw-dot.idle { background: var(--text-muted); }
+    .cw-dot.error { background: var(--red); }
+    .cw-item-info { flex: 1; min-width: 0; }
+    .cw-item-name { font-size: 11px; font-weight: bold; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .cw-item-meta { font-size: 9px; color: var(--text-dim); }
+    .cw-unread-badge { width: 8px; height: 8px; border-radius: 50%; background: #3b82f6; flex-shrink: 0; font-size: 0; cursor: help; }
+    .cw-approval-dot { width: 8px; height: 8px; border-radius: 50%; background: #f59e0b; flex-shrink: 0; animation: pulse-badge 2s infinite; cursor: help; }
+    .cw-dot[title] { cursor: help; }
+    @keyframes pulse-badge { 0%, 100% { opacity: 1; } 50% { opacity: 0.6; } }
+    .approval-banner { position: sticky; bottom: 0; z-index: 10; background: var(--bg-card); border-top: 2px solid #f59e0b; padding: 8px 12px; box-shadow: 0 -2px 8px rgba(0,0,0,0.3); }
+    .approval-banner-label { font-size: 9px; color: #f59e0b; font-weight: bold; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 6px; }
+    .approval-banner-item { border-left: 3px solid #f59e0b; padding: 4px 8px; margin-bottom: 6px; font-size: 10px; }
+    .approval-banner-item:last-child { margin-bottom: 0; }
+    .cw-chat { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+    .cw-chat-header { padding: 10px 16px; border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 10px; background: var(--bg-card); }
+    .cw-chat-header h3 { font-size: 12px; margin: 0; }
+    .cw-chat-header .cw-status-badge { font-size: 9px; padding: 1px 6px; border-radius: 3px; }
+    .cw-chat-messages { flex: 1; overflow-y: auto; padding: 12px 16px; }
+    .cw-shell-view { font-size: 11px; }
+    .cw-view-toggle { display: flex; gap: 2px; }
+    .cw-toggle-btn { background: var(--bg); color: var(--text-muted); border: 1px solid var(--border); padding: 2px 10px; font-size: 9px; font-family: var(--font); cursor: pointer; border-radius: 3px; }
+    .cw-toggle-btn.active { background: var(--green); color: #fff; border-color: var(--green); }
+    .cw-msg { margin-bottom: 10px; max-width: 80%; }
+    .cw-msg.user { margin-left: auto; }
+    .cw-msg.assistant { margin-right: auto; }
+    .cw-msg-bubble { padding: 6px 10px; border-radius: 6px; font-size: 11px; line-height: 1.5; word-break: break-word; }
+    .cw-msg.user .cw-msg-bubble { background: #1d4ed8; color: #fff; white-space: pre-wrap; }
+    .cw-msg.assistant .cw-msg-bubble { background: var(--bg-hover); color: var(--text); }
+    .cw-msg.assistant .cw-msg-bubble p { margin: 0 0 6px 0; }
+    .cw-msg.assistant .cw-msg-bubble p:last-child { margin-bottom: 0; }
+    .cw-msg.assistant .cw-msg-bubble strong { color: #e2e8f0; }
+    .cw-msg.assistant .cw-msg-bubble hr { border: none; border-top: 1px solid var(--border); margin: 8px 0; }
+    .cw-msg.assistant .cw-msg-bubble code { background: rgba(0,0,0,0.3); padding: 1px 4px; border-radius: 3px; font-size: 10px; }
+    .cw-msg.assistant .cw-msg-bubble pre { background: rgba(0,0,0,0.3); padding: 8px; border-radius: 4px; overflow-x: auto; margin: 6px 0; }
+    .cw-msg.assistant .cw-msg-bubble pre code { background: none; padding: 0; }
+    .cw-msg.assistant .cw-msg-bubble table { border-collapse: collapse; width: 100%; margin: 6px 0; font-size: 10px; }
+    .cw-msg.assistant .cw-msg-bubble th, .cw-msg.assistant .cw-msg-bubble td { border: 1px solid var(--border); padding: 3px 6px; text-align: left; }
+    .cw-msg.assistant .cw-msg-bubble th { background: rgba(0,0,0,0.2); font-weight: bold; }
+    .cw-msg.assistant .cw-msg-bubble ul { margin: 4px 0; padding-left: 16px; list-style: disc; }
+    .cw-msg.assistant .cw-msg-bubble li { margin: 2px 0; }
+    .cw-msg.assistant .cw-msg-bubble a { color: #60a5fa; text-decoration: none; }
+    .cw-msg.assistant .cw-msg-bubble a:hover { text-decoration: underline; }
+    .cw-msg-time { font-size: 8px; color: var(--text-muted); margin-top: 2px; }
+    .cw-msg.user .cw-msg-time { text-align: right; }
+    .cw-chat-input { padding: 8px 16px; border-top: 1px solid var(--border); display: flex; gap: 8px; align-items: flex-end; }
+    .cw-chat-input textarea { flex: 1; background: var(--bg); color: var(--text); border: 1px solid var(--border); border-radius: 4px; padding: 6px 8px; font-family: var(--font); font-size: 10px; resize: none; min-height: 32px; max-height: 100px; }
+    .cw-chat-input button { background: var(--green); color: #fff; border: none; border-radius: 4px; padding: 6px 14px; font-family: var(--font); font-size: 10px; cursor: pointer; height: 32px; }
+    .cw-chat-input button:hover { opacity: 0.85; }
+    .cw-detail { width: 280px; border-left: 1px solid var(--border); overflow-y: auto; padding: 12px; background: var(--bg-card); }
+    .cw-detail h3 { font-size: 12px; margin: 0 0 10px 0; }
+    .cw-detail-section { margin-bottom: 14px; }
+    .cw-detail-section label { font-size: 9px; color: var(--text-dim); display: block; margin-bottom: 4px; }
+    .cw-detail-section .value { font-size: 10px; }
+    .cw-memory-editor { width: 100%; min-height: 120px; background: var(--bg); color: var(--text); border: 1px solid var(--border); border-radius: 3px; padding: 6px; font-family: var(--font); font-size: 9px; resize: vertical; }
+    .cw-detail .memory-preview { max-height: 80px; overflow-y: hidden; font-size: 9px; line-height: 1.4; color: var(--text-muted); padding: 6px; background: rgba(0,0,0,0.15); border-radius: 3px; }
+    .cw-detail .memory-preview.expanded { max-height: none; overflow-y: auto; }
+    .cw-detail .memory-preview p { margin: 0 0 4px 0; }
+    .cw-detail .memory-preview p:last-child { margin-bottom: 0; }
+    .cw-detail .memory-preview strong { color: var(--text); }
+    .cw-detail .memory-preview code { background: rgba(0,0,0,0.3); padding: 1px 3px; border-radius: 2px; font-size: 8px; }
+    .cw-detail .memory-preview pre { background: rgba(0,0,0,0.3); padding: 6px; border-radius: 3px; overflow-x: auto; margin: 4px 0; }
+    .cw-detail .memory-preview pre code { background: none; padding: 0; }
+    .cw-detail .memory-preview table { border-collapse: collapse; width: 100%; margin: 4px 0; font-size: 8px; }
+    .cw-detail .memory-preview th, .cw-detail .memory-preview td { border: 1px solid var(--border); padding: 2px 4px; text-align: left; }
+    .cw-detail .memory-preview th { background: rgba(0,0,0,0.2); }
+    .cw-detail .memory-preview ul { margin: 2px 0; padding-left: 14px; list-style: disc; }
+    .cw-detail .memory-preview li { margin: 1px 0; }
+    .cw-detail .memory-preview hr { border: none; border-top: 1px solid var(--border); margin: 6px 0; }
+    .cw-detail .memory-preview a { color: #60a5fa; text-decoration: none; }
+    .cw-detail .memory-preview a:hover { text-decoration: underline; }
+    .cw-detail .memory-preview h1, .cw-detail .memory-preview h2, .cw-detail .memory-preview h3 { font-size: 10px; color: var(--text); margin: 6px 0 2px 0; }
+    .cw-detail .memory-header { display: flex; align-items: center; justify-content: space-between; }
+    .cw-save-btn { background: var(--green); color: #fff; border: none; border-radius: 3px; padding: 3px 10px; font-size: 9px; cursor: pointer; font-family: var(--font); margin-top: 4px; }
+    .cw-delete-btn { background: var(--red); color: #fff; border: none; border-radius: 3px; padding: 3px 10px; font-size: 9px; cursor: pointer; font-family: var(--font); margin-top: 4px; }
+    .cw-empty { color: var(--text-muted); font-size: 11px; padding: 40px; text-align: center; }
+
+    /* Create coworker modal */
+    .cw-modal-overlay { position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.6); z-index: 1000; display: flex; align-items: center; justify-content: center; }
+    .cw-modal { background: var(--bg-card); border: 1px solid var(--border); border-radius: 6px; padding: 20px; width: 600px; max-width: 90vw; }
+    .cw-modal h3 { font-size: 13px; margin: 0 0 14px 0; }
+    .cw-modal label { font-size: 10px; color: var(--text-dim); display: block; margin-bottom: 3px; }
+    .cw-modal input, .cw-modal select { width: 100%; background: var(--bg); color: var(--text); border: 1px solid var(--border); border-radius: 3px; padding: 5px 8px; font-family: var(--font); font-size: 10px; margin-bottom: 10px; box-sizing: border-box; }
+    .cw-type-checkbox { display: flex; align-items: center; gap: 6px; padding: 4px 6px; cursor: pointer; overflow: hidden; }
+    .cw-type-checkbox:hover { background: var(--bg-hover); border-radius: 3px; }
+    .cw-type-checkbox input { flex-shrink: 0; }
+    .cw-type-checkbox span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .cw-modal-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 6px; }
+    .cw-modal-actions button { padding: 4px 14px; border-radius: 3px; border: none; font-family: var(--font); font-size: 10px; cursor: pointer; }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <h1><span>NVIDIA</span> Coworker Dashboard</h1>
+    <div class="tabs">
+      <button class="tab active" data-tab="pixel-office">Pixel Office</button>
+      <button class="tab" data-tab="coworkers">Coworkers</button>
+      <button class="tab" data-tab="observability">Timeline</button>
+      <button class="tab" data-tab="admin">Admin</button>
+    </div>
+    <div class="header-right">
+      <div class="obs-summary" aria-label="Actor observability summary">
+        <span class="obs-chip">Actors<b id="hdr-actors-total">0</b></span>
+        <span class="obs-chip working">Working<b id="hdr-actors-working">0</b></span>
+        <span class="obs-chip thinking">Thinking<b id="hdr-actors-thinking">0</b></span>
+        <span class="obs-chip idle">Idle<b id="hdr-actors-idle">0</b></span>
+        <span class="obs-chip error">Error<b id="hdr-actors-error">0</b></span>
+      </div>
+      <div class="status-indicator">
+        <div class="status-dot"></div>
+        <span id="ws-status">Connected</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- Tab 1: Pixel Art Office -->
+  <div id="pixel-office" class="tab-content active">
+    <canvas id="office-canvas"></canvas>
+    <div class="detail-panel" id="detail-panel">
+      <h2>
+        <span id="detail-name">-</span>
+        <button class="close-btn" id="detail-close">x</button>
+      </h2>
+      <div class="field"><label>Status</label><div class="value" id="detail-status">-</div></div>
+      <div class="field"><label>Last Activity</label><div class="value" id="detail-activity">-</div></div>
+      <div class="field"><label>Live Tool</label><div class="value" id="detail-tool">-</div></div>
+      <div class="field"><label>Active Children</label><div class="value" id="detail-subagents">-</div></div>
+      <div class="field"><label>Session</label><div class="value" id="detail-session" style="font-size:9px">-</div></div>
+      <div class="field"><label>Tasks</label><div class="value" id="detail-tasks-list" style="font-size:9px;max-height:100px;overflow-y:auto">-</div></div>
+      <div class="field">
+        <div class="memory-header">
+          <label>Memory (CLAUDE.md)</label>
+          <button class="memory-toggle-btn" id="memory-toggle">Expand</button>
+        </div>
+        <div class="memory-preview" id="detail-memory">Loading...</div>
+      </div>
+      <div class="hook-log" id="detail-hooks"></div>
+      <div style="display:flex;gap:6px;margin-top:8px">
+        <button class="detail-timeline-btn" id="detail-view-timeline" style="flex:1">View Timeline</button>
+        <button class="detail-timeline-btn" id="detail-view-coworker" style="flex:1">View Coworker</button>
+      </div>
+    </div>
+    <div class="office-bar">
+      <div class="stat" title="Agent is executing tools or responding"><div class="dot" style="background:var(--green)"></div> <span id="stat-working">0</span> working</div>
+      <div class="stat" title="Agent is processing / reasoning"><div class="dot" style="background:var(--yellow)"></div> <span id="stat-thinking">0</span> thinking</div>
+      <div class="stat" title="Agent is waiting for a message"><div class="dot" style="background:var(--text-dim)"></div> <span id="stat-idle">0</span> idle</div>
+      <div class="stat" title="Agent encountered an error"><div class="dot" style="background:var(--red)"></div> <span id="stat-error">0</span> error</div>
+      <div style="flex:1"></div>
+      <button id="legend-toggle" title="Show color legend" style="background:none;border:1px solid var(--border);border-radius:3px;color:var(--text-dim);font-size:9px;padding:1px 6px;cursor:pointer">?</button>
+      <span id="stat-time"></span>
+    </div>
+    <div id="office-legend" style="display:none;padding:6px 12px;background:var(--bg-card);border-top:1px solid var(--border);font-size:9px;color:var(--text-dim);line-height:1.6">
+      <div style="display:flex;gap:16px;flex-wrap:wrap">
+        <span><strong>Status dots:</strong></span>
+        <span><span style="display:inline-block;width:7px;height:7px;border-radius:50%;background:#10B981;vertical-align:middle"></span> Working — executing tools</span>
+        <span><span style="display:inline-block;width:7px;height:7px;border-radius:50%;background:#3B82F6;vertical-align:middle"></span> Active — responding</span>
+        <span><span style="display:inline-block;width:7px;height:7px;border-radius:50%;background:#F59E0B;vertical-align:middle"></span> Thinking — reasoning</span>
+        <span><span style="display:inline-block;width:7px;height:7px;border-radius:50%;background:#6B7280;vertical-align:middle"></span> Idle — waiting</span>
+        <span><span style="display:inline-block;width:7px;height:7px;border-radius:50%;background:#EF4444;vertical-align:middle"></span> Error</span>
+      </div>
+      <div style="display:flex;gap:16px;flex-wrap:wrap;margin-top:3px">
+        <span><strong>Cue bubbles:</strong></span>
+        <span style="color:#10b981">[x] Started</span>
+        <span style="color:#f59e0b">? Approval needed</span>
+        <span style="color:#3b82f6">... Waiting for input</span>
+        <span style="color:#ef4444">! Blocked / Error</span>
+      </div>
+      <div style="display:flex;gap:16px;flex-wrap:wrap;margin-top:3px">
+        <span><strong>Background hue:</strong></span>
+        <span>Colored tint behind nameplate = agent is active (matches status color at 20% opacity)</span>
+        <span>Dark = idle / no activity</span>
+      </div>
+      <div style="display:flex;gap:16px;flex-wrap:wrap;margin-top:3px">
+        <span><strong>Subagent badges:</strong></span>
+        <span style="color:#10B981">worker</span>
+        <span style="color:#3B82F6">explorer</span>
+        <span style="color:#8B5CF6">default</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- Tab 2: Coworkers -->
+  <div id="coworkers" class="tab-content">
+    <div class="cw-sidebar">
+      <div class="cw-sidebar-header">
+        <h3>Coworkers</h3>
+        <button class="cw-create-btn" id="cw-import-btn" style="background:var(--accent)">Import</button>
+        <button class="cw-create-btn" id="cw-create-btn">+ New</button>
+      </div>
+      <div class="cw-list" id="cw-list"></div>
+    </div>
+    <div class="cw-chat">
+      <div class="cw-chat-header">
+        <h3 id="cw-chat-name">Select a coworker</h3>
+        <span class="cw-status-badge" id="cw-chat-status"></span>
+        <div class="cw-view-toggle" id="cw-view-toggle" style="display:none;margin-left:auto">
+          <button class="cw-toggle-btn active" data-view="chat">Chat</button>
+          <button class="cw-toggle-btn" data-view="work">Artifacts</button>
+        </div>
+      </div>
+      <div class="cw-chat-messages" id="cw-chat-messages">
+        <div class="cw-empty">Select a coworker from the sidebar to start chatting.</div>
+      </div>
+      <div class="cw-shell-view" id="cw-shell-view" style="display:none;flex:1;flex-direction:column;padding:0;font-size:11px;overflow:hidden">
+        <div id="cw-shell-status" style="padding:6px 12px;font-size:10px;border-bottom:1px solid var(--border)"></div>
+        <div id="cw-shell-output" style="flex:1;overflow-y:auto;padding:8px 12px;font-family:monospace;font-size:11px;white-space:pre-wrap;background:#0d1117;color:#c9d1d9"></div>
+        <div style="padding:6px 12px;border-top:1px solid var(--border);display:flex;gap:6px;align-items:center">
+          <span style="color:#58a6ff;font-family:monospace;font-size:11px">$</span>
+          <input id="cw-shell-input" type="text" placeholder="ls /workspace/agent/" style="flex:1;background:transparent;border:none;color:#c9d1d9;font-family:monospace;font-size:11px;outline:none">
+          <button id="cw-shell-run" style="background:#238636;color:#fff;border:none;border-radius:3px;padding:3px 10px;font-family:var(--font);font-size:10px;cursor:pointer">Run</button>
+        </div>
+      </div>
+      <div class="cw-work-view" id="cw-work-view" style="display:none;flex:1;flex-direction:column;overflow:hidden">
+        <div id="cw-work-breadcrumb" style="padding:6px 12px;font-size:10px;border-bottom:1px solid var(--border);color:var(--text-muted);display:flex;gap:4px;align-items:center;flex-wrap:wrap"></div>
+        <div id="cw-work-content" style="flex:1;overflow-y:auto;padding:8px 12px;font-size:11px"></div>
+        <div id="cw-work-divider" style="height:4px;background:var(--border);cursor:row-resize;flex-shrink:0" title="Drag to resize"></div>
+        <div id="cw-work-shell" style="flex:0 0 40%;min-height:80px;display:flex;flex-direction:column;overflow:hidden">
+          <div style="padding:4px 12px;font-size:9px;color:var(--text-muted);border-bottom:1px solid var(--border);display:flex;align-items:center;gap:6px">
+            <span>Shell</span>
+            <span id="cw-work-shell-status" style="font-size:9px"></span>
+          </div>
+          <div id="cw-work-shell-output" style="flex:1;overflow-y:auto;padding:4px 12px;font-family:monospace;font-size:10px;white-space:pre-wrap;background:#0d1117;color:#c9d1d9"></div>
+          <div style="padding:4px 12px;border-top:1px solid var(--border);display:flex;gap:6px;align-items:center;background:#0d1117">
+            <span style="color:#58a6ff;font-family:monospace;font-size:10px">$</span>
+            <input id="cw-work-shell-input" type="text" placeholder="ls /workspace/agent/" style="flex:1;background:transparent;border:none;color:#c9d1d9;font-family:monospace;font-size:10px;outline:none">
+            <button id="cw-work-shell-run" style="background:#238636;color:#fff;border:none;border-radius:3px;padding:2px 8px;font-family:var(--font);font-size:9px;cursor:pointer">Run</button>
+          </div>
+        </div>
+      </div>
+      <div class="cw-chat-input" id="cw-chat-input-area" style="display:none">
+        <textarea id="cw-chat-input" placeholder="Type a message..."></textarea>
+        <button id="cw-chat-send">Send</button>
+      </div>
+    </div>
+    <div class="cw-detail" id="cw-detail" style="display:none">
+      <h3 id="cw-detail-name">Details</h3>
+      <div class="cw-detail-section">
+        <label>Status</label>
+        <div class="value" id="cw-detail-status">-</div>
+      </div>
+      <div class="cw-detail-section">
+        <label>Type</label>
+        <div class="value" id="cw-detail-type">-</div>
+      </div>
+      <div class="cw-detail-section">
+        <label>Trigger</label>
+        <div class="value" id="cw-detail-trigger">-</div>
+      </div>
+      <div class="cw-detail-section">
+        <label>JID</label>
+        <div class="value" id="cw-detail-jid" style="font-size:9px;color:var(--text-dim)">-</div>
+      </div>
+      <div class="cw-detail-section">
+        <label>Tasks</label>
+        <div class="value" id="cw-detail-tasks">-</div>
+      </div>
+      <div class="cw-detail-section">
+        <label>Last Activity</label>
+        <div class="value" id="cw-detail-activity">-</div>
+      </div>
+      <div class="cw-detail-section">
+        <label>MCP Tools</label>
+        <div class="value" id="cw-detail-mcp" style="font-size:9px;max-height:100px;overflow-y:auto">-</div>
+      </div>
+      <div class="cw-detail-section">
+        <label>Active Subagents</label>
+        <div class="value" id="cw-detail-subagents">-</div>
+      </div>
+      <div class="cw-detail-section">
+        <label>Recent Events</label>
+        <div id="cw-detail-tools" style="font-size:9px;max-height:200px;overflow-y:auto">-</div>
+      </div>
+      <div class="cw-detail-section">
+        <label>Artifacts (files)</label>
+        <div class="value" id="cw-detail-files" style="font-size:9px;max-height:120px;overflow-y:auto">-</div>
+      </div>
+      <div class="cw-detail-section">
+        <button class="detail-timeline-btn" id="cw-view-timeline" style="width:100%">View Timeline</button>
+      </div>
+      <div class="cw-detail-section">
+        <div class="memory-header">
+          <label>Memory (CLAUDE.md)</label>
+          <button class="memory-toggle-btn" id="cw-memory-toggle">Expand</button>
+        </div>
+        <div class="memory-preview" id="cw-memory-preview" style="margin-top:4px"></div>
+      </div>
+      <div class="cw-detail-section" style="margin-top:20px;display:flex;gap:6px;flex-wrap:wrap">
+        <button class="detail-timeline-btn" id="cw-export-btn" style="flex:1">Export</button>
+        <button class="detail-timeline-btn" id="cw-delete-btn" style="flex:1;background:var(--red)">Delete</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Tab 3: Timeline / Audit Log -->
+  <div id="observability" class="tab-content">
+    <div class="stats-row">
+      <div class="stat-box"><div class="num" id="obs-total-coworkers">0</div><div class="label">Coworkers</div></div>
+      <div class="stat-box"><div class="num" id="obs-total-tasks">0</div><div class="label">Tasks</div></div>
+      <div class="stat-box"><div class="num" id="obs-total-runs">0</div><div class="label">Runs</div></div>
+      <div class="stat-box"><div class="num" id="obs-success-rate">-</div><div class="label">Success</div></div>
+      <div class="stat-box"><div class="num" id="obs-avg-duration">-</div><div class="label">Avg Time</div></div>
+    </div>
+    <div class="sparkline-row">
+      <h3>Activity (24h)</h3>
+      <canvas id="sparkline-canvas" height="48"></canvas>
+    </div>
+    <div class="session-selector-bar" id="session-selector-bar">
+      <label style="color:var(--text-muted)">Session:</label>
+      <select id="session-select">
+        <option value="">Timeline view (all events)</option>
+      </select>
+      <button class="session-back-btn" id="session-back-btn">Back to Timeline</button>
+    </div>
+    <div class="timeline-filter-bar" id="timeline-filter-bar">
+      <span class="filter-label">Filtered:</span>
+      <span class="filter-group"></span>
+      <button class="filter-clear-btn">Clear</button>
+    </div>
+    <div class="timeline-container" id="timeline-list">
+      <div class="tl-empty">No events yet. Spawn a coworker or schedule a task to see the timeline.</div>
+    </div>
+  </div>
+
+  <!-- Tab 3: Admin Panel -->
+  <div id="admin" class="tab-content">
+    <div class="admin-nav">
+      <button class="admin-pill active" data-panel="admin-overview">Overview</button>
+      <button class="admin-pill" data-panel="admin-messages">Messages</button>
+      <button class="admin-pill" data-panel="admin-tasks">Tasks</button>
+      <button class="admin-pill" data-panel="admin-sessions">Sessions</button>
+      <button class="admin-pill" data-panel="admin-skills">Skills</button>
+      <button class="admin-pill" data-panel="admin-groups">Groups</button>
+      <button class="admin-pill" data-panel="admin-debug">Debug</button>
+      <button class="admin-pill" data-panel="admin-chat">Chat</button>
+      <button class="admin-pill" data-panel="admin-logs">Logs</button>
+      <button class="admin-pill" data-panel="admin-channels">Channels</button>
+      <button class="admin-pill" data-panel="admin-config">Config</button>
+      <button class="admin-pill" data-panel="admin-infra">Infra</button>
+    </div>
+    <div class="admin-panels">
+      <div id="admin-overview" class="admin-panel active">
+        <div class="admin-panel-header">
+          <h3>Overview</h3>
+          <button class="admin-refresh-btn" data-load="overview">Refresh</button>
+          <button class="admin-refresh-btn" id="cw-full-archive-btn" style="background:var(--accent);margin-left:auto">Full Archive Export</button>
+          <button class="admin-refresh-btn" id="cw-import-v1-btn" style="background:var(--accent)">Import from V1</button>
+        </div>
+        <div id="admin-overview-content" class="admin-panel-body"><div class="admin-loading">Loading...</div></div>
+      </div>
+      <div id="admin-messages" class="admin-panel">
+        <div class="admin-panel-header"><h3>Messages</h3><button class="admin-refresh-btn" data-load="messages">Refresh</button></div>
+        <div id="admin-messages-content" class="admin-panel-body"><div class="admin-loading">Loading...</div></div>
+      </div>
+      <div id="admin-tasks" class="admin-panel">
+        <div class="admin-panel-header"><h3>Scheduled Tasks</h3><button class="admin-refresh-btn" data-load="tasks">Refresh</button></div>
+        <div id="admin-tasks-content" class="admin-panel-body"><div class="admin-loading">Loading...</div></div>
+      </div>
+      <div id="admin-sessions" class="admin-panel">
+        <div class="admin-panel-header"><h3>Sessions</h3><button class="admin-refresh-btn" data-load="sessions">Refresh</button></div>
+        <div id="admin-sessions-content" class="admin-panel-body"><div class="admin-loading">Loading...</div></div>
+      </div>
+      <div id="admin-skills" class="admin-panel">
+        <div class="admin-panel-header"><h3>Container Skills</h3><button class="admin-refresh-btn" data-load="skills">Refresh</button></div>
+        <div id="admin-skills-content" class="admin-panel-body"><div class="admin-loading">Loading...</div></div>
+      </div>
+      <div id="admin-groups" class="admin-panel">
+        <div class="admin-panel-header"><h3>Groups</h3><button class="admin-refresh-btn" data-load="groups">Refresh</button></div>
+        <div id="admin-groups-content" class="admin-panel-body"><div class="admin-loading">Loading...</div></div>
+      </div>
+      <div id="admin-debug" class="admin-panel">
+        <div class="admin-panel-header"><h3>Debug</h3><button class="admin-refresh-btn" data-load="debug">Refresh</button></div>
+        <div id="admin-debug-content" class="admin-panel-body"><div class="admin-loading">Loading...</div></div>
+      </div>
+      <div id="admin-chat" class="admin-panel">
+        <div class="admin-panel-header">
+          <h3>Chat</h3>
+          <select id="chat-group-select" style="background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:3px;padding:2px 8px;font-family:var(--font);font-size:10px">
+            <option value="">Select group...</option>
+          </select>
+        </div>
+        <div id="admin-chat-content" style="display:flex;flex-direction:column;height:calc(100vh - 140px)">
+          <div id="chat-messages" style="flex:1;overflow-y:auto;padding:12px 16px"></div>
+          <div style="padding:8px 16px;border-top:1px solid var(--border);display:flex;gap:8px;align-items:flex-end">
+            <textarea id="chat-input" placeholder="Type a message..." style="flex:1;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:6px 8px;font-family:var(--font);font-size:10px;resize:none;min-height:32px;max-height:100px"></textarea>
+            <button id="chat-send-btn" class="admin-save-btn" style="margin-top:0;height:32px">Send</button>
+          </div>
+        </div>
+      </div>
+      <div id="admin-logs" class="admin-panel">
+        <div class="admin-panel-header">
+          <h3>Logs</h3>
+          <div style="display:flex;gap:6px;align-items:center">
+            <select id="log-source-select" style="background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:3px;padding:2px 8px;font-family:var(--font);font-size:10px">
+              <option value="app">App Log</option>
+              <option value="error">Error Log</option>
+              <option value="container">Container Log</option>
+              <option value="dashboard">Dashboard Log</option>
+              <option value="dashboard-error">Dashboard Error Log</option>
+            </select>
+            <select id="log-group-select" style="background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:3px;padding:2px 8px;font-family:var(--font);font-size:10px;display:none">
+              <option value="">Select group...</option>
+            </select>
+            <input id="log-search-input" type="text" placeholder="Search..." style="background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:3px;padding:2px 8px;font-family:var(--font);font-size:10px;width:120px">
+            <button class="admin-refresh-btn" data-load="logs">Refresh</button>
+          </div>
+        </div>
+        <div id="admin-logs-content" class="admin-panel-body" style="padding:0"><pre id="log-viewer" style="margin:0;padding:12px 16px;font-size:9px;line-height:1.5;color:var(--text-dim);overflow-x:auto;white-space:pre-wrap;word-break:break-all"></pre></div>
+      </div>
+      <div id="admin-channels" class="admin-panel">
+        <div class="admin-panel-header"><h3>Channels</h3><button class="admin-refresh-btn" data-load="channels">Refresh</button></div>
+        <div id="admin-channels-content" class="admin-panel-body"><div class="admin-loading">Loading...</div></div>
+      </div>
+      <div id="admin-config" class="admin-panel">
+        <div class="admin-panel-header"><h3>Configuration</h3><button class="admin-refresh-btn" data-load="config">Refresh</button></div>
+        <div id="admin-config-content" class="admin-panel-body"><div class="admin-loading">Loading...</div></div>
+      </div>
+      <div id="admin-infra" class="admin-panel">
+        <div class="admin-panel-header"><h3>Infrastructure</h3><button class="admin-refresh-btn" data-load="infra">Refresh</button></div>
+        <div id="admin-infra-content" class="admin-panel-body"><div class="admin-loading">Loading...</div></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Credential modal (hidden by default) -->
+  <div id="cred-modal" style="display:none;position:fixed;inset:0;z-index:1000;background:rgba(0,0,0,0.6);align-items:center;justify-content:center">
+    <div style="background:var(--bg-card,#161b22);border:1px solid var(--border,#30363d);border-radius:8px;padding:20px;width:360px;max-width:90vw">
+      <div style="font-size:13px;font-weight:bold;margin-bottom:8px" id="cred-modal-name">Enter credential</div>
+      <div style="font-size:10px;color:var(--text-dim,#8b949e);margin-bottom:12px" id="cred-modal-desc"></div>
+      <input id="cred-modal-value" type="password" placeholder="Paste your credential value" autocomplete="off"
+        style="width:100%;box-sizing:border-box;padding:8px;border:1px solid var(--border,#30363d);border-radius:4px;background:var(--bg,#0d1117);color:var(--text,#c9d1d9);font-size:11px;margin-bottom:12px">
+      <div style="display:flex;gap:8px;justify-content:flex-end">
+        <button id="cred-modal-cancel" style="background:transparent;color:var(--text-dim,#8b949e);border:1px solid var(--border,#30363d);border-radius:4px;padding:6px 16px;cursor:pointer;font-size:10px">Cancel</button>
+        <button id="cred-modal-save" style="background:#238636;color:#fff;border:none;border-radius:4px;padding:6px 16px;cursor:pointer;font-size:10px">Save</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="sprites.js"></script>
+  <script type="module" src="app.js"></script>
+</body>
+</html>

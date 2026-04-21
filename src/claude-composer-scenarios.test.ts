@@ -16,7 +16,7 @@ import path from 'path';
 
 import { describe, expect, it } from 'vitest';
 
-import { readCoworkerTypes } from './claude-composer.js';
+import { composeCoworkerSpine, readCoworkerTypes } from './claude-composer.js';
 
 const REPO_ROOT = process.cwd();
 
@@ -132,27 +132,20 @@ describe('base-spine context fragment coverage', () => {
 });
 
 describe('groups/*/CLAUDE.md drift detection', () => {
-  // The committed groups/main/CLAUDE.md and groups/global/CLAUDE.md are the
-  // NEUTRAL snapshot — they equal the nanoclaw-base body verbatim. Project
-  // skills ship their additions as separate context fragments (e.g.
-  // dashboard-base/prompts/formatting.md, slang-spine/prompts/main-addon.md);
-  // the composer merges at runtime. Project branches therefore commit the
-  // SAME neutral snapshot — not a regenerated, addon-merged version — so
-  // two project branches never produce conflicting edits to these files.
-  //
-  // If this assertion fails: either (a) someone hand-edited groups/*/CLAUDE.md
-  // instead of going through nanoclaw-base/prompts/*-body.md + rebuild:claude,
-  // or (b) a project branch regenerated groups/*/CLAUDE.md with its addons
-  // merged in and committed the result — revert and keep the neutral snapshot.
-  it('groups/main/CLAUDE.md equals the neutral base body byte-for-byte', () => {
+  // groups/main/CLAUDE.md and groups/global/CLAUDE.md must match what the
+  // lego composer produces for the current set of installed skills. On
+  // v2_main alone they equal the neutral body; after merging a skill branch
+  // (e.g. dashboard-base) they include the addon fragments. rebuild:claude
+  // regenerates them — so the test composes dynamically and compares.
+  it('groups/main/CLAUDE.md matches the composed output for the current skill set', () => {
     const tracked = readFile('groups/main/CLAUDE.md');
-    const neutralBody = readFile('container/skills/nanoclaw-base/prompts/main-body.md');
-    expect(tracked).toBe(neutralBody);
+    const composed = composeCoworkerSpine({ coworkerType: 'main', projectRoot: REPO_ROOT });
+    expect(tracked).toBe(composed);
   });
 
-  it('groups/global/CLAUDE.md equals the neutral base body byte-for-byte', () => {
+  it('groups/global/CLAUDE.md matches the composed output for the current skill set', () => {
     const tracked = readFile('groups/global/CLAUDE.md');
-    const neutralBody = readFile('container/skills/nanoclaw-base/prompts/global-body.md');
-    expect(tracked).toBe(neutralBody);
+    const composed = composeCoworkerSpine({ coworkerType: 'global', projectRoot: REPO_ROOT });
+    expect(tracked).toBe(composed);
   });
 });

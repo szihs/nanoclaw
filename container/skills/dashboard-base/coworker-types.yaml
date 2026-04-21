@@ -1,0 +1,13 @@
+# Dashboard formatting addon for main/global.
+#
+# Contributes a single formatting block to both the main and global flat types
+# so the assistant knows how to render Markdown for the web dashboard channel.
+# The nanoclaw-base skill owns the base body; this file only appends `context:`.
+
+main:
+  context:
+    - container/skills/dashboard-base/prompts/formatting.md
+
+global:
+  context:
+    - container/skills/dashboard-base/prompts/formatting.md
