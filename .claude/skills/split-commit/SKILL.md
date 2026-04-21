@@ -196,3 +196,74 @@ Verification or late user feedback often surfaces a generic file sitting in a sp
   - Comment labels listing a project as one of several examples — replace with a placeholder (`<type>`) only if the sentence still parses.
 
 - **Generic functionality always flows to neutral.** When the user says "this is generic" about content in a specialized branch, treat it as a classification error: re-enter step 3 and re-apply, don't hand-edit the diff.
+
+## Independent vs stacked topology
+
+When the user says specialized branches should be **independent** (each forks from neutral, not from each other), extra discipline is required.
+
+### Why it matters
+
+If branch A and B are independent:
+```
+neutral → branch-A
+neutral → branch-B
+```
+Merging both into neutral must produce zero conflicts. Each branch carries ONLY its own files. Neither branch inherits the other's content.
+
+If they're stacked:
+```
+neutral → branch-A → branch-B
+```
+branch-B includes everything from A. Merging B alone brings A's content too. This is simpler but means B can't be adopted without A.
+
+### Creating independent branches from a stacked source
+
+When the source was stacked (e.g. `lego-slang` was on top of `lego-dashboard`), **`git merge --squash` from the stacked branch brings in ALL ancestor content** — not just that branch's own files. You MUST manually extract only the branch-owned files:
+
+```bash
+# WRONG — brings in dashboard files too:
+git merge --squash origin/skill/v2_slang
+
+# RIGHT — cherry-pick only slang-owned files:
+git checkout origin/skill/v2_slang -- container/skills/slang-* coworkers/ src/slang-*
+```
+
+### Shared infrastructure files (register.ts, index.ts, package.json)
+
+These are owned by the neutral branch. Specialized branches should NOT modify them. If a specialized branch needs changes to shared files (e.g. dashboard needs `startDashboardIngress` added to `src/index.ts`), those changes must be **additive** — they add new lines but don't change existing ones.
+
+**The merge-override trap:** When a specialized branch includes a copy of a shared file, `git merge` may silently take the specialized version over the neutral one. This loses neutral-only fixes (e.g. register.ts flags that were added after the specialized branch was created).
+
+**Prevention:** After creating a specialized branch via `merge --squash`, restore all shared infrastructure files from neutral:
+
+```bash
+git checkout origin/<neutral-branch> -- setup/register.ts package.json src/index.ts
+git add -u
+git commit --amend --no-edit
+```
+
+### Verification for independent topology
+
+After pushing, verify that merging ALL specialized branches onto neutral produces the expected tree:
+
+```bash
+git checkout <neutral> && git checkout -b verify
+git merge <branch-A> --no-edit
+git merge <branch-B> --no-edit
+# Check: all specialized content present, all neutral fixes preserved
+grep <critical-fix> <shared-file>  # must show neutral's version, not stale
+```
+
+If a shared file shows the specialized branch's stale version, the branch needs to be rebuilt with the neutral version of that file.
+
+### Squash workflow for independent skill branches
+
+1. Create worktree from neutral: `git worktree add /tmp/sq <neutral>`
+2. For each specialized branch:
+   a. `git checkout <neutral>` (reset to base)
+   b. `git checkout -b squashed-<branch>`
+   c. Cherry-pick ONLY branch-owned files from the source
+   d. Restore shared files from neutral: `git checkout <neutral> -- setup/ package.json src/index.ts`
+   e. Commit with descriptive message
+   f. Push
+3. Verify: merge all branches onto neutral, check no regressions
