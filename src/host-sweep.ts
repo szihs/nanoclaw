@@ -171,11 +171,16 @@ async function sweepSession(session: Session): Promise<void> {
       enforceRunningContainerSla(inDb, outDb, session, agentGroup.id);
     }
 
-    // 4. Wake a container if new work is due and nothing is running.
+    // 4. Wake or nudge a container if new work is due.
     const dueCount = countDueMessages(inDb);
-    if (dueCount > 0 && !isContainerRunning(session.id)) {
-      log.info('Waking container for due messages', { sessionId: session.id, count: dueCount });
-      await wakeContainer(session);
+    if (dueCount > 0) {
+      if (!isContainerRunning(session.id)) {
+        log.info('Waking container for due messages', { sessionId: session.id, count: dueCount });
+        await wakeContainer(session);
+      } else {
+        log.info('Nudging running container for due messages', { sessionId: session.id, count: dueCount });
+        await wakeContainer(session);
+      }
     }
 
     // 5. Recurrence fanout for completed recurring tasks.

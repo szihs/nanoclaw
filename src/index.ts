@@ -6,16 +6,17 @@
  */
 import path from 'path';
 
-import { DATA_DIR } from './config.js';
-import { migrateGroupsToClaudeLocal } from './claude-md-compose.js';
-import { initDb } from './db/connection.js';
+import { DATA_DIR, MCP_PROXY_PORT, PROXY_BIND_HOST } from './config.js';
+import { initDb, getDb } from './db/connection.js';
 import { runMigrations } from './db/migrations/index.js';
+import { getMessagingGroupsByChannel, getMessagingGroupAgents } from './db/messaging-groups.js';
 import { ensureContainerRuntimeRunning, cleanupOrphans } from './container-runtime.js';
 import { startActiveDeliveryPoll, startSweepDeliveryPoll, setDeliveryAdapter, stopDeliveryPolls } from './delivery.js';
 import { startHostSweep, stopHostSweep } from './host-sweep.js';
 import { routeInbound } from './router.js';
 import { log } from './log.js';
-
+import { startMcpServers, getRunningServerNames, getServerUpstreamPort } from './mcp-registry.js';
+import { startMcpAuthProxy, setUpstreamPortResolver, discoverTools } from './mcp-auth-proxy.js';
 // Response + shutdown registries live in response-registry.ts to break the
 // circular import cycle: src/index.ts imports src/modules/index.js for side
 // effects, and the modules call registerResponseHandler/onShutdown at top
@@ -53,7 +54,31 @@ import './channels/index.js';
 import './modules/index.js';
 
 import type { ChannelAdapter, ChannelSetup } from './channels/adapter.js';
-import { initChannelAdapters, teardownChannelAdapters, getChannelAdapter } from './channels/channel-registry.js';
+import {
+  initChannelAdapters,
+  teardownChannelAdapters,
+  getChannelAdapter,
+  getActiveAdapters,
+} from './channels/channel-registry.js';
+
+/**
+ * Per-wiring configuration pushed to adapters so they can pre-filter
+ * messages client-side (engage_mode / engage_pattern). Adapters that
+ * implement the optional `updateConversations` method receive these when
+ * wiring changes (e.g., create_agent).
+ */
+export interface ConversationConfig {
+  platformId: string;
+  agentGroupId: string;
+  engageMode: 'pattern' | 'mention' | 'mention-sticky';
+  engagePattern?: string | null;
+  ignoredMessagePolicy?: 'drop' | 'accumulate';
+  sessionMode: 'shared' | 'per-thread' | 'agent-shared';
+}
+
+// Module-level so shutdown() can access
+let mcpStackHandle: { stop: () => void } | null = null;
+let mcpProxyHandle: { stop: () => void } | null = null;
 
 async function main(): Promise<void> {
   log.info('NanoClaw starting');
@@ -64,12 +89,31 @@ async function main(): Promise<void> {
   runMigrations(db);
   log.info('Central DB ready', { path: dbPath });
 
-  // 1b. One-time filesystem cutover — idempotent, no-op after first run.
-  migrateGroupsToClaudeLocal();
-
   // 2. Container runtime
   ensureContainerRuntimeRunning();
   cleanupOrphans();
+  // Reset stale container_status from previous host runs
+  getDb().prepare("UPDATE sessions SET container_status = 'stopped' WHERE container_status = 'running'").run();
+
+  // 2b. MCP server stack (registry + auth proxy)
+  const mcpStack = await startMcpServers(MCP_PROXY_PORT + 100);
+  mcpStackHandle = mcpStack;
+  setUpstreamPortResolver((serverName) => {
+    if (serverName) return mcpStack.getUpstreamPort(serverName);
+    const names = getRunningServerNames();
+    return names.length > 0 ? getServerUpstreamPort(names[0]) : null;
+  });
+  mcpProxyHandle = startMcpAuthProxy(PROXY_BIND_HOST, MCP_PROXY_PORT);
+
+  // Discover tools from all running MCP servers
+  for (const name of getRunningServerNames()) {
+    const port = mcpStack.getUpstreamPort(name);
+    if (port) {
+      await discoverTools(name, port).catch((err) => {
+        log.warn('MCP tool discovery failed', { server: name, err });
+      });
+    }
+  }
 
   // 3. Channel adapters
   await initChannelAdapters((adapter: ChannelAdapter): ChannelSetup => {
@@ -161,6 +205,43 @@ async function main(): Promise<void> {
   log.info('NanoClaw running');
 }
 
+/**
+ * Refresh all active adapters with updated conversation configs from the DB.
+ * Called when messaging_group_agents wiring changes (e.g., create_agent).
+ */
+export function refreshAdapterConversations(): void {
+  for (const adapter of getActiveAdapters()) {
+    const a = adapter as ChannelAdapter & { updateConversations?(configs: ConversationConfig[]): void };
+    if (a.updateConversations) {
+      const configs = buildConversationConfigs(a.channelType);
+      a.updateConversations(configs);
+      log.debug('Adapter conversations refreshed', { channel: a.channelType, count: configs.length });
+    }
+  }
+}
+
+/** Build ConversationConfig[] for a channel type from the central DB. */
+function buildConversationConfigs(channelType: string): ConversationConfig[] {
+  const groups = getMessagingGroupsByChannel(channelType);
+  const configs: ConversationConfig[] = [];
+
+  for (const mg of groups) {
+    const agents = getMessagingGroupAgents(mg.id);
+    for (const agent of agents) {
+      configs.push({
+        platformId: mg.platform_id,
+        agentGroupId: agent.agent_group_id,
+        engageMode: agent.engage_mode === 'always' || agent.engage_mode === 'never' ? 'pattern' : agent.engage_mode,
+        engagePattern: agent.engage_pattern,
+        ignoredMessagePolicy: agent.ignored_message_policy ?? undefined,
+        sessionMode: agent.session_mode,
+      });
+    }
+  }
+
+  return configs;
+}
+
 /** Graceful shutdown. */
 async function shutdown(signal: string): Promise<void> {
   log.info('Shutdown signal received', { signal });
@@ -173,6 +254,8 @@ async function shutdown(signal: string): Promise<void> {
   }
   stopDeliveryPolls();
   stopHostSweep();
+  mcpProxyHandle?.stop();
+  mcpStackHandle?.stop();
   await teardownChannelAdapters();
   process.exit(0);
 }

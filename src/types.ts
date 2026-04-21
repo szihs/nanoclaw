@@ -4,7 +4,11 @@ export interface AgentGroup {
   id: string;
   name: string;
   folder: string;
+  is_admin: number; // 0 | 1
   agent_provider: string | null;
+  container_config: string | null; // JSON: { additionalMounts, timeout }
+  coworker_type: string | null; // coworker-types.yaml key, e.g. "base-reviewer" or "base-build+base-quality"
+  allowed_mcp_tools: string | null; // JSON: string[] of allowed MCP tool names
   created_at: string;
 }
 
@@ -16,6 +20,7 @@ export interface MessagingGroup {
   platform_id: string;
   name: string | null;
   is_group: number; // 0 | 1
+  admin_user_id: string | null;
   unknown_sender_policy: UnknownSenderPolicy;
   /**
    * When set, the owner explicitly denied registering this channel — the
@@ -30,72 +35,18 @@ export interface MessagingGroup {
   created_at: string;
 }
 
-// ── Identity & privilege ──
-
-/**
- * User = a messaging-platform identifier. Namespaced so distinct channels
- * with numeric IDs don't collide: "phone:+1555...", "tg:123", "discord:456",
- * "email:a@x.com". A single human with a phone AND a telegram handle has
- * two separate users — no cross-channel linking (yet).
- */
-export interface User {
-  id: string;
-  kind: string; // 'phone' | 'email' | 'discord' | 'telegram' | 'matrix' | ...
-  display_name: string | null;
-  created_at: string;
-}
-
-export type UserRoleKind = 'owner' | 'admin';
-
-/**
- * Role grant. Owner is always global. Admin is either global
- * (agent_group_id = null) or scoped to a specific agent group.
- * Admin @ A implicitly makes the user a member of A — we do not require
- * a separate agent_group_members row for admins.
- */
-export interface UserRole {
-  user_id: string;
-  role: UserRoleKind;
-  agent_group_id: string | null;
-  granted_by: string | null;
-  granted_at: string;
-}
-
-/** "Known" membership in an agent group — required for unprivileged users. */
-export interface AgentGroupMember {
-  user_id: string;
-  agent_group_id: string;
-  added_by: string | null;
-  added_at: string;
-}
-
-/** Cached DM channel for a user on a specific channel_type. */
-export interface UserDm {
-  user_id: string;
-  channel_type: string;
-  messaging_group_id: string;
-  resolved_at: string;
-}
-
-export type EngageMode = 'pattern' | 'mention' | 'mention-sticky';
-export type SenderScope = 'all' | 'known';
-export type IgnoredMessagePolicy = 'drop' | 'accumulate';
-
 export interface MessagingGroupAgent {
   id: string;
   messaging_group_id: string;
   agent_group_id: string;
-  engage_mode: EngageMode;
-  /**
-   * Regex source string used when engage_mode='pattern'. `'.'` is the sentinel
-   * for "match every message" (the "always" flavor). Ignored for 'mention' /
-   * 'mention-sticky' modes.
-   */
-  engage_pattern: string | null;
-  sender_scope: SenderScope;
-  ignored_message_policy: IgnoredMessagePolicy;
+  trigger_rules: string | null; // JSON: { pattern, mentionOnly, excludeSenders, includeSenders }
+  response_scope: 'all' | 'triggered' | 'allowlisted';
   session_mode: 'shared' | 'per-thread' | 'agent-shared';
   priority: number;
+  engage_mode: 'always' | 'pattern' | 'mention' | 'mention-sticky' | 'never';
+  engage_pattern: string | null;
+  sender_scope: 'all' | 'known' | 'admin-only' | null;
+  ignored_message_policy: 'drop' | 'accumulate' | null;
   created_at: string;
 }
 
@@ -174,8 +125,63 @@ export interface PendingApproval {
   platform_message_id: string | null;
   expires_at: string | null;
   status: 'pending' | 'approved' | 'rejected' | 'expired';
-  title: string;
-  options_json: string;
+  title: string | null;
+  options_json: string | null;
+}
+
+// ── Pending credentials (central DB) ──
+
+export type PendingCredentialStatus = 'pending' | 'submitted' | 'saved' | 'rejected' | 'failed';
+
+export interface PendingCredential {
+  id: string;
+  agent_group_id: string;
+  session_id: string | null;
+  name: string;
+  type: 'generic' | 'anthropic';
+  host_pattern: string;
+  path_pattern: string | null;
+  header_name: string | null;
+  value_format: string | null;
+  description: string | null;
+  channel_type: string;
+  platform_id: string;
+  platform_message_id: string | null;
+  status: PendingCredentialStatus;
+  created_at: string;
+}
+
+// ── Users (central DB) ──
+
+export interface User {
+  id: string;
+  kind: string;
+  display_name: string | null;
+  created_at: string;
+}
+
+export type UserRoleKind = 'owner' | 'admin';
+
+export interface UserRole {
+  user_id: string;
+  role: UserRoleKind;
+  agent_group_id: string | null;
+  granted_by: string | null;
+  granted_at: string;
+}
+
+export interface AgentGroupMember {
+  user_id: string;
+  agent_group_id: string;
+  added_by: string | null;
+  added_at: string;
+}
+
+export interface UserDm {
+  user_id: string;
+  channel_type: string;
+  messaging_group_id: string;
+  resolved_at: string;
 }
 
 // ── Agent destinations (central DB) ──

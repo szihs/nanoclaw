@@ -116,6 +116,7 @@ describe('messaging groups', () => {
     platform_id: 'chan-123',
     name: 'General',
     is_group: 1,
+    admin_user_id: null,
     unknown_sender_policy: 'strict' as const,
     created_at: now(),
   });
@@ -169,6 +170,7 @@ describe('messaging group agents', () => {
       platform_id: 'chan-1',
       name: 'Gen',
       is_group: 1,
+      admin_user_id: null,
       unknown_sender_policy: 'strict',
       created_at: now(),
     });
@@ -178,6 +180,8 @@ describe('messaging group agents', () => {
     id: 'mga-1',
     messaging_group_id: 'mg-1',
     agent_group_id: 'ag-1',
+    trigger_rules: null,
+    response_scope: 'all' as const,
     engage_mode: 'pattern' as const,
     engage_pattern: '.',
     sender_scope: 'all' as const,
@@ -263,6 +267,7 @@ describe('messaging group agents', () => {
       platform_id: 'chan-2',
       name: 'Gen',
       is_group: 1,
+      admin_user_id: null,
       unknown_sender_policy: 'strict',
       created_at: now(),
     });
@@ -292,6 +297,7 @@ describe('sessions', () => {
       platform_id: 'chan-1',
       name: 'Gen',
       is_group: 1,
+      admin_user_id: null,
       unknown_sender_policy: 'strict',
       created_at: now(),
     });

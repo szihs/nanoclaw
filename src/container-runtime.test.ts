@@ -84,7 +84,7 @@ describe('ensureContainerRuntimeRunning', () => {
 // --- cleanupOrphans ---
 
 describe('cleanupOrphans', () => {
-  it('stops orphaned nanoclaw containers', () => {
+  it('stops orphaned containers matching CONTAINER_PREFIX', () => {
     // docker ps returns container names, one per line
     mockExecSync.mockReturnValueOnce('nanoclaw-group1-111\nnanoclaw-group2-222\n');
     // stop calls succeed

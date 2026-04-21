@@ -90,6 +90,7 @@ beforeEach(async () => {
     platform_id: 'dm-owner',
     name: 'Owner DM',
     is_group: 0,
+    admin_user_id: null,
     unknown_sender_policy: 'public',
     created_at: now(),
   });

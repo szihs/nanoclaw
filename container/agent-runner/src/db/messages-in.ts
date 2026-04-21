@@ -57,7 +57,7 @@ export function getPendingMessages(): MessageInRow[] {
     .prepare(
       `SELECT * FROM messages_in
        WHERE status = 'pending'
-         AND (process_after IS NULL OR datetime(process_after) <= datetime('now'))
+         AND (process_after IS NULL OR REPLACE(REPLACE(process_after, 'T', ' '), 'Z', '') <= datetime('now'))
        ORDER BY seq DESC
        LIMIT ?`,
     )

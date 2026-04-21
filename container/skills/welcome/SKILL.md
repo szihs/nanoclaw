@@ -3,83 +3,61 @@ name: welcome
 description: Introduce yourself to a newly connected channel. Triggered automatically when a channel is first wired. Send a friendly greeting and brief overview of what you can do.
 ---
 
-# /welcome — Channel Onboarding (Updated)
+# /welcome — Channel Onboarding
 
-You've just been connected to a new user. This your time to shine and make a strong first impression. Introduce yourself and guide the user through what you can do. you got this!
+You've just been connected to a new messaging channel. Introduce yourself to the user.
+
+Ground the message in `docs/USAGE.md` and other repo docs when needed. Use documented NanoClaw workflows and capabilities as the source of truth. Do not invent features or tools that are not described in the docs.
 
 ## What to do
 
-1. Send a short, warm greeting using `send_message`
-2. State your name (from your system prompt / CLAUDE.md)
-3. Signal that you're capable of a lot — but don't list everything upfront. Be intriguing, not encyclopedic
-4. Ask: would they like to explore what you can do, or jump straight into something?
-
-**If they want to explore:** drip-feed one capability at a time. Briefly explain it, offer to demo a compelling example or let them try it. Never dump a full list.
-
-**If they want to jump in:** just go.
-
----
-
-## Capabilities to reveal (in order)
-
-Reveal these one at a time, in this sequence. Each should be 2–4 sentences max.
-
-### 1. Memory & Context Over Time
-You remember things across conversations — projects, preferences, people, decisions. Users don't have to re-explain context every session. The more they work with you, the more situationally aware you become.
-
-### 2. Spawning Persistent Agents (`create_agent`)
-You can spin up other named agents — a Researcher, a Builder, a Calendar agent — each with their own memory, workspace, and personality. They're addressable destinations: you delegate, they work, they report back. These aren't one-shot tasks; they accumulate context across sessions.
-
-### 3. Scheduled & Background Tasks
-You can run tasks on a schedule — daily briefings, monitors that alert only when something matters, recurring reminders. For bigger jobs, you can spin up an agent that works in the background while the conversation continues.
-
-### 4. Research & Web Browsing
-You can browse the web like a person — read articles, pull live data, summarize reports, compare products, answer questions that aren't in your training data. Ask me "what's the latest on X" or "find the best Y for Z" and I'll actually look it up. Very powerful when combined with scheduled tasks.
-
-### 5. Code & Building Things
-You can write, debug, and deploy full applications — scripts, APIs, frontend sites. You can spin up a dev server, test in a real browser, and deploy to production (e.g. Vercel). Concept to live URL.
-
-### 6. Interactive UI
-You can send structured cards and multiple-choice buttons directly into the chat — not just plain text. Useful for decisions, presenting options, or surfacing results cleanly.
-
-### 7. Files & Artifacts
-You can produce real deliverables — reports, PDFs, charts, generated images — and send them as downloadable files in chat, not just pasted text.
-
-### 8. Self-Customization
-You can add new tools and MCP servers to yourself if a capability isn't built in. You can extend your own toolkit when the task requires it.
-
----
-
-## Trust & Control — always include these
-
-After the capabilities tour (or woven in naturally), cover these two points. Frame them positively — users stay in control.
-
-### Approvals
-Sensitive actions — installing packages, adding MCP servers — require the user's explicit approval before you proceed. They'll get a prompt; nothing happens automatically. They can also add credentials to the OneCLI agent vault that require human-in-the-loop approval.
-
-### Access Control
-The user owns who can talk to you. Adding you to a new group or sharing a bot link with someone triggers an approval request on their end. Nobody interacts with you without their say-so.
-
----
-
-## How to interact — always mention this
-
-There are no special commands. Users just talk naturally. If they want something done, they say so. That's it.
-
----
-
-## Wrapping up
-
-After the tour, finish with an open invitation. Ask if they want help with something specific. Tell them they can share any generally what they're working on and any challenges they have currently and you can suggest ways you could help.
-
----
+1. Send a short, friendly greeting using `send_message`
+2. Mention your name (from your CLAUDE.md)
+3. Use a mostly fixed onboarding shape rather than inventing a fresh structure each time
+4. Briefly explain the Orchestrator role if applicable: you can handle requests directly, route to coworkers, and synthesize across coworker reports
+5. Mention the most helpful documented features for first-time onboarding. Prefer a compact mix of examples that covers:
+   - creating a new specialist coworker or agent
+   - scheduling a one-time or recurring task
+   - wiring agents/coworkers together so they can share findings directly
+   - messaging a coworker directly with `@CoworkerName`
+   - specifying the agent provider when relevant, for example Codex vs Claude, if that workflow is available in the current environment
+6. Include up to 5 short, concrete examples in natural language, not raw API docs
+7. Keep it to 3-5 sentences — enough to be useful, but still concise
 
 ## Tone
 
-Warm, confident, inviting. Make the user feel like they just unlocked something powerful. Match the channel vibe: casual for Telegram/Discord, slightly more professional for Slack/Teams.
+Warm but concise. This is a first impression — be helpful, not verbose. Match the channel's vibe (casual for Telegram/Discord, slightly more professional for Slack/Teams/email).
 
-## Important
+Prefer user-facing language from the docs: Orchestrator, coworkers, agents, direct `@` routing, reports, scheduling, wiring, and provider selection.
 
-- Scan your available MCP tools and skills before starting — know what you have, but keep it in your back pocket
-- Never overwhelm with a full capability list. Discovery should feel like unwrapping, not reading a manual
-- Confirmations and corrections from the user during onboarding are feedback — save them to memory for future sessions
+Lead with actions the user can actually try right away.
+
+Good example topics:
+- "Create a compiler specialist to investigate generic inference bugs"
+- "Remind me every Monday at 9am to review weekly metrics"
+- "Wire two coworkers so they can share findings directly"
+- "Create a Codex agent for this repo" or "Create a Claude agent for triage" when provider choice is supported
+
+If typed coworkers are available for the current environment, mention that new agents can be created from coworker types in the lego registry. Helpful type-oriented examples include:
+- "Create a coworker of type `<type>` to investigate this issue"
+- "Create a `<type>` coworker with the critique overlay attached"
+- "Spin up a triage agent using the appropriate coworker type"
+
+Do not include more than 5 examples total in the welcome message.
+
+Default output pattern:
+- Sentence 1: greeting + name + Orchestrator role
+- Sentence 2: core capabilities: create agents from templates, schedule tasks, wire agents, route to coworkers
+- Sentence 3: 3-5 example prompts the user can try immediately
+
+Preferred default wording:
+
+> Hey! I'm Andy, the Orchestrator. I can help directly, route work to a coworker, create specialists from coworker types, schedule one-off or recurring tasks, and wire agents together so they can collaborate directly. You can try things like "create a Codex agent for this repo", "create a specialist coworker with the critique overlay", "remind me every Monday at 9am to review metrics", or "wire these two agents so they can share findings".
+
+Stay close to this wording unless the current channel or available docs make part of it inaccurate.
+
+## Example
+
+> Hey! I'm Andy, the Orchestrator. I can help directly, route work to a coworker, create specialists from coworker types, schedule one-off or recurring tasks, and wire agents together so they can collaborate directly. You can try things like "create a Codex agent for this repo", "create a specialist coworker with the critique overlay", "remind me every Monday at 9am to review metrics", or "wire these two agents so they can share findings".
+
+Adapt based on your actual name and the documented workflow in the repo docs. Prioritize examples about creating agents, scheduling tasks, wiring agents, and choosing Codex vs Claude when that choice is available. Don't list every capability — pick the most useful examples for first-run onboarding.

@@ -40,6 +40,12 @@ interface RegisterArgs {
   assistantName: string;
   /** Session mode: 'shared' (one session per channel) or 'per-thread' */
   sessionMode: string;
+  /** Whether this agent group is an admin/orchestrator group */
+  isAdmin: boolean;
+  /** Coworker type from the lego registry (e.g. slang-triage, slang-fix) */
+  coworkerType: string | null;
+  /** Agent provider: 'claude' (default) or 'codex' */
+  agentProvider: string | null;
 }
 
 function parseArgs(args: string[]): RegisterArgs {
@@ -52,6 +58,9 @@ function parseArgs(args: string[]): RegisterArgs {
     requiresTrigger: false,
     assistantName: 'Andy',
     sessionMode: 'shared',
+    isAdmin: false,
+    coworkerType: null,
+    agentProvider: null,
   };
 
   for (let i = 0; i < args.length; i++) {
@@ -79,6 +88,15 @@ function parseArgs(args: string[]): RegisterArgs {
         break;
       case '--session-mode':
         result.sessionMode = args[++i] || 'shared';
+        break;
+      case '--is-admin':
+        result.isAdmin = true;
+        break;
+      case '--coworker-type':
+        result.coworkerType = args[++i] || null;
+        break;
+      case '--agent-provider':
+        result.agentProvider = args[++i] || null;
         break;
     }
   }
@@ -135,7 +153,9 @@ export async function run(args: string[]): Promise<void> {
       id: agId,
       name: parsed.assistantName,
       folder: parsed.folder,
-      agent_provider: null,
+      is_admin: parsed.isAdmin ? 1 : 0,
+      coworker_type: parsed.coworkerType,
+      agent_provider: parsed.agentProvider,
       created_at: new Date().toISOString(),
     });
     agentGroup = getAgentGroupByFolder(parsed.folder)!;
@@ -153,7 +173,7 @@ export async function run(args: string[]): Promise<void> {
       platform_id: parsed.platformId,
       name: parsed.name,
       is_group: 1,
-      unknown_sender_policy: 'strict',
+      unknown_sender_policy: parsed.channel === 'dashboard' ? 'public' : 'strict',
       created_at: new Date().toISOString(),
     });
     messagingGroup = getMessagingGroupByPlatform(parsed.channel, parsed.platformId)!;
@@ -179,8 +199,12 @@ export async function run(args: string[]): Promise<void> {
       agent_group_id: agentGroup.id,
       trigger_rules: triggerRules,
       response_scope: 'all',
-      session_mode: parsed.sessionMode,
+      session_mode: parsed.sessionMode as 'shared' | 'per-thread' | 'agent-shared',
       priority: 0,
+      engage_mode: parsed.requiresTrigger ? 'pattern' : 'always',
+      engage_pattern: parsed.trigger || null,
+      sender_scope: 'all',
+      ignored_message_policy: 'drop',
       created_at: new Date().toISOString(),
     });
     log.info('Wired agent to messaging group', {

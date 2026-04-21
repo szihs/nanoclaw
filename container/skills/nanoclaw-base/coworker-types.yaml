@@ -1,0 +1,20 @@
+# Upstream-parity defaults for the main and global assistants.
+#
+# These are `flat` types: their CLAUDE.md renders as the verbatim upstream body
+# plus any `context` fragments additive skills append. No auto-generated title,
+# no structured `## Identity` / `## Invariants` headings — the body file owns
+# its own formatting.
+#
+# With only this skill present, composeCoworkerSpine({ coworkerType: 'main' })
+# equals upstream/v2:groups/main/CLAUDE.md byte-for-byte. The fixture test in
+# src/claude-composer.test.ts pins this guarantee.
+
+main:
+  flat: true
+  description: "NanoClaw admin orchestrator — verbatim upstream/v2 main assistant."
+  identity: container/skills/nanoclaw-base/prompts/main-body.md
+
+global:
+  flat: true
+  description: "NanoClaw shared assistant base — verbatim upstream/v2 global assistant."
+  identity: container/skills/nanoclaw-base/prompts/global-body.md
