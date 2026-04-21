@@ -16,12 +16,16 @@ console = Console(stderr=True)
 from .config import close_http_clients, setup_environment  # noqa: E402
 from .discord import (  # noqa: E402
     ReadMessagesArgs,
+    SendMessageArgs,
     cleanup_discord_client,
+    init_discord_client,
     read_messages,
+    send_message,
 )
 from .github import (  # noqa: E402
     CreateOrUpdateFileArgs,
     GetDiscussionsArgs,
+    GetFileContentsArgs,
     GetIssueArgs,
     GetPullRequestArgs,
     GetPullRequestCommentsArgs,
@@ -31,6 +35,7 @@ from .github import (  # noqa: E402
     SearchIssuesArgs,
     create_or_update_file,
     get_discussions,
+    get_file_contents,
     get_issue,
     get_pull_request,
     get_pull_request_comments,
@@ -136,14 +141,8 @@ def main(port: int, transport: str) -> int:
 
         console.print(f"[green]Available APIs: {', '.join(available_apis)}[/green]")
 
-        # Initialize Discord client if available
-        if "Discord" in available_apis:
-            console.print("[green]Initializing Discord client...[/green]")
-            # Don't use anyio.run here as it creates and closes an event loop
-            # The Discord client will be initialized on first use instead
-            console.print(
-                "[green]Discord client will be initialized on first use[/green]"
-            )
+        # Discord client will be started eagerly inside the event loop (see arun below)
+        discord_eager_init = "Discord" in available_apis
 
         # Create MCP server
         app = Server("slang-mcp-server")
@@ -262,6 +261,9 @@ def main(port: int, transport: str) -> int:
                 elif name == "github_get_discussions":
                     args = GetDiscussionsArgs(**arguments)
                     result = await get_discussions(args)
+                elif name == "github_get_file_contents":
+                    args = GetFileContentsArgs(**arguments)
+                    result = await get_file_contents(args)
 
                 # GitLab Tools
                 elif name == "gitlab_get_file_contents":
@@ -281,6 +283,9 @@ def main(port: int, transport: str) -> int:
                 elif name == "discord_read_messages":
                     args = ReadMessagesArgs(**arguments)
                     result = await read_messages(args)
+                elif name == "discord_send_message":
+                    args = SendMessageArgs(**arguments)
+                    result = await send_message(args)
 
                 # Slack Tools - only whitelisted ones
                 elif name == "slack_post_message":
@@ -666,6 +671,34 @@ def main(port: int, transport: str) -> int:
                                 "required": ["owner", "repo"],
                             },
                         ),
+                        types.Tool(
+                            name="github_get_file_contents",
+                            description="Read a file or list a directory from a GitHub repository (read-only). Defaults to shader-slang/slang.",
+                            inputSchema={
+                                "type": "object",
+                                "properties": {
+                                    "owner": {
+                                        "type": "string",
+                                        "description": "Repository owner",
+                                        "default": "shader-slang",
+                                    },
+                                    "repo": {
+                                        "type": "string",
+                                        "description": "Repository name",
+                                        "default": "slang",
+                                    },
+                                    "path": {
+                                        "type": "string",
+                                        "description": "File or directory path within the repository",
+                                    },
+                                    "ref": {
+                                        "type": "string",
+                                        "description": "Branch, tag, or commit SHA (defaults to default branch)",
+                                    },
+                                },
+                                "required": ["path"],
+                            },
+                        ),
                     ]
                 )
 
@@ -900,6 +933,33 @@ def main(port: int, transport: str) -> int:
                                     },
                                 },
                                 "required": ["channel_id"],
+                            },
+                        ),
+                        types.Tool(
+                            name="discord_send_message",
+                            description="Send a message to a Discord channel, thread, or forum. For forums, creates a new thread/post. Restricted to allowed channels.",
+                            inputSchema={
+                                "type": "object",
+                                "properties": {
+                                    "channel_id": {
+                                        "type": "string",
+                                        "description": "Discord channel ID (text channel, thread, or forum channel)",
+                                    },
+                                    "content": {
+                                        "type": "string",
+                                        "description": "Message content",
+                                    },
+                                    "thread_name": {
+                                        "type": "string",
+                                        "description": "For forum channels: title for the new thread/post. Ignored for text channels and threads.",
+                                    },
+                                    "add_feedback_buttons": {
+                                        "type": "boolean",
+                                        "description": "If true, attach Resolved/Helpful/Not Helpful feedback buttons",
+                                        "default": False,
+                                    },
+                                },
+                                "required": ["channel_id", "content"],
                             },
                         ),
                     ]
