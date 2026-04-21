@@ -189,6 +189,10 @@ export async function requestApproval(opts: RequestApprovalOptions): Promise<voi
     action,
     payload: JSON.stringify(payload),
     created_at: new Date().toISOString(),
+    agent_group_id: session.agent_group_id,
+    channel_type: target.messagingGroup.channel_type,
+    platform_id: target.messagingGroup.platform_id,
+    platform_message_id: null,
     title,
     options_json: JSON.stringify(normalizedOptions),
   });
