@@ -11,6 +11,8 @@ import type { AgentGroup } from './types.js';
 // follow it and the container mount makes it valid at read time.
 const GLOBAL_MEMORY_CONTAINER_PATH = '/workspace/global/CLAUDE.md';
 
+const FLAT_COWORKER_TYPES = new Set(['main', 'global']);
+
 // Symlink name inside the group's dir. Claude Code's @-import only
 // follows paths inside cwd, so we can't reference /workspace/global
 // directly — we symlink into the group dir and import the symlink.
@@ -57,7 +59,8 @@ export function initGroupFilesystem(group: AgentGroup, opts?: { instructions?: s
   // can follow it. Only flat types (main/global) use the @import line in
   // their CLAUDE.md. Typed coworkers get operational content through
   // base-common context fragments instead, so skip the symlink for them.
-  if (!group.coworker_type) {
+  const needsFlatSetup = !group.coworker_type || FLAT_COWORKER_TYPES.has(group.coworker_type);
+  if (needsFlatSetup) {
     const globalLinkPath = path.join(groupDir, GLOBAL_MEMORY_LINK_NAME);
     let linkExists = false;
     try {
@@ -75,7 +78,7 @@ export function initGroupFilesystem(group: AgentGroup, opts?: { instructions?: s
   // groups/<folder>/CLAUDE.md — for flat (untyped) groups, write the @import
   // directive that pulls in the global body. Typed coworkers get their CLAUDE.md
   // composed by composeCoworkerClaudeMd in container-runner.ts on every wake.
-  if (!group.coworker_type) {
+  if (needsFlatSetup) {
     const claudeMdPath = path.join(groupDir, 'CLAUDE.md');
     if (!fs.existsSync(claudeMdPath)) {
       fs.writeFileSync(claudeMdPath, '@./.claude-global.md\n');
