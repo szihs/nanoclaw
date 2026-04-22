@@ -19,6 +19,7 @@ ARG INSTALL_CJK_FONTS=false
 # mean every rebuild silently picks up the latest and can break in lockstep
 # across all users.
 ARG CLAUDE_CODE_VERSION=2.1.121
+ARG CODEX_VERSION=0.124.0
 ARG AGENT_BROWSER_VERSION=latest
 ARG VERCEL_VERSION=latest
 ARG BUN_VERSION=1.3.12
@@ -146,7 +147,7 @@ RUN --mount=type=cache,target=/root/.cache/pnpm \
         "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
         "agent-browser@${AGENT_BROWSER_VERSION}" \
         "vercel@${VERCEL_VERSION}" \
-        @openai/codex
+        "@openai/codex@${CODEX_VERSION}"
 
 # ---- agent-runner ------------------------------------------------------------
 WORKDIR /app
@@ -156,7 +157,8 @@ WORKDIR /app
 COPY agent-runner/package.json agent-runner/bun.lock ./
 
 RUN --mount=type=cache,target=/root/.bun/install/cache \
-    bun install --frozen-lockfile
+    bun install --frozen-lockfile && \
+    rm -f node_modules/@anthropic-ai/claude-agent-sdk-linux-x64-musl/claude
 
 # Source. Bun runs TS directly — no tsc build step. The host remounts this
 # path at runtime via `src/container-runner.ts` so source edits on the host

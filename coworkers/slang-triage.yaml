@@ -1,6 +1,5 @@
 version: 3
-exportedAt: '2026-04-21T03:39:19.173Z'
-mode: standard
+exportedAt: '2026-04-28T10:05:35.533Z'
 requires:
   coworkerTypes:
     - slang-reader
@@ -9,29 +8,11 @@ requires:
 agent:
   name: Slang Triage
   folder: slang-triage
-  routing: direct
   coworkerType: slang-reader
+  routing: direct
   allowedMcpTools: null
   agentProvider: null
   containerConfig: null
-instructionTemplate: null
-trigger: '@SlangTriage'
-destinations:
-  - name: slang-triage-dashboard
-    type: channel
-    channelType: dashboard
-    platformId: dashboard:dashboard_slang-triage
-scheduledTasks:
-  - recurrence: 0 9 * * 1-5
-    processAfter: '2026-04-17 13:00:00'
-    content: >-
-      {"prompt":"Run the daily triage. Follow the process in memory file `triage_daily.md`:\n\n**Phase 1: Feedback
-      Review** — check issues with `Needs reporter feedback` label per `triage_feedback_review.md`.\n\n**Phase 2: New
-      Issue Triage** — populate inbox, clean up closed issues, then triage up to 15 issues from the inbox following
-      `triage_workflow.md`. After each triaged issue is removed from the inbox, if it has the `reproduced` label, send a
-      message to Slang Fixer: \"Fix issue #{ issue number }\".\n\nCommon rules are in `triage_common.md`. Start by
-      pulling the slang repo to latest origin/master, updating submodules, and rebuilding slangc and
-      slang-test.","script":null}
 instructions: >
   # Stetson
 
@@ -124,42 +105,6 @@ instructions: >
   ---
 
 
-  ## Shared Learnings
-
-
-  When you produce a result other agents might need (reports, findings, issue lists), save it to
-  `/workspace/group/memory/` so they can read it directly from your group folder without querying the database.
-
-
-  **At session start**, read `/workspace/global/learnings/INDEX.md` for a summary of discoveries shared by other
-  coworkers. Read individual files only when relevant to your current task.
-
-
-  **IMPORTANT: Always save learnings.** Whenever you solve a problem, find a workaround, discover undocumented behavior,
-  or learn something non-obvious about the codebase — share it immediately via `append_learning`. This is how the team
-  builds collective knowledge. Don't skip this even if the finding seems small.
-
-
-  cat > /workspace/ipc/tasks/learn_$(date +%s).json << 'EOF'
-
-  {
-    "type": "append_learning",
-    "content": "# Discovery Title\n\nWhat you learned and why it matters."
-  }
-
-  EOF
-
-
-  This writes to the shared learnings directory on the host. Other coworkers will see it on their next session.
-
-
-  Learnings paths:
-
-  - **Read from**: `/workspace/global/learnings/` (non-main) or `/workspace/project/groups/global/learnings/` (main)
-
-  - **Write via**: IPC `append_learning` task (as shown above)
-
-
   ## Available Subagents
 
 
@@ -198,7 +143,7 @@ instructions: >
   Subagents start with **zero context**. Every subagent prompt must include:
 
 
-  1. **Workspace path** — `/workspace/group/` (or specific project dir)
+  1. **Workspace path** — `/workspace/agent/` (or specific project dir)
 
   2. **Specific target** — file + function + line if known
 
@@ -214,7 +159,7 @@ instructions: >
 
   # Good brief
 
-  "In /workspace/group/<project>, trace why <function>() at
+  "In /workspace/agent/<project>, trace why <function>() at
 
   <file.cpp> fails when <condition>. Issue #<N>. Return: the exact
 
@@ -256,9 +201,9 @@ instructions: >
   After every report, save it so other coworkers can read it:
 
 
-  cp /workspace/group/memory/latest-report.md /workspace/group/memory/report-$(date +%Y-%m-%d).md 2>/dev/null
+  cp /workspace/agent/memory/latest-report.md /workspace/agent/memory/report-$(date +%Y-%m-%d).md 2>/dev/null
 
-  cat > /workspace/group/memory/latest-report.md << 'EOF'
+  cat > /workspace/agent/memory/latest-report.md << 'EOF'
 
   <your full report here>
 
@@ -354,9 +299,9 @@ instructions: >
 
   ### 4. Save the Report
 
-  - Save each triage report to `/workspace/group/reports/` as `issue-{number}.md`
+  - Save each triage report to `/workspace/agent/reports/` as `issue-{number}.md`
 
-  - Also maintain an index at `/workspace/group/reports/index.md` listing all triaged issues
+  - Also maintain an index at `/workspace/agent/reports/index.md` listing all triaged issues
 
   - Report your findings in the chat
 
@@ -479,9 +424,9 @@ instructions: >
 
   ### 4. Save the Report
 
-  - Save each triage report to `/workspace/group/reports/` as `issue-{number}.md`
+  - Save each triage report to `/workspace/agent/reports/` as `issue-{number}.md`
 
-  - Also maintain an index at `/workspace/group/reports/index.md` listing all triaged issues
+  - Also maintain an index at `/workspace/agent/reports/index.md` listing all triaged issues
 
   - Report your findings in the chat
 
@@ -604,9 +549,9 @@ instructions: >
 
   ### 4. Save the Report
 
-  - Save each triage report to `/workspace/group/reports/` as `issue-{number}.md`
+  - Save each triage report to `/workspace/agent/reports/` as `issue-{number}.md`
 
-  - Also maintain an index at `/workspace/group/reports/index.md` listing all triaged issues
+  - Also maintain an index at `/workspace/agent/reports/index.md` listing all triaged issues
 
   - Report your findings in the chat
 
@@ -729,9 +674,9 @@ instructions: >
 
   ### 4. Save the Report
 
-  - Save each triage report to `/workspace/group/reports/` as `issue-{number}.md`
+  - Save each triage report to `/workspace/agent/reports/` as `issue-{number}.md`
 
-  - Also maintain an index at `/workspace/group/reports/index.md` listing all triaged issues
+  - Also maintain an index at `/workspace/agent/reports/index.md` listing all triaged issues
 
   - Report your findings in the chat
 
@@ -766,6 +711,19 @@ instructions: >
   - If you need clarification on priorities or scope, just ask the user
 
   - The user can refine your triage approach over time — be open to feedback
+instructionTemplate: null
+trigger: '@SlangTriage'
+destinations:
+  - name: slang-triage-dashboard
+    type: channel
+    channelType: dashboard
+    platformId: dashboard:slang-triage
+  - name: orchestrator
+    type: agent
+    targetFolder: orchestrator
+  - name: slang-fixer
+    type: agent
+    targetFolder: slang-fixer
 memory:
   MEMORY.md: >
     - [Common Triage Rules](triage_common.md) — shared rules: guardrails, environment, process, reporting, GitHub
@@ -1025,13 +983,13 @@ memory:
 
     ### Local Build
 
-    - Repo cloned at `/workspace/group/slang/` with submodules
+    - Repo cloned at `/workspace/agent/slang/` with submodules
 
     - Built with `cmake --preset default --fresh` + `cmake --build --preset release --target slangc slang-test`
 
-    - `slangc` binary at `/workspace/group/slang/build/Release/bin/slangc`
+    - `slangc` binary at `/workspace/agent/slang/build/Release/bin/slangc`
 
-    - `slang-test` binary at `/workspace/group/slang/build/Release/bin/slang-test` (run from repo root)
+    - `slang-test` binary at `/workspace/agent/slang/build/Release/bin/slang-test` (run from repo root)
 
     - Keep updated: `git pull origin master && git submodule update --recursive --init` then rebuild
 

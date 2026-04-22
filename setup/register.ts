@@ -229,8 +229,10 @@ export async function run(args: string[]): Promise<void> {
     // responds when addressed); DMs default to 'pattern'/'.' (respond to
     // every message). An explicit --trigger overrides the pattern regex.
     const isGroup = messagingGroup.is_group === 1;
-    const engageMode: 'pattern' | 'mention' = isGroup && !parsed.trigger ? 'mention' : 'pattern';
-    const engagePattern: string | null = engageMode === 'pattern' ? parsed.trigger || '.' : null;
+    const engageMode: 'always' | 'pattern' | 'mention' = !parsed.requiresTrigger
+      ? 'always'
+      : isGroup && !parsed.trigger ? 'mention' : 'pattern';
+    const engagePattern: string | null = engageMode === 'pattern' ? parsed.trigger || '.' : (engageMode === 'always' ? parsed.trigger || null : null);
     createMessagingGroupAgent({
       id: mgaId,
       messaging_group_id: messagingGroup.id,

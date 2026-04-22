@@ -171,8 +171,8 @@ Feature content is split across independent skill branches that fork from the ne
 ```
 upstream/v2
   └── v2_main (neutral infrastructure + lego composer + register fixes)
-        ├── skill/v2_dashboard (Pixel Office dashboard + ingress + hook events)
-        └── skill/v2_slang (Slang compiler support + MCP + coworker types)
+        ├── nv-dashboard (Pixel Office dashboard + ingress + hook events)
+        └── nv-slang (Slang compiler support + MCP + coworker types)
 ```
 
 Each branch carries only its own files. Merging both into v2_main produces the full install. Neither branch inherits the other's content.
@@ -294,7 +294,7 @@ Sessions are created lazily on first message. The dashboard API eagerly creates 
 - **Onboard-coworker skill** — scans YAML bundles + lego registry, creates agents via dashboard API or `create_agent` MCP tool.
 - **Split-commit skill** — interactive skill for splitting mixed-concern commits into per-bucket branches with independent topology support.
 
-### Dashboard (skill/v2_dashboard)
+### Dashboard (nv-dashboard)
 
 - **Pixel Office** — isometric pixel-art office visualization with real-time agent status, SSE event streaming, tool use indicators.
 - **Dashboard ingress** — localhost HTTP bridge (port 3738) for browser chat → NanoClaw host routing.
@@ -302,7 +302,7 @@ Sessions are created lazily on first message. The dashboard API eagerly creates 
 - **Hook event timeline** — real-time visualization of container tool use, message delivery, and errors.
 - **Coworker management** — create, delete, update coworkers via the dashboard API with proper `coworker_type` and sender policy handling.
 
-### Slang Support (skill/v2_slang)
+### Slang Support (nv-slang)
 
 - **Slang MCP server** — Python-based MCP server with 14 tools for GitHub, Discord, Slack, and GitLab integration.
 - **Coworker types — `slang-reader` (investigate + review, read-only) and `slang-writer` (implement + document, full write) with lego spine composition.

@@ -211,10 +211,10 @@ async function main(): Promise<void> {
       }
     },
     onCredentialSubmitFn: async (_credentialId: string, _value: string) => {
-      log.warn('Dashboard credential submit not yet wired to response registry');
+      log.debug('Dashboard credential submit — response registry not yet implemented');
     },
     onCredentialRejectFn: async (_credentialId: string) => {
-      log.warn('Dashboard credential reject not yet wired to response registry');
+      log.debug('Dashboard credential reject — response registry not yet implemented');
     },
   });
 

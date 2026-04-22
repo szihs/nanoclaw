@@ -43,7 +43,14 @@ import {
 } from './db/session-db.js';
 import { log } from './log.js';
 import { openInboundDb, openOutboundDb, inboundDbPath, heartbeatPath } from './session-manager.js';
-import { isContainerRunning, killContainer, wakeContainer } from './container-runner.js';
+import {
+  detectStaleContainers,
+  isContainerRunning,
+  killContainer,
+  recomposeAndUpdateHash,
+  wakeContainer,
+} from './container-runner.js';
+import { writeSessionMessage } from './session-manager.js';
 import type { Session } from './types.js';
 
 const SWEEP_INTERVAL_MS = 60_000;
@@ -54,6 +61,8 @@ export const ABSOLUTE_CEILING_MS = 30 * 60 * 1000;
 // Stuck tolerance window applied per 'processing' claim — "did we see any
 // signs of life since this message was claimed?"
 export const CLAIM_STUCK_MS = 60 * 1000;
+// Service start time — claims older than this are orphans from a prior run.
+const SERVICE_START_MS = Date.now();
 const MAX_TRIES = 5;
 const BACKOFF_BASE_MS = 5000;
 
@@ -124,6 +133,88 @@ async function sweep(): Promise<void> {
     const sessions = getActiveSessions();
     for (const session of sessions) {
       await sweepSession(session);
+    }
+
+    // CLAUDE.md staleness: detect containers whose composed CLAUDE.md
+    // has changed since spawn (skills/overlays/instructions edited).
+    //
+    // Strategy: The container's poll-loop is single-threaded — while a
+    // Claude SDK query is running, new messages (including /clear) are
+    // explicitly skipped by the concurrent poller (poll-loop.ts:265).
+    // So /clear only works when the container is idle (between turns).
+    //
+    // - Idle container: send /clear + follow-up. The poll-loop picks
+    //   it up on the next iteration and starts a fresh session.
+    // - Mid-turn container: kill directly. The sweep will respawn it
+    //   with fresh CLAUDE.md on the next tick when due messages exist.
+    const stale = detectStaleContainers();
+    for (const { sessionId, agentGroupId, folder } of stale) {
+      let midTurn = false;
+      try {
+        const outDb = openOutboundDb(agentGroupId, sessionId);
+        try {
+          midTurn = getProcessingClaims(outDb).length > 0;
+        } finally {
+          outDb.close();
+        }
+      } catch {
+        midTurn = true; // can't read outbound.db → assume busy
+      }
+
+      if (midTurn) {
+        log.warn('CLAUDE.md stale (mid-turn) — killing container', { sessionId, folder });
+        killContainer(sessionId, 'claude-md-stale');
+        writeSessionMessage(agentGroupId, sessionId, {
+          id: `claudemd-refresh-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+          kind: 'chat',
+          timestamp: new Date().toISOString(),
+          platformId: agentGroupId,
+          channelType: 'agent',
+          threadId: null,
+          content: JSON.stringify({
+            text: 'Your instructions were updated. Container restarted to apply them. Continue your current task.',
+            sender: 'system',
+            senderId: 'system',
+          }),
+          processAfter: new Date(Date.now() + 5000)
+            .toISOString()
+            .replace('T', ' ')
+            .replace(/\.\d+Z$/, ''),
+        });
+      } else {
+        log.warn('CLAUDE.md stale (idle) — sending /clear', { sessionId, folder });
+        // Recompose CLAUDE.md on disk and update the hash so the next sweep
+        // doesn't re-detect as stale. The /clear resets the SDK session;
+        // the fresh file is picked up on the next Claude turn.
+        recomposeAndUpdateHash(sessionId);
+        const now = new Date().toISOString();
+        writeSessionMessage(agentGroupId, sessionId, {
+          id: `claudemd-clear-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+          kind: 'chat',
+          timestamp: now,
+          platformId: agentGroupId,
+          channelType: 'agent',
+          threadId: null,
+          content: JSON.stringify({ text: '/clear', sender: 'system', senderId: 'system' }),
+        });
+        writeSessionMessage(agentGroupId, sessionId, {
+          id: `claudemd-refresh-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+          kind: 'chat',
+          timestamp: now,
+          platformId: agentGroupId,
+          channelType: 'agent',
+          threadId: null,
+          content: JSON.stringify({
+            text: 'Your instructions were updated. Session cleared to apply them. Continue your current task.',
+            sender: 'system',
+            senderId: 'system',
+          }),
+          processAfter: new Date(Date.now() + 2000)
+            .toISOString()
+            .replace('T', ' ')
+            .replace(/\.\d+Z$/, ''),
+        });
+      }
     }
   } catch (err) {
     log.error('Host sweep error', { err });
@@ -217,11 +308,20 @@ function enforceRunningContainerSla(
   session: Session,
   agentGroupId: string,
 ): void {
+  // Filter out orphan claims from before this service started — they're
+  // leftovers from a prior run. The container cleans its own processing_ack
+  // on startup; killing it before that cleanup runs causes a respawn loop.
+  const allClaims = getProcessingClaims(outDb);
+  const claims = allClaims.filter((c) => {
+    const ts = Date.parse(c.status_changed);
+    return !Number.isNaN(ts) && ts >= SERVICE_START_MS;
+  });
+
   const decision = decideStuckAction({
     now: Date.now(),
     heartbeatMtimeMs: heartbeatMtimeMs(agentGroupId, session.id),
     containerState: getContainerState(outDb),
-    claims: getProcessingClaims(outDb),
+    claims,
   });
 
   if (decision.action === 'ok') return;

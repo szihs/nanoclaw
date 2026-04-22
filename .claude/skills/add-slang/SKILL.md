@@ -34,8 +34,8 @@ git remote add slang https://github.com/szihs/nanoclaw.git
 ### Merge the skill branch
 
 ```bash
-git fetch slang skill/v2_slang
-git merge slang/skill/v2_slang || {
+git fetch origin nv-slang
+git merge origin/nv-slang || {
   # Resolve package-lock.json conflicts if any
   git checkout --theirs package-lock.json 2>/dev/null && git add package-lock.json
   git merge --continue

@@ -110,12 +110,13 @@ Always test your script in the sandbox before scheduling.
 
 ## Memory
 
-The `conversations/` folder contains searchable history of past conversations.
+The file `CLAUDE.local.md` in your workspace is your per-group memory. Record things there that you'll want to remember in future sessions — user preferences, project context, recurring facts. Keep entries short and structured.
 
-When you learn something important:
-- Create files for structured data (e.g., `customers.md`, `preferences.md`)
-- Split files larger than 500 lines into folders
-- Keep an index in memory for the files you create
+When the user shares substantive information, store it somewhere you can retrieve it when relevant. If it's pertinent to every conversation turn, put it in `CLAUDE.local.md`. Otherwise, create a system for storing the information by type — e.g. a file of people, a file of projects. For every file you create, add a concise reference in `CLAUDE.local.md` so you can find it later.
+
+A core part of your job is how well you create these systems for organizing information. Evolve them over time as needed.
+
+Use the `conversations/` folder to recall context from previous sessions. For structured long-lived data, prefer dedicated files; split any file over ~500 lines into a folder with an index.
 
 ### Global memory
 

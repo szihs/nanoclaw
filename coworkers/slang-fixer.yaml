@@ -20,7 +20,13 @@ destinations:
   - name: slang-fixer-dashboard
     type: channel
     channelType: dashboard
-    platformId: dashboard:dashboard_slang-fixer
+    platformId: dashboard:slang-fixer
+  - name: orchestrator
+    type: agent
+    targetFolder: orchestrator
+  - name: slang-triage
+    type: agent
+    targetFolder: slang-triage
 instructions: >
   # Trelby — Slang Fixer Agent
 
@@ -45,10 +51,10 @@ instructions: >
   ### 2. Set Up Your Workspace
 
   - Clone the repo if not already cloned:
-    cd /workspace/group
+    cd /workspace/agent
     git clone --recursive --tags https://github.com/shader-slang/slang.git slang 2>/dev/null || (cd slang && git fetch origin && git checkout master && git pull)
   - Create your fix branch:
-    cd /workspace/group/slang
+    cd /workspace/agent/slang
     git checkout master && git pull
     git checkout -b dev/trelby/fix-<issue-number>
 
@@ -73,7 +79,7 @@ instructions: >
 
   ### 4. Build the Project
 
-  cd /workspace/group/slang
+  cd /workspace/agent/slang
 
 
   # Configure (first time only)
@@ -135,7 +141,7 @@ instructions: >
 
   ### 8. Push and Create PR
 
-  cd /workspace/group/slang
+  cd /workspace/agent/slang
 
   git add -A
 
@@ -220,7 +226,7 @@ instructions: >
 
   - Report your progress in the chat
 
-  - Save work logs to `/workspace/group/logs/`
+  - Save work logs to `/workspace/agent/logs/`
 
   - If you need triage info, ask the user to relay from Stetson, or check the issue's triage comment
 

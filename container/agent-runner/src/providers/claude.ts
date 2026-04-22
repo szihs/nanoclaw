@@ -314,11 +314,10 @@ export class ClaudeProvider implements AgentProvider {
     const sdkResult = sdkQuery({
       prompt: stream,
       options: {
-        pathToClaudeCodeExecutable: '/pnpm/claude',
+        pathToClaudeCodeExecutable: '/app/node_modules/@anthropic-ai/claude-agent-sdk-linux-x64/claude',
         cwd: input.cwd,
         additionalDirectories: this.additionalDirectories,
         resume: input.continuation,
-        pathToClaudeCodeExecutable: '/pnpm/claude',
         systemPrompt: instructions ? { type: 'preset' as const, preset: 'claude_code' as const, append: instructions } : undefined,
         allowedTools: [...BASE_TOOL_ALLOWLIST, ...this.extraAllowedTools],
         disallowedTools: [...SDK_DISALLOWED_TOOLS, ...(this.blockedTools ?? [])],

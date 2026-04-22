@@ -414,9 +414,14 @@ export function recomposeAndUpdateHash(sessionId: string): void {
   const ag = getAgentGroup(session.agent_group_id);
   if (!ag) return;
   composeCoworkerClaudeMd(ag);
+  // Hash must match what detectStaleContainers computes: composeCoworkerSpine output,
+  // NOT the file on disk (which may have @-import prefixes for flat types).
   try {
-    const content = fs.readFileSync(path.join(GROUPS_DIR, ag.folder, 'CLAUDE.md'));
-    spawnedClaudeMdHash.set(sessionId, crypto.createHash('sha256').update(content).digest('hex'));
+    const coworkerType = ag.coworker_type || 'global';
+    let extra: string | null = null;
+    try { extra = fs.readFileSync(path.join(GROUPS_DIR, ag.folder, '.instructions.md'), 'utf-8'); } catch { /* */ }
+    const composed = composeCoworkerSpine({ coworkerType, extraInstructions: extra });
+    spawnedClaudeMdHash.set(sessionId, crypto.createHash('sha256').update(composed).digest('hex'));
   } catch {
     /* best-effort */
   }
@@ -600,28 +605,41 @@ function buildMounts(
       const hasPlan = overlayNames.includes('plan-overlay');
       const hasCritique = overlayNames.includes('critique-overlay');
 
+      const hasCmd = (event: string, cmd: string): boolean =>
+        (settings.hooks[event] ?? []).some((h: { hooks?: { command?: string }[] }) =>
+          h.hooks?.some((i: { command?: string }) => i.command?.includes(cmd)),
+        );
+
       if (hasPlan || hasCritique) {
         if (!settings.hooks.UserPromptSubmit) settings.hooks.UserPromptSubmit = [];
-        settings.hooks.UserPromptSubmit.push({
-          hooks: [{ type: 'command', command: 'bash /app/hooks/workflow-state-reset.sh', timeout: 5 }],
-        });
+        if (!hasCmd('UserPromptSubmit', 'workflow-state-reset.sh')) {
+          settings.hooks.UserPromptSubmit.push({
+            hooks: [{ type: 'command', command: 'bash /app/hooks/workflow-state-reset.sh', timeout: 5 }],
+          });
+        }
       }
       if (hasPlan) {
-        settings.hooks.PreToolUse.push({
-          matcher: 'Edit|Write',
-          hooks: [{ type: 'command', command: 'bash /app/hooks/plan-gate.sh', timeout: 5 }],
-        });
+        if (!hasCmd('PreToolUse', 'plan-gate.sh')) {
+          settings.hooks.PreToolUse.push({
+            matcher: 'Edit|Write',
+            hooks: [{ type: 'command', command: 'bash /app/hooks/plan-gate.sh', timeout: 5 }],
+          });
+        }
         if (!settings.hooks.PostToolUse) settings.hooks.PostToolUse = [];
-        settings.hooks.PostToolUse.push({
-          matcher: 'Write',
-          hooks: [{ type: 'command', command: 'bash /app/hooks/plan-tracker.sh', timeout: 5 }],
-        });
+        if (!hasCmd('PostToolUse', 'plan-tracker.sh')) {
+          settings.hooks.PostToolUse.push({
+            matcher: 'Write',
+            hooks: [{ type: 'command', command: 'bash /app/hooks/plan-tracker.sh', timeout: 5 }],
+          });
+        }
       }
       if (hasCritique) {
         if (!settings.hooks.SubagentStart) settings.hooks.SubagentStart = [];
-        settings.hooks.SubagentStart.push({
-          hooks: [{ type: 'command', command: 'bash /app/hooks/critique-tracker.sh', timeout: 5 }],
-        });
+        if (!hasCmd('SubagentStart', 'critique-tracker.sh')) {
+          settings.hooks.SubagentStart.push({
+            hooks: [{ type: 'command', command: 'bash /app/hooks/critique-tracker.sh', timeout: 5 }],
+          });
+        }
       }
       if (hasPlan || hasCritique) {
         log.debug('Overlay hooks injected', { folder: agentGroup.folder, plan: hasPlan, critique: hasCritique });

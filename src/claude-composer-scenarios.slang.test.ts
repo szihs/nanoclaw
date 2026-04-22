@@ -46,7 +46,7 @@ describe('Scenario 3: + spine-slang', () => {
 });
 
 describe('Scenario 4: typed coworker (slang-reader)', () => {
-  it('renders a structured spine with ## Identity / Invariants / Workflows Available', () => {
+  it('renders a structured spine with ## Identity / Invariants / Workflows', () => {
     const spine = composeCoworkerSpine({
       projectRoot: REPO_ROOT,
       coworkerType: 'slang-reader',
@@ -55,7 +55,7 @@ describe('Scenario 4: typed coworker (slang-reader)', () => {
     expect(spine).toMatch(/^# Slang Reader\n/);
     expect(spine).toContain('## Identity');
     expect(spine).toContain('## Invariants');
-    expect(spine).toContain('## Workflows Available');
+    expect(spine).toContain('## Workflows');
     expect(spine).toContain('`/slang-investigate`');
   });
 
@@ -97,7 +97,7 @@ describe('Scenario 4: typed coworker (slang-reader)', () => {
     expect(spine.length).toBeLessThan(20000);
   });
 
-  it('groups the Workflows Available and Skills Available lists by category', () => {
+  it('groups the Workflows and Skills Available lists by category', () => {
     const spine = composeCoworkerSpine({
       projectRoot: REPO_ROOT,
       coworkerType: 'slang-reader',
@@ -112,12 +112,11 @@ describe('Scenario 4: typed coworker (slang-reader)', () => {
       return nextIdx === -1 ? rest : rest.slice(0, nextIdx);
     }
 
-    const workflows = section('Workflows Available');
+    const workflows = section('Workflows');
     // slang-reader workflows (investigate, review, slang-investigate) all fall
     // into similar categories, so sub-headers may be suppressed. Check content.
-    expect(workflows).toContain('/investigate');
-    expect(workflows).toContain('/review');
     expect(workflows).toContain('/slang-investigate');
+    expect(workflows).toContain('/slang-review');
 
     const skills = section('Skills Available');
     expect(skills).toContain('**Repo**');
