@@ -19,6 +19,10 @@ logger = logging.getLogger(__name__)
 FEEDBACK_DIR = os.environ.get("DISCORD_FEEDBACK_DIR", "/tmp/discord-feedback")
 
 
+# Track active selections per message: {message_id: set("resolved", "helpful", ...)}
+_active_selections: dict[str, set[str]] = {}
+
+
 class FeedbackView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
@@ -34,10 +38,11 @@ class FeedbackView(discord.ui.View):
                 return False
         return True
 
-    def _save_feedback(self, label, interaction):
+    def _save_feedback(self, label, action, interaction):
         os.makedirs(FEEDBACK_DIR, exist_ok=True)
         entry = json.dumps({
             "label": label,
+            "action": action,
             "message_id": str(interaction.message.id) if interaction.message else None,
             "channel_id": str(interaction.channel_id),
             "user": interaction.user.name,
@@ -46,39 +51,42 @@ class FeedbackView(discord.ui.View):
         path = os.path.join(FEEDBACK_DIR, "feedback.jsonl")
         with open(path, "a") as f:
             f.write(entry + "\n")
-        logger.info(f"Feedback saved: {label} by {interaction.user.name}")
+        logger.info(f"Feedback {action}: {label} by {interaction.user.name}")
 
-    @discord.ui.button(label="Resolved", style=discord.ButtonStyle.green, custom_id="feedback:resolved")
+    async def _toggle(self, label, interaction):
+        if not await self._check_op(interaction):
+            return
+        msg_id = str(interaction.message.id) if interaction.message else ""
+        selections = _active_selections.setdefault(msg_id, set())
+        if label in selections:
+            selections.discard(label)
+            self._save_feedback(label, "removed", interaction)
+        else:
+            selections.add(label)
+            self._save_feedback(label, "added", interaction)
+        await interaction.response.edit_message(view=self._updated_view(selections))
+
+    @discord.ui.button(label="Resolved", style=discord.ButtonStyle.grey, custom_id="feedback:resolved")
     async def resolved(self, interaction, button):
-        if not await self._check_op(interaction):
-            return
-        self._save_feedback("resolved", interaction)
-        await interaction.response.edit_message(view=self._disabled_view("Resolved"))
+        await self._toggle("resolved", interaction)
 
-    @discord.ui.button(label="Helpful", style=discord.ButtonStyle.blurple, custom_id="feedback:helpful")
+    @discord.ui.button(label="Helpful", style=discord.ButtonStyle.grey, custom_id="feedback:helpful")
     async def helpful(self, interaction, button):
-        if not await self._check_op(interaction):
-            return
-        self._save_feedback("helpful", interaction)
-        await interaction.response.edit_message(view=self._disabled_view("Helpful"))
+        await self._toggle("helpful", interaction)
 
     @discord.ui.button(label="Not Helpful", style=discord.ButtonStyle.grey, custom_id="feedback:not_helpful")
     async def not_helpful(self, interaction, button):
-        if not await self._check_op(interaction):
-            return
-        self._save_feedback("not_helpful", interaction)
-        await interaction.response.edit_message(view=self._disabled_view("Not Helpful"))
+        await self._toggle("not_helpful", interaction)
 
-    def _disabled_view(self, selected):
-        view = discord.ui.View(timeout=None)
-        for item in self.children:
-            b = discord.ui.Button(
-                label=f"{item.label} {'(selected)' if item.label == selected else ''}",
-                style=discord.ButtonStyle.green if item.label == selected else discord.ButtonStyle.grey,
-                custom_id=item.custom_id,
-                disabled=True,
-            )
-            view.add_item(b)
+    @staticmethod
+    def _updated_view(selections):
+        view = FeedbackView()
+        for item in view.children:
+            label = {"feedback:resolved": "resolved", "feedback:helpful": "helpful", "feedback:not_helpful": "not_helpful"}.get(item.custom_id, "")
+            if label in selections:
+                item.style = discord.ButtonStyle.green if label == "resolved" else discord.ButtonStyle.blurple if label == "helpful" else discord.ButtonStyle.red
+            else:
+                item.style = discord.ButtonStyle.grey
         return view
 
 
