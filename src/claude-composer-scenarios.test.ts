@@ -16,7 +16,7 @@ import path from 'path';
 
 import { describe, expect, it } from 'vitest';
 
-import { readCoworkerTypes } from './claude-composer.js';
+import { composeCoworkerSpine, readCoworkerTypes } from './claude-composer.js';
 
 const REPO_ROOT = process.cwd();
 
@@ -101,8 +101,8 @@ describe('Upstream drift detection', () => {
   });
 });
 
-describe('base-spine context fragment coverage', () => {
-  // The operational content from global-body.md is extracted into base-spine
+describe('spine-base context fragment coverage', () => {
+  // The operational content from global-body.md is extracted into spine-base
   // context fragments (capabilities.md + operations.md) so typed coworkers
   // inherit NanoClaw operational guidance. When upstream changes global-body.md,
   // this test fails until the fragments are updated to match.
@@ -120,8 +120,8 @@ describe('base-spine context fragment coverage', () => {
 
   it.skip('capabilities.md + operations.md cover all non-identity content from global-body.md — skipped: v2 flat body diverged from typed spine fragments intentionally', () => {
     const globalBody = readFile('container/skills/nanoclaw-base/prompts/global-body.md');
-    const capabilities = readFile('container/skills/base-spine/context/capabilities.md');
-    const operations = readFile('container/skills/base-spine/context/operations.md');
+    const capabilities = readFile('container/skills/spine-base/context/capabilities.md');
+    const operations = readFile('container/skills/spine-base/context/operations.md');
 
     // Skip identity preamble (lines before "## What You Can Do")
     const afterIdentity = globalBody.replace(/^.*?(?=## What You Can Do)/s, '');
@@ -129,32 +129,25 @@ describe('base-spine context fragment coverage', () => {
     const actual = contentLines(capabilities + '\n' + operations);
 
     const missing = expected.filter((line) => !actual.includes(line));
-    expect(missing, `Content from global-body.md missing in base-spine fragments:\n${missing.join('\n')}`).toEqual([]);
+    expect(missing, `Content from global-body.md missing in spine-base fragments:\n${missing.join('\n')}`).toEqual([]);
   });
 });
 
 describe('groups/*/CLAUDE.md drift detection', () => {
-  // The committed groups/main/CLAUDE.md and groups/global/CLAUDE.md are the
-  // NEUTRAL snapshot — they equal the nanoclaw-base body verbatim. Project
-  // skills ship their additions as separate context fragments (e.g.
-  // dashboard-base/prompts/formatting.md, slang-spine/prompts/main-addon.md);
-  // the composer merges at runtime. Project branches therefore commit the
-  // SAME neutral snapshot — not a regenerated, addon-merged version — so
-  // two project branches never produce conflicting edits to these files.
-  //
-  // If this assertion fails: either (a) someone hand-edited groups/*/CLAUDE.md
-  // instead of going through nanoclaw-base/prompts/*-body.md + rebuild:claude,
-  // or (b) a project branch regenerated groups/*/CLAUDE.md with its addons
-  // merged in and committed the result — revert and keep the neutral snapshot.
-  it('groups/main/CLAUDE.md equals the neutral base body byte-for-byte', () => {
+  // groups/main/CLAUDE.md and groups/global/CLAUDE.md must match what the
+  // lego composer produces for the current set of installed skills. On
+  // lego-main alone they equal the neutral body; after merging a skill branch
+  // (e.g. dashboard-base) they include the addon fragments. rebuild:claude
+  // regenerates them — so the test composes dynamically and compares.
+  it('groups/main/CLAUDE.md matches the composed output for the current skill set', () => {
     const tracked = readFile('groups/main/CLAUDE.md');
-    const neutralBody = readFile('container/skills/nanoclaw-base/prompts/main-body.md');
-    expect(tracked).toBe(neutralBody);
+    const composed = composeCoworkerSpine({ coworkerType: 'main', projectRoot: REPO_ROOT });
+    expect(tracked).toBe(composed);
   });
 
-  it('groups/global/CLAUDE.md equals the neutral base body byte-for-byte', () => {
+  it('groups/global/CLAUDE.md matches the composed output for the current skill set', () => {
     const tracked = readFile('groups/global/CLAUDE.md');
-    const neutralBody = readFile('container/skills/nanoclaw-base/prompts/global-body.md');
-    expect(tracked).toBe(neutralBody);
+    const composed = composeCoworkerSpine({ coworkerType: 'global', projectRoot: REPO_ROOT });
+    expect(tracked).toBe(composed);
   });
 });

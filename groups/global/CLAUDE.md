@@ -88,35 +88,3 @@ Use `mcp__nanoclaw__add_mcp_server` to register an MCP server, then `mcp__nanocl
 ### Durable learnings
 
 Share discoveries through `mcp__nanoclaw__append_learning` so future coworkers benefit from what you find.
-
----
-
-### Dashboard and web UI (`dashboard:*`)
-
-Use standard Markdown:
-
-- `**bold**`
-- `*italic*`
-- `[links](url)`
-- `## headings`
-- fenced code blocks
-
-Use Unicode emoji directly (`✅ ❌ ⚠️ 🚀`) instead of `:emoji:` shortcodes because the web renderer does not expand shortcode syntax.
-
-When you are unsure which channel you are on, prefer standard Markdown with Unicode emoji.
-
----
-
-### Slang compiler project
-
-This workspace includes a Slang compiler specialization for `shader-slang/slang`.
-
-Use `/slang-build` for cloning, building, and navigating the Slang compiler.
-
-If the repo is not already present at `/workspace/group/slang`, clone it there before starting code work.
-
-Read the Slang repo's own `CLAUDE.md` before making changes.
-
-- Detailed build, structure, and gotchas guides live in `/home/node/.claude/skills/slang-build/`
-- Use `mcp__deepwiki__*` tools for `shader-slang/slang` documentation
-- Share durable learnings through `append_learning`

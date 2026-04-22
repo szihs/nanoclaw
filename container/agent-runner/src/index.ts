@@ -107,6 +107,11 @@ async function main(): Promise<void> {
         SESSION_HEARTBEAT_PATH: process.env.SESSION_HEARTBEAT_PATH || '/workspace/.heartbeat',
       },
     },
+    codex: {
+      command: 'codex',
+      args: ['-m', process.env.CODEX_MODEL || 'gpt-5.4-codex-max', '-c', `model_reasoning_effort=${process.env.CODEX_REASONING_EFFORT || 'xhigh'}`, 'mcp-server'],
+      env: {},
+    },
   };
 
   // Merge additional MCP servers from host configuration

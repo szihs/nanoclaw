@@ -1,8 +1,8 @@
 ---
-name: base-review
+name: review
 type: workflow
-description: Review a proposed change (PR, diff, or patch) against project conventions and produce actionable feedback. Use when asked to review, critique, or approve a change. Do not use for investigation of an open bug — that is triage's job.
-requires: [vcs-read, code-read]
+description: Review a proposed change (PR, diff, or patch) against project conventions and produce actionable feedback. Use when asked to review, critique, or approve a change.
+requires: [repo.read, code.read, doc.read]
 uses:
   skills: []
   workflows: []

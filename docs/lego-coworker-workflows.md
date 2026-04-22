@@ -28,7 +28,7 @@ main / global (flat) — NanoClaw's admin + shared assistants; separate lineage.
 
 | Layer | What it owns | Where it lives | Directly composable? |
 |---|---|---|---|
-| **Universal spine** | Safety/truth invariants, workspace context, trait-only workflows | `container/skills/base-spine/` + `base-*-workflow/` | No — abstract base |
+| **Universal spine** | Safety/truth invariants, workspace context, trait-only workflows | `container/skills/spine-base/` + `base-*-workflow/` | No — abstract base |
 | **Project spine** | Project identity, project invariants, default bindings, project skills | `container/skills/<project>-spine/` + `<project>-*/` | No if extended — abstract base |
 | **Leaf coworker** | Task-narrow persona, extra workflows, overlays, bindings | `container/skills/<project>-spine/coworker-types.yaml` (inline) | Yes |
 | **Flat assistants** | `main`, `global` — verbatim upstream prose body + additive context | `container/skills/nanoclaw-base/` + any addon (`dashboard-base/`, `slang-spine/`) | Yes |
@@ -42,7 +42,7 @@ Monolithic role templates burned context on procedural detail that was only rele
 The lego model fixes both:
 
 - **Spine + progressive disclosure** — CLAUDE.md stays small. Workflow and skill bodies live in `container/skills/<name>/SKILL.md` and load when the agent invokes the slash command.
-- **Traits + bindings** — base workflows declare what they *need* (`requires: [vcs-pr, code-edit]`); coworker types declare what they *use* (`bindings: { vcs-pr: slang-github }`). The same `base-fix` workflow runs unchanged on Slang, on a Perforce project, or on a Jujutsu project.
+- **Traits + bindings** — base workflows declare what they *need* (`requires: [repo.pr, code.edit]`); coworker types declare what they *use* (`bindings: { repo: slang-github }`). The same `implement` workflow runs unchanged on Slang, on a Perforce project, or on a Jujutsu project.
 - **Overlays** — orthogonal concerns (critique, telemetry, approval gating) plug into any matching workflow without editing its body.
 
 ## Glossary
@@ -68,31 +68,28 @@ Naming rules:
 - Lowercase dash-case for every artifact, trait, and step ID.
 - Base workflows: `base-*`. Project skills and types: `<project>-*`. Universal skills skip the project prefix (`deep-research`, `codex-critique`).
 - Overlay names end in `-overlay`.
-- Trait names follow `<domain>-<verb>`: `vcs-pr`, `code-edit`, `ci-inspect`. No nouny traits like `"github"` — that's a project, not a capability.
+- Trait qualifiers follow `<domain>.<qualifier>`: `repo.pr`, `code.edit`, `ci.inspect`. Bindings use domain-only keys.
 
-## Canonical trait vocabulary
+## Trait vocabulary
 
-Extend as new projects need them. A skill can provide multiple traits.
+Traits use dotted qualifiers: `<domain>.<qualifier>`. The domain groups related capabilities; the qualifier specifies the sub-capability. Bindings are keyed by domain; workflows and skills use the full qualified form.
 
-| Trait | Intent |
-|---|---|
-| `vcs-read` | Read repo state: status, diff, log, branches. |
-| `vcs-write` | Commit, push, create branches. |
-| `vcs-pr` | Open, update, comment on pull/merge requests. |
-| `issue-tracker` | Read/update issues. |
-| `ci-inspect` | Read CI status + logs. |
-| `ci-rerun` | Trigger CI reruns. |
-| `code-read` | Grep/Glob/Read source. |
-| `code-edit` | Patch + commit a code change. |
-| `code-build` | Build/compile the project. |
-| `test-run` | Execute the existing test suite. |
-| `test-gen` | Author new tests. |
-| `doc-read` | Read project docs. |
-| `doc-write` | Author/update docs. |
-| `research` | External deep-research (deepwiki, web). |
-| `critique` | Quality-assess an artifact and score/flag it. |
+| Domain | Qualifiers | Intent |
+|---|---|---|
+| `repo` | `repo.read`, `repo.write`, `repo.pr` | Git/VCS — branches, diffs, commits, PRs. |
+| `issues` | `issues.read`, `issues.write` | Issue tracker — view, create, label. |
+| `ci` | `ci.inspect`, `ci.rerun` | CI — read status/logs, trigger reruns. |
+| `code` | `code.read`, `code.edit`, `code.build` | Source code — search, edit, build. |
+| `test` | `test.run`, `test.gen` | Tests — run existing, author new. |
+| `doc` | `doc.read`, `doc.write` | Documentation — read, author/update. |
+| `plan` | `plan.research` | External research — deepwiki, web. |
+| `critique` | `critique.review` | Quality review — external critique. |
 
-Each trait maps to a rendering category so the spine's Skills / Workflows lists group by domain (VCS / Code / Test / CI / Research / Critique / Other). The mapping is in `src/claude-composer/spine.ts#TRAIT_TO_CATEGORY`; unknown traits fall into Other. If only one category is present, sub-headers are suppressed. See "Spine category grouping" below.
+Traits are emergent — declared in `provides:` and `requires:` on SKILL.md frontmatter. No central registry. The validator matches qualified strings exactly. Bindings map at the domain level: `bindings: { repo: my-github }`. The validator extracts the domain from a qualified trait (`repo.pr` → `repo`), looks up the binding, and checks the bound skill's `provides:` includes the full qualifier.
+
+Fallback: if the bound skill doesn't cover a qualifier, the validator checks all skills in the coworker's set. This handles split-provider scenarios (e.g. `ci.inspect` from one skill, `ci.rerun` from another).
+
+Display categories group by domain. The mapping is in `src/claude-composer/spine.ts#DOMAIN_TO_CATEGORY`.
 
 ---
 
@@ -123,7 +120,7 @@ This is how `dashboard-base/coworker-types.yaml` adds a formatting block to `mai
 
 Plain markdown. Composed by path reference from a coworker type.
 
-`container/skills/base-spine/invariants/safety.md`:
+`container/skills/spine-base/invariants/safety.md`:
 
 ```md
 - Never silence a failing test to make a task "done".
@@ -146,7 +143,7 @@ You know its subsystems, its public-API invariants, and its build + test layout.
 ---
 name: slang-github
 description: Interact with GitHub for shader-slang/slang. Fetches issues/PRs, reviews diffs, creates PRs.
-provides: [vcs-read, vcs-write, vcs-pr, issue-tracker, ci-rerun]
+provides: [repo.read, repo.write, repo.pr, issues.read, ci.rerun]
 allowed-tools: Bash(git:*), Bash(gh:*), Read, Grep, Glob, mcp__slang-mcp__github_get_issue, mcp__slang-mcp__github_get_pull_request
 ---
 
@@ -162,17 +159,17 @@ Key points:
 
 ### 3. Workflow (base)
 
-`container/skills/base-fix-workflow/SKILL.md`:
+`container/skills/implement-workflow/SKILL.md`:
 
 ```yaml
 ---
-name: base-fix
+name: implement
 type: workflow
 description: Take a triaged issue from reproduction through minimal patch, tests, and PR-ready state.
-requires: [code-read, code-edit, test-run, vcs-pr]
+requires: [code.read, code.edit, test.run, repo.pr]
 uses:
   skills: []
-  workflows: [base-triage]
+  workflows: [investigate]
 ---
 
 # Base Fix
@@ -197,16 +194,16 @@ Step IDs (`{#load-context}`, `{#patch}`, …) are the seams. Anchor only the ste
 ---
 name: slang-fix
 type: workflow
-description: Slang specialization of /base-fix — build, test, PR conventions.
-extends: base-fix
-requires: [code-read, code-edit, test-run, vcs-pr]
+description: Slang specialization of /implement — build, test, PR conventions.
+extends: implement
+requires: [code.read, code.edit, test.run, repo.pr]
 overrides:
   reproduce: "Extract the failing case into tests/bugs/issue-{{issueNumber}}.slang. Commit the failing test first so CI can show the delta."
   patch:     "Use /slang-patch to implement the minimum change. Keep the patch inside one subsystem."
   validate:  "Rebuild with /slang-build, run ./build/Debug/bin/slang-test tests/bugs/issue-{{issueNumber}}.slang and ./extras/formatting.sh."
 uses:
   skills: [slang-build, slang-explore, slang-github, slang-patch]
-  workflows: [base-fix]
+  workflows: [implement]
 ---
 ```
 
@@ -220,14 +217,24 @@ The composer renders an `extends` customization line in the spine; on invocation
 ---
 name: critique-overlay
 type: overlay
-description: Insert an external critique step after a workflow's patch / generate / draft step.
+description: Insert an external critique step after a workflow patch or draft step.
 applies-to:
-  workflows: [base-fix, base-test-gen, base-docs]
-  traits: [code-edit, test-gen, doc-write]
-insert-after: [patch, generate, draft]
+  workflows: [implement, document]
+  traits: [code, test, doc]
+insert-after: [patch, draft]
 uses:
   skills: [codex-critique]
 ---
+
+
+
+
+
+
+
+
+
+
 
 **Critique** {#critique} — before committing, invoke `/codex-critique` against the working diff.
 - If the critique returns `must-fix` items, do not commit. Loop back.
@@ -238,29 +245,23 @@ The overlay attaches to a **coworker type** (not a workflow). At compose time th
 
 ### 6. Coworker type
 
-`container/skills/base-spine/coworker-types.yaml`:
+`container/skills/spine-base/coworker-types.yaml`:
 
 ```yaml
 base-common:
   description: "Universal coworker spine — safety, truthfulness, scope, workspace conventions."
   invariants:
-    - container/skills/base-spine/invariants/safety.md
-    - container/skills/base-spine/invariants/truthfulness.md
-    - container/skills/base-spine/invariants/scope.md
+    - container/skills/spine-base/invariants/safety.md
+    - container/skills/spine-base/invariants/truthfulness.md
+    - container/skills/spine-base/invariants/scope.md
   context:
-    - container/skills/base-spine/context/capabilities.md
-    - container/skills/base-spine/context/workspace.md
-    - container/skills/base-spine/context/invocation.md
-    - container/skills/base-spine/context/operations.md
+    - container/skills/spine-base/context/capabilities.md
+    - container/skills/spine-base/context/workspace.md
+    - container/skills/spine-base/context/invocation.md
+    - container/skills/spine-base/context/operations.md
   skills:
     - base-nanoclaw
-    - deep-research
-  workflows:
-    - base-triage
-    - base-review
-    - base-sweep
-    - base-ci-health
-    - base-research
+
 ```
 
 `container/skills/slang-spine/coworker-types.yaml`:
@@ -274,29 +275,26 @@ slang-common:
   invariants: [container/skills/slang-spine/invariants/public-api.md]
   context:    [container/skills/slang-spine/context/layout.md]
   skills:     [slang-build, slang-explore, slang-github]
-  workflows:  [base-pr-update]
+  workflows:  [implement]
   bindings:
-    vcs-read: slang-github
-    vcs-write: slang-github
-    vcs-pr: slang-github
-    issue-tracker: slang-github
-    code-read: slang-explore
-    code-build: slang-build
-    test-run: slang-build
-    ci-inspect: slang-build
-    ci-rerun: slang-github
+    repo: slang-github
+    issues: slang-github
+    code: slang-explore
+    test: slang-build
+
+    ci: slang-build
 
 slang-fix:
   description: "Turn triaged Slang reports into minimal fixes with tests."
   project: slang
   extends: slang-common
   skills: [slang-patch, codex-critique]
-  workflows: [slang-fix, base-fix, base-test-gen]
+  workflows: [slang-implement, implement]
   overlays: [critique-overlay]
   bindings:
-    code-edit: slang-patch
-    test-gen:  slang-patch
-    critique:  codex-critique
+    code: slang-patch
+    test: slang-patch
+    critique: codex-critique
 ```
 
 ---
@@ -338,39 +336,33 @@ You know its subsystems, its public-API invariants, and its build + test layout.
 - Slang repo lives at /workspace/group/slang …
 
 ## Workflows Available
-- `/slang-fix` — Slang specialization of /base-fix. Requires traits: code-read, code-edit, test-run, vcs-pr.
-- `/base-fix` — Take a triaged issue through reproduction → patch → PR. Requires traits: code-read, code-edit, test-run, vcs-pr.
+- `/slang-fix` — Slang specialization of /implement. Requires traits: code.read, code.edit, test.run, repo.pr.
+- `/implement` — Take a triaged issue through reproduction → patch → PR. Requires traits: code.read, code.edit, test.run, repo.pr.
   Steps: load-context → reproduce → root-cause → patch → validate → commit
-- `/base-test-gen` — Author tests from a spec or bug. Requires traits: code-read, test-gen, vcs-pr.
+- `/implement` — Author tests from a spec or bug. Requires traits: code.read, test.gen, repo.pr.
   Steps: read → enumerate → generate → verify → commit
-- `/base-triage`, `/base-review`, `/base-sweep`, `/base-ci-health`, `/base-research`, `/base-pr-update` — …
+- `/investigate`, `/implement`, `/review`, `/document` — the four core workflows.
 
 ## Skills Available
 - `/base-nanoclaw` — Host tools. Provides: messaging, scheduling, elicitation, learning.
-- `/slang-github` — Provides: vcs-read, vcs-write, vcs-pr, issue-tracker, ci-rerun.
-- `/slang-build` — Provides: code-build, test-run, ci-inspect.
-- `/slang-explore` — Provides: code-read, doc-read.
-- `/slang-patch` — Provides: code-edit, test-gen.
+- `/slang-github` — Provides: repo.read, repo.write, repo.pr, issues.read, ci.rerun.
+- `/slang-build` — Provides: code.build, test.run, ci.inspect.
+- `/slang-explore` — Provides: code.read, doc.read.
+- `/slang-patch` — Provides: code.edit, test.gen.
 - `/codex-critique` — Provides: critique.
 - `/deep-research` — Provides: research.
 
 ## Trait Bindings
-- `ci-inspect` → `/slang-build`
-- `ci-rerun` → `/slang-github`
-- `code-build` → `/slang-build`
-- `code-edit` → `/slang-patch`
-- `code-read` → `/slang-explore`
+- `repo` → `/slang-github`
+- `issues` → `/slang-github`
+- `code` → `/slang-patch`
+- `doc` → `/slang-explore`
+- `test` → `/slang-patch`
 - `critique` → `/codex-critique`
-- `doc-read` → `/slang-explore`
-- `issue-tracker` → `/slang-github`
-- `test-gen` → `/slang-patch`
-- `test-run` → `/slang-build`
-- `vcs-pr` → `/slang-github`
-- `vcs-read` → `/slang-github`
-- `vcs-write` → `/slang-github`
+- `plan` → `/deep-research`
 
 ## Workflow Customizations
-- `/slang-fix` extends `/base-fix` — run base steps, then the specialized steps.
+- `/slang-fix` extends `/implement` — run base steps, then the specialized steps.
 
 - In `/slang-fix`, step `reproduce` is overridden.
 
@@ -380,14 +372,14 @@ You know its subsystems, its public-API invariants, and its build + test layout.
 
   Use /slang-patch to implement the minimum change. Keep the patch inside one subsystem.
 
-- `/base-fix` is augmented by `critique-overlay` after step `patch`.
+- `/implement` is augmented by `critique-overlay` after step `patch`.
 
   **Critique** — before committing, invoke `/codex-critique` against the working diff. …
 
 _Invoke a workflow or skill with its slash command. Bodies load on demand._
 ```
 
-Procedural bodies (the actual Steps sections of `/base-fix`, `/slang-fix`, etc.) are **not** in this document — they load when the agent invokes the slash command. The spine surfaces only the shape.
+Procedural bodies (the actual Steps sections of `/implement`, `/slang-fix`, etc.) are **not** in this document — they load when the agent invokes the slash command. The spine surfaces only the shape.
 
 ## Base vs. project layer — where things live
 
@@ -395,16 +387,16 @@ Use these rules to decide whether something belongs at the universal layer, the 
 
 | Concern | Lives at | Examples |
 |---|---|---|
-| Safety / truthfulness / scope invariants | `base-spine/invariants/` | "Never silence a failing test", "Treat /workspace/project as read-only" |
-| Workspace layout + invocation protocol | `base-spine/context/` | `/workspace/{group, project, global}` convention |
-| Project-agnostic workflows | `base-*-workflow/` | `base-triage`, `base-fix`, `base-review`, `base-sweep`, `base-ci-health`, `base-research`, `base-pr-update`, `base-test-gen`, `base-docs` |
+| Safety / truthfulness / scope invariants | `spine-base/invariants/` | "Never silence a failing test", "Treat /workspace/project as read-only" |
+| Workspace layout + invocation protocol | `spine-base/context/` | `/workspace/{group, project, global}` convention |
+| Project-agnostic workflows | `base-*-workflow/` | `investigate`, `implement`, `review`, `document` |
 | Universally-useful skills | `base-<name>/` (no project prefix) | `base-nanoclaw`, `deep-research`, `codex-critique` |
 | Project identity + public-API invariants | `<project>-spine/identity/`, `<project>-spine/invariants/` | Slang compiler identity, Slang public-API invariants |
 | Project-specific skills (concrete tools) | `<project>-<name>/` | `slang-github`, `slang-build`, `slang-explore`, `slang-patch` |
-| Project trait bindings (defaults) | `<project>-common.bindings` in `<project>-spine/coworker-types.yaml` | `vcs-pr → slang-github`, `code-build → slang-build` |
-| Project-specific workflow specializations | `<project>-<name>-workflow/SKILL.md` with `extends: base-<name>` | `slang-fix` (extends `base-fix`) |
+| Project trait bindings (defaults) | `<project>-common.bindings` in `<project>-spine/coworker-types.yaml` | `repo → slang-github`, `code → slang-explore`, `test → slang-build` |
+| Project-specific workflow specializations | `<project>-<name>-workflow/SKILL.md` with `extends: base-<name>` | `slang-fix` (extends `implement`) |
 | Leaf coworker persona (role + extra workflows) | `<project>-<name>:` block in `<project>-spine/coworker-types.yaml` | `slang-triage`, `slang-fix`, `slang-maintainer`, `slang-ci-health` |
-| Orthogonal compose-time augmentations | `<name>-overlay/SKILL.md` | `critique-overlay` — attaches a critique step after any `code-edit` workflow |
+| Orthogonal compose-time augmentations | `<name>-overlay/SKILL.md` | `critique-overlay` — attaches a critique step after `patch` or `draft` steps in workflows touching code/test/doc domains |
 | Addon to the flat main/global assistants | `<addon>-base/coworker-types.yaml` (duplicate-type merge) | `dashboard-base` adds web formatting; `slang-spine` adds Slang orchestration context |
 
 ### Decision tree: base or project?
@@ -422,7 +414,7 @@ Ask in order. Stop at the first "yes".
 ### Naming convention for bases
 
 - `base-common` — universal spine, root of every project chain.
-- `base-<capability>-workflow` — universal workflows (`base-fix`, `base-review`, …).
+- `base-<capability>-workflow` — universal workflows (`implement`, `review`, …).
 - `<project>-common` — project spine, extends `base-common`, sets bindings.
 - `<project>-<capability>-workflow` — project-specific workflow specialization, usually `extends: base-<capability>`.
 
@@ -433,7 +425,7 @@ A `<project>-common` is always abstract — it exists so leaf types can inherit 
 ### Add a new base workflow
 
 1. Author `container/skills/base-<name>-workflow/SKILL.md` with `type: workflow`, a `requires:` list, and a body with anchored step IDs.
-2. Reference it from `base-common.workflows` (or any type that should expose it).
+2. Reference it from a project type's `workflows:` list (not `base-common`, which is abstract).
 3. Every coworker whose bindings cover the `requires:` gets it automatically — no TS change.
 
 ### Add a new overlay
@@ -453,10 +445,10 @@ A `<project>-common` is always abstract — it exists so leaf types can inherit 
 End-to-end walkthrough. Example: a fictional `graphics` project that tracks issues in Jira, builds with Bazel, and uses Gerrit for code review.
 
 1. **Author project skills.** One `container/skills/graphics-<tool>/SKILL.md` per concrete tool the project needs. Each declares `provides:` for every trait it fills.
-   - `graphics-gerrit` — `provides: [vcs-read, vcs-write, vcs-pr]`, `allowed-tools: Bash(git:*), Bash(gerrit:*)`.
-   - `graphics-bazel` — `provides: [code-build, test-run, ci-inspect]`.
-   - `graphics-explore` — `provides: [code-read, doc-read]`.
-   - `graphics-jira` — `provides: [issue-tracker]`.
+   - `graphics-gerrit` — `provides: [repo.read, repo.write, repo.pr]`, `allowed-tools: Bash(git:*), Bash(gerrit:*)`.
+   - `graphics-bazel` — `provides: [code.build, test.run, ci.inspect]`.
+   - `graphics-explore` — `provides: [code.read, doc.read]`.
+   - `graphics-jira` — `provides: [issues.read]`.
 
 2. **Author the project spine.** `container/skills/graphics-spine/` with:
    - `identity/engine.md` — "You are a specialist on the Graphics project…"
@@ -473,15 +465,15 @@ End-to-end walkthrough. Example: a fictional `graphics` project that tracks issu
        context:    [container/skills/graphics-spine/context/layout.md]
        skills:     [graphics-gerrit, graphics-bazel, graphics-explore, graphics-jira]
        bindings:
-         vcs-read: graphics-gerrit
-         vcs-write: graphics-gerrit
-         vcs-pr: graphics-gerrit
-         code-read: graphics-explore
-         doc-read: graphics-explore
-         code-build: graphics-bazel
-         test-run: graphics-bazel
-         ci-inspect: graphics-bazel
-         issue-tracker: graphics-jira
+         repo: graphics-gerrit
+
+
+         code: graphics-explore
+         doc: graphics-explore
+         test: graphics-bazel
+
+         ci: graphics-bazel
+         issues: graphics-jira
      ```
 
 3. **Declare leaf types.** Same file. Each extends `graphics-common`:
@@ -490,17 +482,17 @@ End-to-end walkthrough. Example: a fictional `graphics` project that tracks issu
      description: "Triage Graphics bugs."
      project: graphics
      extends: graphics-common
-     workflows: [base-triage]
+     workflows: [investigate]
 
    graphics-fix:
      description: "Minimal fixes for Graphics bugs."
      project: graphics
      extends: graphics-common
      skills: [graphics-patch]
-     workflows: [base-fix, base-test-gen]
+     workflows: [implement, implement]
      bindings:
-       code-edit: graphics-patch
-       test-gen: graphics-patch
+       code: graphics-patch
+       test: graphics-patch
    ```
 
 4. **Validate.** Run `npm run validate:templates`. Every leaf should compose clean. Errors name the exact trait/skill/workflow that's missing.
@@ -551,7 +543,7 @@ Validated 6 coworker type(s) against 28 catalog entries (2 abstract base(s) skip
 
 ## Spine category grouping
 
-The spine's `## Workflows Available` and `## Skills Available` sections group entries by category when more than one category is represented. Categories in order: **VCS, Code, Test, CI, Research, Critique, Other**. An entry is classified by the most-common category across its `requires:` (workflows) or `provides:` (skills) traits. Ties break toward the earlier category in the order — so a workflow with `[vcs-read, code-read]` lands under VCS. Entries with no traits, or only unknown traits, fall into Other.
+The spine's `## Workflows Available` and `## Skills Available` sections group entries by category when more than one category is represented. Categories in order: **VCS, Code, Test, CI, Research, Critique, Other**. An entry is classified by the most-common category across its `requires:` (workflows) or `provides:` (skills) traits. Ties break toward the earlier category in the order — so a workflow with `[repo.read, code.read]` lands under VCS. Entries with no traits, or only unknown traits, fall into Other.
 
 Implementation: `src/claude-composer/spine.ts#renderCategorizedList`. Authoring: nothing to do — classification is automatic from the trait declarations already on each skill/workflow.
 
@@ -570,7 +562,7 @@ Every validation path throws with a message naming the exact offender. Examples:
 
 - `Coworker type "slang-fix" references unknown skill/workflow: frobnicator.` — fix the `skills:` / `workflows:` / `overlays:` list.
 - `Coworker type "slang-fix" requires trait(s) with no binding: telemetry.` — add a skill that `provides: [telemetry]`, or bind it explicitly.
-- `Coworker type "slang-fix" binds trait "code-edit" → "runner-skill", but "runner-skill" does not declare provides: [code-edit].` — fix the mapping or annotate the skill's `provides:`.
+- `Coworker type "slang-fix" binds domain "code" → "runner-skill", but "runner-skill" does not provide code.edit.` — fix the mapping or annotate the skill's `provides:`.
 - `Duplicate coworker type "slang-fix" found in <path>.` — two `coworker-types.yaml` files declared the same key.
 - `Cross-project extends: "slang-fix" (project: slang) cannot extend "graphics-common" (project: graphics).` — use `+` composition at the type-name level instead.
 
@@ -607,9 +599,9 @@ Every validation path throws with a message naming the exact offender. Examples:
 
 ## Verification checklist
 
-1. **Trait substitution.** A workflow body containing `/{{trait:vcs-pr}}` composes with the binding. CLAUDE.md carries the bindings table.
-2. **Overrides.** A derived workflow with `extends: base-fix` + `overrides: { patch: "…" }` composes a Workflow Customizations block naming step `patch` with the override body.
-3. **Overlay application.** An overlay with `applies-to.workflows: [base-fix]` + `insert-after: [patch]` produces a customization line: `/base-fix is augmented by <overlay> after step \`patch\`.`
+1. **Trait substitution.** A workflow body containing `/{{trait:repo.pr}}` composes with the binding. CLAUDE.md carries the bindings table.
+2. **Overrides.** A derived workflow with `extends: implement` + `overrides: { patch: "…" }` composes a Workflow Customizations block naming step `patch` with the override body.
+3. **Overlay application.** An overlay with `applies-to.workflows: [implement]` + `insert-after: [patch]` produces a customization line: `/implement is augmented by <overlay> after step \`patch\`.`
 4. **Validator errors.** Unbound trait, wrong provider, unknown skill/workflow/overlay, cross-project extends — each raises an actionable error naming the offender.
 5. **Progressive disclosure.** Workflow bodies stay in `container/skills/<name>/SKILL.md`; the spine carries a step outline (auto-extracted from `{#step-id}` anchors), bindings table, and customizations — enough for routing decisions without loading the full body.
 6. **Cross-project reuse.** A new project extending `base-common` + binding traits to its own skills composes cleanly with zero TS edits.

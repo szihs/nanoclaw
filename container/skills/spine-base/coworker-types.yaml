@@ -1,0 +1,23 @@
+# Universal coworker spine. Every project type extends `base-common`.
+# Invariants and context fragments compose into the always-in-context CLAUDE.md.
+# Workflows are progressively disclosed — their bodies load on invocation.
+#
+# See docs/lego-coworker-workflows.md for the full schema.
+
+base-common:
+  description: "Universal coworker spine — safety, truthfulness, scope, workspace conventions, invocation protocol. Every project type extends this."
+  invariants:
+    - container/skills/spine-base/invariants/safety.md
+    - container/skills/spine-base/invariants/truthfulness.md
+    - container/skills/spine-base/invariants/scope.md
+  context:
+    - container/skills/spine-base/context/capabilities.md
+    - container/skills/spine-base/context/workspace.md
+    - container/skills/spine-base/context/invocation.md
+    - container/skills/spine-base/context/operations.md
+  skills:
+    - base-nanoclaw
+  # deep-research + codex-critique are opt-in per project type.
+  # Workflows are NOT listed here — base-common is abstract (no bindings).
+  # Project types add: workflows, bindings, and optional skills.
+  # The four core workflows are: investigate, implement, review, document.

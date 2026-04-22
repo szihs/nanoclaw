@@ -174,9 +174,12 @@ export function resolveCoworkerManifest(
     }
   }
 
-  // Validate bindings. For every required trait on every workflow, either a
-  // concrete skill that `provides:` the trait must be directly in the skill
-  // set, or the coworker type must `bindings: { trait → skill }` to one.
+  // Validate bindings. Traits use dotted qualifiers (e.g. repo.pr, code.edit).
+  // Bindings are keyed by domain (e.g. repo, code). The validator:
+  //   1. Extracts the domain from a qualified trait (repo.pr → repo)
+  //   2. Looks up the binding by domain
+  //   3. Checks the bound skill provides the full qualified string
+  //   4. Falls back to any skill in the set that directly provides it
   const requiredTraits = new Set<string>();
   for (const wf of workflowEntries) {
     for (const trait of wf.requires) requiredTraits.add(trait);
@@ -189,24 +192,41 @@ export function resolveCoworkerManifest(
   }
   const resolvedBindings: Record<string, string> = { ...bindings };
   const unresolvedTraits: string[] = [];
-  for (const trait of requiredTraits) {
-    if (resolvedBindings[trait]) {
-      const skill = catalog[resolvedBindings[trait]];
+  for (const qualifiedTrait of requiredTraits) {
+    const domain = qualifiedTrait.split('.')[0];
+
+    // 1. Check domain-level binding
+    if (resolvedBindings[domain]) {
+      const skill = catalog[resolvedBindings[domain]];
       if (!skill) {
         throw new Error(
-          `Coworker type "${typeName}" binds trait "${trait}" → "${resolvedBindings[trait]}" but that skill is not in the catalog.`,
+          `Coworker type "${typeName}" binds domain "${domain}" → "${resolvedBindings[domain]}" but that skill is not in the catalog.`,
         );
       }
-      if (!skill.provides.includes(trait)) {
-        throw new Error(
-          `Coworker type "${typeName}" binds trait "${trait}" → "${skill.name}", but "${skill.name}" does not declare \`provides: [${trait}]\` in its frontmatter.`,
-        );
+      if (skill.provides.includes(qualifiedTrait)) {
+        continue; // bound skill covers it
       }
-    } else if (directlyProvided.has(trait)) {
-      resolvedBindings[trait] = directlyProvided.get(trait)!;
-    } else {
-      unresolvedTraits.push(trait);
     }
+
+    // 2. Check exact-key binding (backward compat with unqualified traits)
+    if (resolvedBindings[qualifiedTrait]) {
+      const skill = catalog[resolvedBindings[qualifiedTrait]];
+      if (skill?.provides.includes(qualifiedTrait)) {
+        continue;
+      }
+    }
+
+    // 3. Fallback: any skill in the set directly provides it.
+    // Set the domain binding only if no explicit binding exists for this domain,
+    // so the rendered binding table shows coverage without overriding explicit bindings.
+    if (directlyProvided.has(qualifiedTrait)) {
+      if (!resolvedBindings[domain]) {
+        resolvedBindings[domain] = directlyProvided.get(qualifiedTrait)!;
+      }
+      continue;
+    }
+
+    unresolvedTraits.push(qualifiedTrait);
   }
   if (unresolvedTraits.length > 0) {
     throw new Error(
@@ -250,7 +270,8 @@ export function resolveCoworkerManifest(
     }
     for (const wf of workflowEntries) {
       for (const trait of wf.requires) {
-        if (overlay.appliesToTraits.includes(trait)) targets.add(wf.name);
+        const domain = trait.split('.')[0];
+        if (overlay.appliesToTraits.includes(trait) || overlay.appliesToTraits.includes(domain)) targets.add(wf.name);
       }
     }
     for (const target of targets) {

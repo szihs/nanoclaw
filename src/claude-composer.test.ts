@@ -62,7 +62,7 @@ describe('Lego coworker CLAUDE.md composition', () => {
       const root = makeTempProject();
       writeTypes(
         root,
-        'base-spine',
+        'spine-base',
         `
 base-common:
   description: "Base spine"
@@ -171,7 +171,7 @@ slang-common:
       });
       writeTypes(
         root,
-        'base-spine',
+        'spine-base',
         `
 base-common:
   description: "Base spine"
@@ -227,7 +227,7 @@ slang-triage:
       const root = makeTempProject();
       writeTypes(
         root,
-        'base-spine',
+        'spine-base',
         `
 base-common:
   description: "base"
@@ -250,7 +250,7 @@ base-common:
 
       writeTypes(
         root,
-        'base-spine',
+        'spine-base',
         `
 base:
   description: "base"
@@ -323,7 +323,7 @@ beta:
 
       writeTypes(
         root,
-        'base-spine',
+        'spine-base',
         `
 base-common:
   description: "base"
@@ -501,42 +501,42 @@ global:
       writeSkill(root, 'repo-skill', {
         name: 'repo-skill',
         description: 'Git + PRs.',
-        provides: ['vcs-pr', 'issue-tracker'],
+        provides: ['repo.pr', 'issues.read'],
         'allowed-tools': 'Bash(git:*), mcp__foo__gh',
       });
       writeSkill(root, 'edit-skill', {
         name: 'edit-skill',
         description: 'Edit code.',
-        provides: ['code-edit'],
+        provides: ['code.edit'],
         'allowed-tools': 'Read, Edit',
       });
       writeSkill(root, 'explore-skill', {
         name: 'explore-skill',
         description: 'Read code.',
-        provides: ['code-read'],
+        provides: ['code.read'],
         'allowed-tools': 'Grep, Glob',
       });
       writeSkill(root, 'runner-skill', {
         name: 'runner-skill',
         description: 'Run tests.',
-        provides: ['test-run'],
+        provides: ['test.run'],
         'allowed-tools': 'Bash',
       });
       writeSkill(root, 'critic-skill', {
         name: 'critic-skill',
         description: 'External critique.',
-        provides: ['critique'],
+        provides: ['critique.review'],
         'allowed-tools': 'mcp__codex__review',
       });
 
       writeSkill(
         root,
-        'base-fix-workflow',
+        'implement-workflow',
         {
-          name: 'base-fix',
+          name: 'implement',
           type: 'workflow',
           description: 'Base fix.',
-          requires: ['vcs-pr', 'code-edit', 'code-read', 'test-run'],
+          requires: ['repo.pr', 'code.edit', 'code.read', 'test.run'],
           uses: { skills: [], workflows: [] },
         },
         [
@@ -555,7 +555,7 @@ global:
           name: 'crit-overlay',
           type: 'overlay',
           description: 'Insert a critique after patch-like steps.',
-          'applies-to': { workflows: ['base-fix'], traits: ['code-edit'] },
+          'applies-to': { workflows: ['implement'], traits: ['code'] },
           'insert-after': ['patch'],
         },
         '**Critique** — run /critic-skill and block on must-fix.',
@@ -579,18 +579,17 @@ basic:
     - explore-skill
     - runner-skill
   workflows:
-    - base-fix
+    - implement
 `,
       );
       const types = readCoworkerTypes(root);
       const catalog = readSkillCatalog(root);
       const manifest = resolveCoworkerManifest(types, 'basic', catalog, root);
 
-      expect(manifest.bindings['vcs-pr']).toBe('repo-skill');
-      expect(manifest.bindings['code-edit']).toBe('edit-skill');
-      expect(manifest.bindings['code-read']).toBe('explore-skill');
-      expect(manifest.bindings['test-run']).toBe('runner-skill');
-      expect(manifest.workflows[0].requires).toEqual(['vcs-pr', 'code-edit', 'code-read', 'test-run']);
+      expect(manifest.bindings['repo']).toBe('repo-skill');
+      expect(manifest.bindings['code']).toBe('edit-skill');
+      expect(manifest.bindings['test']).toBe('runner-skill');
+      expect(manifest.workflows[0].requires).toEqual(['repo.pr', 'code.edit', 'code.read', 'test.run']);
     });
 
     it('errors when a required trait has no binding and no provider in the skill set', () => {
@@ -600,45 +599,46 @@ basic:
         'spine',
         `
 broken:
-  description: "missing code-edit"
+  description: "missing code.edit"
   skills:
     - repo-skill
     - explore-skill
     - runner-skill
   workflows:
-    - base-fix
+    - implement
 `,
       );
       const types = readCoworkerTypes(root);
       const catalog = readSkillCatalog(root);
       expect(() => resolveCoworkerManifest(types, 'broken', catalog, root)).toThrow(
-        /requires trait\(s\) with no binding: code-edit/,
+        /requires trait\(s\) with no binding: code\.edit/,
       );
     });
 
-    it('errors when a binding points at a skill that does not declare provides for that trait', () => {
+    it('errors when no skill provides a required qualified trait', () => {
       const root = setupTraitProject();
       writeTypes(
         root,
         'spine',
         `
 misbound:
-  description: "wrong mapping"
+  description: "no code.edit provider in skill set"
   skills:
     - repo-skill
-    - edit-skill
     - explore-skill
     - runner-skill
   workflows:
-    - base-fix
+    - implement
   bindings:
-    code-edit: runner-skill
+    code: explore-skill
+    test: runner-skill
+    repo: repo-skill
 `,
       );
       const types = readCoworkerTypes(root);
       const catalog = readSkillCatalog(root);
       expect(() => resolveCoworkerManifest(types, 'misbound', catalog, root)).toThrow(
-        /does not declare `provides: \[code-edit\]`/,
+        /requires trait\(s\) with no binding: code\.edit/,
       );
     });
 
@@ -658,7 +658,7 @@ with-overlay:
     - runner-skill
     - critic-skill
   workflows:
-    - base-fix
+    - implement
   overlays:
     - crit-overlay
   bindings:
@@ -671,7 +671,7 @@ with-overlay:
 
       const overlayCust = manifest.customizations.find((c) => c.kind === 'overlay');
       expect(overlayCust).toBeDefined();
-      expect(overlayCust!.workflow).toBe('base-fix');
+      expect(overlayCust!.workflow).toBe('implement');
       expect(overlayCust!.summary).toContain('after step `patch`');
       expect(manifest.tools).toContain('mcp__codex__review');
     });
@@ -692,7 +692,7 @@ render-check:
     - runner-skill
     - critic-skill
   workflows:
-    - base-fix
+    - implement
   overlays:
     - crit-overlay
   bindings:
@@ -702,9 +702,10 @@ render-check:
       const out = composeCoworkerSpine({ projectRoot: root, coworkerType: 'render-check' });
 
       expect(out).toContain('## Trait Bindings');
-      expect(out).toContain('`vcs-pr` → `/repo-skill`');
+      expect(out).toContain('`repo` → `/repo-skill` (pr)');
+      expect(out).toContain('`code` → `/edit-skill` (edit)');
       expect(out).toContain('## Workflow Customizations');
-      expect(out).toContain('`/base-fix` is augmented by `crit-overlay` after step `patch`.');
+      expect(out).toContain('`/implement` is augmented by `crit-overlay` after step `patch`.');
     });
 
     it('extends + overrides are surfaced as customizations on the derived workflow', () => {
@@ -716,9 +717,9 @@ render-check:
           name: 'slang-patch',
           type: 'workflow',
           description: 'Slang-specific fix.',
-          extends: 'base-fix',
-          requires: ['vcs-pr', 'code-edit', 'code-read', 'test-run'],
-          uses: { skills: [], workflows: ['base-fix'] },
+          extends: 'implement',
+          requires: ['repo.pr', 'code.edit', 'code.read', 'test.run'],
+          uses: { skills: [], workflows: ['implement'] },
           overrides: { patch: 'Run slang-specific code formatter before committing.' },
         },
         '# Slang Patch\n',
@@ -748,7 +749,7 @@ slang-fix:
       expect(kinds).toContain('override');
 
       const extendsCust = manifest.customizations.find((c) => c.kind === 'extends');
-      expect(extendsCust!.summary).toContain('`/slang-patch` extends `/base-fix`');
+      expect(extendsCust!.summary).toContain('`/slang-patch` extends `/implement`');
       const overrideCust = manifest.customizations.find((c) => c.kind === 'override');
       expect(overrideCust!.summary).toContain('step `patch` is overridden');
       expect(overrideCust!.detail).toContain('slang-specific code formatter');
@@ -759,7 +760,7 @@ slang-fix:
       writeSkill(root, 'patched-edit', {
         name: 'patched-edit',
         description: 'Specialized edit.',
-        provides: ['code-edit'],
+        provides: ['code.edit'],
         'allowed-tools': 'Read, Edit',
       });
       writeTypes(
@@ -775,22 +776,22 @@ parent:
     - explore-skill
     - runner-skill
   bindings:
-    code-edit: edit-skill
+    code: edit-skill
 child:
   extends: parent
   description: "child"
   skills:
     - patched-edit
   bindings:
-    code-edit: patched-edit
+    code: patched-edit
   workflows:
-    - base-fix
+    - implement
 `,
       );
       const types = readCoworkerTypes(root);
       const catalog = readSkillCatalog(root);
       const manifest = resolveCoworkerManifest(types, 'child', catalog, root);
-      expect(manifest.bindings['code-edit']).toBe('patched-edit');
+      expect(manifest.bindings['code']).toBe('patched-edit');
     });
   });
 });

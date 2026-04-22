@@ -15,46 +15,43 @@ function indentBlock(text: string, spaces: number): string {
 
 // Category order drives the section layout. "other" is the sink for traits
 // that don't map anywhere, plus entries with no traits at all.
-const CATEGORY_ORDER = ['vcs', 'code', 'test', 'ci', 'research', 'critique', 'other'] as const;
+const CATEGORY_ORDER = ['repo', 'code', 'test', 'ci', 'doc', 'plan', 'critique', 'other'] as const;
 type Category = (typeof CATEGORY_ORDER)[number];
 
 const CATEGORY_HEADINGS: Record<Category, string> = {
-  vcs: 'VCS',
+  repo: 'VCS',
   code: 'Code',
   test: 'Test',
   ci: 'CI',
-  research: 'Research',
+  doc: 'Docs',
+  plan: 'Research',
   critique: 'Critique',
   other: 'Other',
 };
 
-const TRAIT_TO_CATEGORY: Record<string, Category> = {
-  'vcs-read': 'vcs',
-  'vcs-write': 'vcs',
-  'vcs-pr': 'vcs',
-  'code-read': 'code',
-  'code-edit': 'code',
-  'code-build': 'code',
-  'test-run': 'test',
-  'test-gen': 'test',
-  'ci-inspect': 'ci',
-  'ci-rerun': 'ci',
-  research: 'research',
-  'issue-tracker': 'research',
-  'doc-read': 'research',
-  'doc-write': 'research',
+// Maps trait domains to display categories. Qualified traits (repo.pr, code.edit)
+// are resolved by extracting the domain prefix before the dot.
+const DOMAIN_TO_CATEGORY: Record<string, Category> = {
+  repo: 'repo',
+  issues: 'repo',
+  ci: 'ci',
+  code: 'code',
+  test: 'test',
+  doc: 'doc',
+  plan: 'plan',
   critique: 'critique',
 };
 
 // Pick the dominant category for an entry by counting how many of its traits
 // fall into each bucket. Ties resolve via CATEGORY_ORDER (earlier wins), so
-// a workflow that pulls from [vcs-read, ci-inspect] is classified CI only if
+// a workflow that pulls from [repo.read, ci.inspect] is classified CI only if
 // CI trait count strictly exceeds VCS — otherwise VCS wins by order.
 function categorize(traits: readonly string[]): Category {
   if (traits.length === 0) return 'other';
   const counts = new Map<Category, number>();
   for (const trait of traits) {
-    const cat = TRAIT_TO_CATEGORY[trait] ?? 'other';
+    const domain = trait.split('.')[0];
+    const cat = DOMAIN_TO_CATEGORY[domain] ?? 'other';
     counts.set(cat, (counts.get(cat) ?? 0) + 1);
   }
   let best: Category = 'other';
@@ -162,7 +159,19 @@ export function renderCoworkerSpine(
   const bindingKeys = Object.keys(manifest.bindings).sort();
   if (bindingKeys.length > 0) {
     parts.push('## Trait Bindings');
-    parts.push(bindingKeys.map((trait) => `- \`${trait}\` → \`/${manifest.bindings[trait]}\``).join('\n'));
+    parts.push(
+      bindingKeys
+        .map((domain) => {
+          const skillName = manifest.bindings[domain];
+          const skill = catalog[skillName];
+          const qualifiers = skill
+            ? skill.provides.filter((t: string) => t.startsWith(domain + '.')).map((t: string) => t.split('.')[1])
+            : [];
+          const suffix = qualifiers.length > 0 ? ` (${qualifiers.join(', ')})` : '';
+          return `- \`${domain}\` → \`/${skillName}\`${suffix}`;
+        })
+        .join('\n'),
+    );
   }
 
   if (manifest.customizations.length > 0) {

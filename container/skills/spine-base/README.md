@@ -1,4 +1,4 @@
-# base-spine
+# spine-base
 
 Universal coworker spine. Provides:
 
@@ -6,7 +6,7 @@ Universal coworker spine. Provides:
 - **Context** (`context/`) — workspace layout + invocation protocol every coworker needs in every turn.
 - **Base type** (`coworker-types.yaml`) — `base-common`, the root every project type extends.
 
-Procedural content lives in sibling workflow skills (`base-triage-workflow`, `base-fix-workflow`, `base-review-workflow`, `base-sweep-workflow`) and loads on demand via Claude Code's native SKILL.md progressive disclosure.
+Procedural content lives in sibling workflow skills (`/investigate`, `/implement`, `/review`, `/document` — in `base-*-workflow/` directories) and loads on demand via Claude Code's native SKILL.md progressive disclosure.
 
 See `docs/lego-coworker-workflows.md` for the full design.
 

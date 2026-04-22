@@ -1,7 +1,7 @@
 ---
 name: codex-critique
 description: "Ask an external Codex MCP reviewer to critique a proposed patch, test, or design. Trigger after a patch is written but before commit, or when a workflow's critique-overlay is active. Read-only — produces a structured critique, not changes. Keywords: critique, review, second opinion, codex."
-provides: [critique]
+provides: [critique.review]
 allowed-tools: Read, Grep, Glob, Bash(git diff:*), mcp__codex__review, mcp__codex__critique
 ---
 

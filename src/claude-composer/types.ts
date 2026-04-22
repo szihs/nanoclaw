@@ -79,7 +79,7 @@ export interface CoworkerTypeEntry {
 
   // Trait bindings: abstract trait name → concrete skill name that provides it.
   // Leaf-wins across the type chain. Lets a type inherit a workflow that
-  // declares `requires: [vcs-pr]` without hard-coding which skill satisfies it.
+  // declares `requires: [repo.pr]` without hard-coding which skill satisfies it.
   bindings?: Record<string, string>;
 
   // Overlays (SKILL.md `type: overlay` entries) to apply to this coworker's

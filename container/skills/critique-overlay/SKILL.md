@@ -3,9 +3,9 @@ name: critique-overlay
 type: overlay
 description: "Insert an external critique step after a workflow's patch / implement / generate step. Attach to a coworker type via `overlays: [critique-overlay]`. Blocks commit on must-fix critiques; loops back to the step it's attached to."
 applies-to:
-  workflows: [base-fix, base-test-gen, base-docs]
-  traits: [code-edit, test-gen, doc-write]
-insert-after: [patch, generate, draft]
+  workflows: [implement, document]
+  traits: [code, test, doc]
+insert-after: [patch, draft]
 uses:
   skills: [codex-critique]
 ---

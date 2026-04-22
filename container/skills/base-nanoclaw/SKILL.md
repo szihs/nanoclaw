@@ -1,7 +1,7 @@
 ---
 name: base-nanoclaw
 description: NanoClaw host tools — send messages, schedule tasks, ask the user questions, append durable learnings. Trigger whenever you need to communicate mid-work, schedule recurring checks, or record something for other coworkers.
-provides: [messaging, scheduling, elicitation, learning]
+provides: []
 allowed-tools: mcp__nanoclaw__send_message, mcp__nanoclaw__schedule_task, mcp__nanoclaw__list_tasks, mcp__nanoclaw__pause_task, mcp__nanoclaw__resume_task, mcp__nanoclaw__cancel_task, mcp__nanoclaw__ask_user_question, mcp__nanoclaw__send_card, mcp__nanoclaw__append_learning
 ---
 

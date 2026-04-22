@@ -7,7 +7,7 @@ export interface AgentGroup {
   is_admin: number; // 0 | 1
   agent_provider: string | null;
   container_config: string | null; // JSON: { additionalMounts, timeout }
-  coworker_type: string | null; // coworker-types.yaml key, e.g. "base-reviewer" or "base-build+base-quality"
+  coworker_type: string | null; // coworker-types.yaml key, e.g. "slang-triage" or "slang-fix"
   allowed_mcp_tools: string | null; // JSON: string[] of allowed MCP tool names
   created_at: string;
 }

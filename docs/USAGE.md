@@ -185,10 +185,10 @@ Types are defined in `container/skills/*/coworker-types.yaml`. The extends chain
 |------|------|---------|
 | `base-common` | Universal spine (safety, truth, scope) | — |
 | `slang-common` | Slang compiler spine (identity, invariants) | `base-common` |
-| `slang-triage` | Triage incoming compiler issues | `slang-common` |
-| `slang-fix` | Turn triaged reports into fixes | `slang-common` |
+| `slang-triage` | Investigate incoming compiler issues | `slang-common` |
+| `slang-fix` | Implement fixes from investigation reports | `slang-common` |
 | `slang-maintainer` | Periodic maintainer sweep | `slang-common` |
-| `slang-ci-health` | CI health classifier | `slang-common` |
+| `slang-ci-health` | CI health investigation | `slang-common` |
 | `main` / `global` | Flat admin + shared assistants | — (verbatim body, no spine) |
 
 Validate types: `npm run validate:templates`. Rebuild checked-in prompts: `npm run rebuild:claude`.
