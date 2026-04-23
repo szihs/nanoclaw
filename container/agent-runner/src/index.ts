@@ -143,17 +143,20 @@ async function main(): Promise<void> {
 
     for (const serverName of neededServers) {
       const baseUrl = process.env.MCP_PROXY_URL!.replace(/\/$/, '');
+      const serverUrl = `${baseUrl}/mcp/${serverName}`;
       const serverConfig: Record<string, unknown> = {
         type: 'http',
-        url: `${baseUrl}/${serverName}`,
+        url: serverUrl,
+      };
+      const headers: Record<string, string> = {
+        Accept: 'application/json, text/event-stream',
       };
       if (process.env.MCP_PROXY_TOKEN) {
-        serverConfig.headers = {
-          Authorization: `Bearer ${process.env.MCP_PROXY_TOKEN}`,
-        };
+        headers.Authorization = `Bearer ${process.env.MCP_PROXY_TOKEN}`;
       }
+      serverConfig.headers = headers;
       mcpServers[serverName] = serverConfig as any;
-      log(`MCP proxy server: ${serverName} via ${baseUrl}/${serverName}`);
+      log(`MCP proxy server: ${serverName} via ${serverUrl}`);
     }
   }
 

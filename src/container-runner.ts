@@ -276,9 +276,23 @@ async function spawnContainer(session: Session): Promise<void> {
   // OneCLI agent identifier is always the agent group id — stable across
   // sessions and reversible via getAgentGroup() for approval routing.
   const agentIdentifier = agentGroup.id;
-  const args = await buildContainerArgs(mounts, containerName, agentGroup, provider, contribution, agentIdentifier);
 
-  log.info('Spawning container', { sessionId: session.id, agentGroup: agentGroup.name, containerName });
+  // Register an MCP proxy token so the container can access host MCP servers.
+  const allowedTools = resolveAllowedMcpTools(agentGroup);
+  const proxyToken = registerContainerToken(agentGroup.folder, allowedTools);
+
+  const args = await buildContainerArgs(mounts, containerName, agentGroup, provider, contribution, agentIdentifier, {
+    proxyToken,
+    allowedTools,
+  });
+
+  log.info('Spawning container', {
+    sessionId: session.id,
+    agentGroup: agentGroup.name,
+    containerName,
+    mcpToolCount: allowedTools.length,
+    hasProxyToken: !!proxyToken,
+  });
 
   const container = spawn(CONTAINER_RUNTIME_BIN, args, { stdio: ['ignore', 'pipe', 'pipe'] });
 
@@ -304,6 +318,7 @@ async function spawnContainer(session: Session): Promise<void> {
     activeContainers.delete(session.id);
     markContainerStopped(session.id);
     stopTypingRefresh(session.id);
+    revokeContainerToken(proxyToken);
     log.info('Container exited', { sessionId: session.id, code, containerName });
   });
 
@@ -495,6 +510,7 @@ async function buildContainerArgs(
   provider: string,
   providerContribution: ProviderContainerContribution,
   agentIdentifier?: string,
+  mcpProxy?: { proxyToken: string; allowedTools: string[] },
 ): Promise<string[]> {
   const args: string[] = ['run', '--rm', '--name', containerName];
 
@@ -636,6 +652,15 @@ async function buildContainerArgs(
   const mergedMcpServers = { ...typeMcpServers, ...containerConfig.mcpServers };
   if (Object.keys(mergedMcpServers).length > 0) {
     args.push('-e', `NANOCLAW_MCP_SERVERS=${JSON.stringify(mergedMcpServers)}`);
+  }
+
+  // MCP proxy token + URL + allowed tools — enables containers to reach host MCP servers
+  if (mcpProxy) {
+    args.push('-e', `MCP_PROXY_TOKEN=${mcpProxy.proxyToken}`);
+    args.push('-e', `MCP_PROXY_URL=http://host.docker.internal:${MCP_PROXY_PORT}`);
+    if (mcpProxy.allowedTools.length > 0) {
+      args.push('-e', `NANOCLAW_ALLOWED_MCP_TOOLS=${JSON.stringify(mcpProxy.allowedTools)}`);
+    }
   }
 
   // Dashboard URL
