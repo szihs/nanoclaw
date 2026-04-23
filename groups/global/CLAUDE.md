@@ -88,3 +88,19 @@ Use `mcp__nanoclaw__add_mcp_server` to register an MCP server, then `mcp__nanocl
 ### Shared learnings
 
 **IMPORTANT:** After solving a problem, finding a workaround, or discovering non-obvious behavior, share it via `mcp__nanoclaw__append_learning` so other coworkers benefit on their next session. At session start, read `/workspace/global/learnings/INDEX.md` for discoveries shared by the team.
+
+---
+
+### Dashboard and web UI (`dashboard:*`)
+
+Use standard Markdown:
+
+- `**bold**`
+- `*italic*`
+- `[links](url)`
+- `## headings`
+- fenced code blocks
+
+Use Unicode emoji directly (`✅ ❌ ⚠️ 🚀`) instead of `:emoji:` shortcodes because the web renderer does not expand shortcode syntax.
+
+When you are unsure which channel you are on, prefer standard Markdown with Unicode emoji.
