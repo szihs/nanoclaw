@@ -28,6 +28,7 @@ import k from 'kleur';
 
 import { runDiscordChannel } from './channels/discord.js';
 import { runIMessageChannel } from './channels/imessage.js';
+import { runSignalChannel } from './channels/signal.js';
 import { runSlackChannel } from './channels/slack.js';
 import { runTeamsChannel } from './channels/teams.js';
 import { runTelegramChannel } from './channels/telegram.js';
@@ -54,6 +55,7 @@ type ChannelChoice =
   | 'telegram'
   | 'discord'
   | 'whatsapp'
+  | 'signal'
   | 'teams'
   | 'slack'
   | 'imessage'
@@ -315,6 +317,8 @@ async function main(): Promise<void> {
       await runDiscordChannel(displayName!);
     } else if (channelChoice === 'whatsapp') {
       await runWhatsAppChannel(displayName!);
+    } else if (channelChoice === 'signal') {
+      await runSignalChannel(displayName!);
     } else if (channelChoice === 'teams') {
       await runTeamsChannel(displayName!);
     } else if (channelChoice === 'slack') {
@@ -442,6 +446,8 @@ function channelDmLabel(choice: ChannelChoice): string | null {
       return 'Discord DMs';
     case 'whatsapp':
       return 'WhatsApp';
+    case 'signal':
+      return 'Signal';
     case 'teams':
       return 'Teams';
     case 'imessage':
@@ -835,6 +841,11 @@ async function askChannelChoice(): Promise<ChannelChoice> {
         { value: 'telegram', label: 'Yes, connect Telegram', hint: 'recommended' },
         { value: 'discord', label: 'Yes, connect Discord' },
         { value: 'whatsapp', label: 'Yes, connect WhatsApp' },
+        {
+          value: 'signal',
+          label: 'Yes, connect Signal',
+          hint: 'needs signal-cli installed',
+        },
         {
           value: 'imessage',
           label: 'Yes, connect iMessage (experimental)',
