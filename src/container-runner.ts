@@ -125,8 +125,6 @@ const wakePromises = new Map<string, Promise<void>>();
  * wake). User edits go in .instructions.md and are appended after the spine.
  */
 function composeCoworkerClaudeMd(agentGroup: AgentGroup): void {
-  if (agentGroup.is_admin) return;
-
   const groupDir = path.resolve(GROUPS_DIR, agentGroup.folder);
   const claudeMdPath = path.join(groupDir, 'CLAUDE.md');
   const instructionsPath = path.join(groupDir, '.instructions.md');
@@ -136,7 +134,26 @@ function composeCoworkerClaudeMd(agentGroup: AgentGroup): void {
     log.info('Auto-migrated CLAUDE.md to .instructions.md', { folder: agentGroup.folder });
   }
 
-  if (!agentGroup.coworker_type) return;
+  if (!agentGroup.coworker_type) {
+    // Untyped coworker: compose via the 'global' flat type + .instructions.md
+    // This goes through the same composer pipeline as typed coworkers.
+    try {
+      let extraInstructions: string | null = null;
+      try {
+        extraInstructions = fs.readFileSync(instructionsPath, 'utf-8');
+      } catch {
+        /* no instructions */
+      }
+
+      const composed = composeCoworkerSpine({ coworkerType: 'global', extraInstructions });
+      fs.mkdirSync(groupDir, { recursive: true });
+      fs.writeFileSync(claudeMdPath, composed);
+      log.debug('CLAUDE.md composed for untyped coworker via global type', { folder: agentGroup.folder });
+    } catch (err) {
+      log.warn('Failed to compose CLAUDE.md for untyped coworker', { folder: agentGroup.folder, err });
+    }
+    return;
+  }
 
   try {
     let extraInstructions: string | null = null;

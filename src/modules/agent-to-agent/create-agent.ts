@@ -15,7 +15,13 @@ import path from 'path';
 import { readCoworkerTypes } from '../../claude-composer.js';
 import { GROUPS_DIR } from '../../config.js';
 import { createAgentGroup, getAgentGroup, getAgentGroupByFolder } from '../../db/agent-groups.js';
-import { getMessagingGroup, getMessagingGroupAgents, createMessagingGroupAgent } from '../../db/messaging-groups.js';
+import {
+  createMessagingGroup,
+  getMessagingGroup,
+  getMessagingGroupAgents,
+  getMessagingGroupByPlatform,
+  createMessagingGroupAgent,
+} from '../../db/messaging-groups.js';
 import { getSession } from '../../db/sessions.js';
 import { wakeContainer } from '../../container-runner.js';
 import { initGroupFilesystem } from '../../group-init.js';
@@ -87,11 +93,25 @@ export async function handleCreateAgent(content: Record<string, unknown>, sessio
   const now = new Date().toISOString();
 
   // Validate coworker_type against the registry (lego coworker system).
-  // Placeholder strings and unknown roles fall back to untyped.
+  // If no type requested, infer the best leaf type from the registry.
   const requestedCoworkerType =
     typeof content.coworkerType === 'string' && content.coworkerType.trim() ? content.coworkerType.trim() : null;
   let coworkerType = requestedCoworkerType;
   let creationNote: string | null = null;
+
+  if (!requestedCoworkerType) {
+    // List available leaf types so the creation note tells the caller what's available
+    const knownTypes = readCoworkerTypes();
+    const SKIP = new Set(['main', 'global', 'base-common']);
+    const leafTypes = Object.keys(knownTypes).filter(
+      (name) => !SKIP.has(name) && !(knownTypes[name] as Record<string, unknown>).flat,
+    );
+    if (leafTypes.length > 0) {
+      creationNote = `No coworkerType specified — created as untyped. Available types: ${leafTypes.join(', ')}. The agent will use the global base prompt. To get project-specific skills, traits, and MCP tools, recreate with a coworkerType.`;
+      log.info('create_agent: no coworkerType, available types', { leafTypes });
+    }
+  }
+
   if (requestedCoworkerType) {
     const knownTypes = readCoworkerTypes();
     const roles = requestedCoworkerType
@@ -116,6 +136,8 @@ export async function handleCreateAgent(content: Record<string, unknown>, sessio
     }
   }
 
+  const internalOnly = content.internalOnly === true;
+  const directChannel = !internalOnly;
   const newGroup: AgentGroup = {
     id: agentGroupId,
     name,
@@ -127,7 +149,7 @@ export async function handleCreateAgent(content: Record<string, unknown>, sessio
     allowed_mcp_tools: content.allowedMcpTools
       ? JSON.stringify((content.allowedMcpTools as string[]).filter((t) => t.startsWith('mcp__')))
       : null,
-    routing: (content.routing as string) || (content.directChannel === true ? 'direct' : 'internal'),
+    routing: (content.routing as string) || (directChannel ? 'direct' : 'internal'),
     created_at: now,
   };
   createAgentGroup(newGroup);
@@ -219,6 +241,51 @@ export async function handleCreateAgent(content: Record<string, unknown>, sessio
       target_id: mg.id,
       created_at: now,
     });
+  }
+
+  // For direct routing: create the coworker's own dashboard channel
+  if (directChannel) {
+    const platformId = `dashboard:${folder}`;
+    let ownMg = getMessagingGroupByPlatform('dashboard', platformId);
+    if (!ownMg) {
+      const ownMgId = `mg-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      createMessagingGroup({
+        id: ownMgId,
+        channel_type: 'dashboard',
+        platform_id: platformId,
+        name,
+        is_group: 0,
+        unknown_sender_policy: 'public',
+        admin_user_id: null,
+        created_at: now,
+      });
+      ownMg = getMessagingGroupByPlatform('dashboard', platformId)!;
+    }
+    if (ownMg) {
+      const existingOwnMga = getMessagingGroupAgents(ownMg.id).some((a) => a.agent_group_id === agentGroupId);
+      if (!existingOwnMga) {
+        createMessagingGroupAgent({
+          id: `mga-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+          messaging_group_id: ownMg.id,
+          agent_group_id: agentGroupId,
+          engage_mode: 'always',
+          engage_pattern: `@${name.replace(/\s+/g, '')}`,
+          sender_scope: 'all',
+          ignored_message_policy: 'drop',
+          session_mode: 'shared',
+          priority: 0,
+          created_at: now,
+        } as never);
+      }
+      const ownDestName = allocateDestinationName(agentGroupId, `${folder}-dashboard`);
+      createDestination({
+        agent_group_id: agentGroupId,
+        local_name: ownDestName,
+        target_type: 'channel',
+        target_id: ownMg.id,
+        created_at: now,
+      });
+    }
   }
 
   // REQUIRED: project the new destination into the running container's

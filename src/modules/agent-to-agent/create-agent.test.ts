@@ -130,14 +130,14 @@ afterEach(() => {
 });
 
 describe('handleCreateAgent', () => {
-  it('default (no directChannel) sets routing=internal and wires into parent channel with @pattern', async () => {
+  it('default (no internalOnly) sets routing=direct and creates own dashboard channel', async () => {
     const { session, mgId } = setupFixtures();
 
     await handleCreateAgent({ name: 'Test Worker', requestId: 'req-1' }, session);
 
     const child = getAgentGroupByFolder('test-worker');
     expect(child).toBeDefined();
-    expect(child!.routing).toBe('internal');
+    expect(child!.routing).toBe('direct');
 
     const agents = getMessagingGroupAgents(mgId);
     const childWiring = agents.find((a) => a.agent_group_id === child!.id);
@@ -146,17 +146,17 @@ describe('handleCreateAgent', () => {
     expect(childWiring!.engage_pattern).toBe('@test-worker\\b');
   });
 
-  it('directChannel=true sets routing=direct', async () => {
+  it('internalOnly=true sets routing=internal', async () => {
     const { session } = setupFixtures();
 
     await handleCreateAgent(
-      { name: 'Direct Bot', instructions: null, directChannel: true, requestId: 'req-2' },
+      { name: 'Internal Bot', instructions: null, internalOnly: true, requestId: 'req-2' },
       session,
     );
 
-    const child = getAgentGroupByFolder('direct-bot');
+    const child = getAgentGroupByFolder('internal-bot');
     expect(child).toBeDefined();
-    expect(child!.routing).toBe('direct');
+    expect(child!.routing).toBe('internal');
   });
 
   it('creates bidirectional destinations between parent and child', async () => {

@@ -42,16 +42,31 @@ After `install_packages`, call `mcp__nanoclaw__request_rebuild` to bake packages
 
 ## Creating Coworkers
 
-Coworkers are typed agents composed from the lego spine system. Use `mcp__nanoclaw__create_agent` with:
+**IMPORTANT: NEVER call `create_agent` without asking the user first. You MUST use `ask_user_question` before creating ANY coworker.**
+
+**Step 1 — ALWAYS ask the user to confirm coworkerType.** Use `ask_user_question` with the available types as options. Put the most likely type as option 1 (it becomes the default). Read `container/skills/*/coworker-types.yaml` for the list. Example:
+
+```
+ask_user_question("Which coworker type for <name>?", options: [
+  "slang-reader (Recommended) — read-only: investigate, review, research",
+  "slang-writer — read+write: investigate, implement, review, create PRs",
+  "slangpy-common — SlangPy project spine"
+])
+```
+
+Without a type, the coworker gets NO project-specific skills, workflows, MCP tools, or spine. NEVER pass `coworkerType: null`.
+
+**Step 2 — Only after the user responds,** call `create_agent` with all fields filled in.
 
 | Field | Required | Purpose |
 |-------|----------|---------|
 | `name` | yes | Display name and @mention trigger |
-| `coworkerType` | no | Lego registry type (sets spine, skills, workflows, MCP tools) |
-| `instructionOverlay` | no | Communication style: `thorough-analyst`, `terse-reporter`, `code-reviewer`, `ci-focused` |
-| `instructions` | no | Custom instructions appended after the overlay |
+| `coworkerType` | **yes** | Lego registry type — sets spine, skills, workflows, MCP tools. NEVER leave null. |
+| `instructionOverlay` | yes | Communication style: `thorough-analyst`, `terse-reporter`, `code-reviewer`, `ci-focused` |
+| `instructions` | yes | Custom instructions for this coworker's specific role |
+| `internalOnly` | no | Default `false`. Set `true` for internal-only agents. |
 
-The host composes each coworker's CLAUDE.md from spine fragments (identity, invariants, context), skills, workflows, overlays, and trait bindings — then wires the coworker to the current channel with an @mention trigger.
+The host composes each coworker's CLAUDE.md from spine fragments (identity, invariants, context), skills, workflows, overlays, and trait bindings — then wires the coworker to its own dashboard channel.
 
 ### Instruction overlays
 
