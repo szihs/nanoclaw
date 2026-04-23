@@ -46,7 +46,7 @@ This merges in:
 - `container/skills/slang-build/` — clone, build, navigate Slang (SKILL.md, build.md, structure.md, gotchas.md)
 - `container/skills/slang-explore/` — compiler pipeline tracing, backend architecture
 - `container/skills/slang-maintain-release-report/` — MCP-based daily reports, release notes, SPIR-V/GitLab updates
-- `container/skills/spine-slang/` — lego-spine addon: declares `slang-*` coworker types declares `slang-*` coworker types
+- `container/skills/spine-slang/` — lego-spine addon: declares `slang-*` coworker types
 - `container/skills/slang-templates/` — role template files (building blocks for coworker types)
 
 If the merge reports conflicts, resolve them by reading the conflicted files and understanding the intent of both sides.
@@ -55,7 +55,7 @@ If the merge reports conflicts, resolve them by reading the conflicted files and
 
 No direct edits to `groups/main/CLAUDE.md` or `groups/global/CLAUDE.md` are needed — both regenerate from the lego spine.
 
-The composer scans every `container/skills/*/coworker-types.yaml`. This skill's `container/skills/spine-slang/coworker-types.yaml` declares the `slang-*` typed coworkers declares the `slang-*` typed coworkers. To refresh the checked-in prompts:
+The composer scans every `container/skills/*/coworker-types.yaml`. This skill's `container/skills/spine-slang/coworker-types.yaml` declares the `slang-*` typed coworkers. To refresh the checked-in prompts:
 
 ```bash
 npm run rebuild:claude
