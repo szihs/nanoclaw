@@ -61,7 +61,8 @@ Stop and think before acting. This skill turns a requirement into an actionable 
 - <what could go wrong>
 ```
 
-6. **Get confirmation** — present the plan and wait for approval before proceeding. Use `mcp__nanoclaw__ask_user_question` if the user needs to choose between approaches.
+6. **Get confirmation** — present the plan and wait for approval before proceeding.
+   <!-- mcp__nanoclaw__ask_user_question disabled — plan-overlay's critique loop handles approval. -->
 
 ## Invariants
 

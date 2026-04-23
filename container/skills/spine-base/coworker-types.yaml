@@ -18,6 +18,8 @@ base-common:
   skills:
     - base-nanoclaw
     - plan
+  overlays:
+    - plan-overlay
   # deep-research + codex-critique are opt-in per project type.
   # Workflows are NOT listed here — base-common is abstract (no bindings).
   # Project types add: workflows, bindings, and optional skills.
