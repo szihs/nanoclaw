@@ -112,6 +112,14 @@ async function main(): Promise<void> {
       args: ['-m', process.env.CODEX_MODEL || 'gpt-5.4-codex-max', '-c', `model_reasoning_effort=${process.env.CODEX_REASONING_EFFORT || 'xhigh'}`, 'mcp-server'],
       env: {},
     },
+    atomic_chat: {
+      command: 'bun',
+      args: ['run', path.join(__dirname, 'atomic-chat-mcp-stdio.ts')],
+      env: {
+        ...(process.env.ATOMIC_CHAT_HOST ? { ATOMIC_CHAT_HOST: process.env.ATOMIC_CHAT_HOST } : {}),
+        ...(process.env.ATOMIC_CHAT_API_KEY ? { ATOMIC_CHAT_API_KEY: process.env.ATOMIC_CHAT_API_KEY } : {}),
+      },
+    },
   };
 
   // Merge additional MCP servers from host configuration

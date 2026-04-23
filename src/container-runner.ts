@@ -304,7 +304,12 @@ async function spawnContainer(session: Session): Promise<void> {
   // Log stderr
   container.stderr?.on('data', (data) => {
     for (const line of data.toString().trim().split('\n')) {
-      if (line) log.debug(line, { container: agentGroup.folder });
+      if (!line) continue;
+      if (line.includes('[ATOMIC]')) {
+        log.info(line, { container: agentGroup.folder });
+      } else {
+        log.debug(line, { container: agentGroup.folder });
+      }
     }
   });
 
@@ -568,6 +573,14 @@ async function buildContainerArgs(
   // Cap on how many pending messages reach one prompt. Accumulated context
   // (trigger=0 rows) rides along with wake-eligible rows up to this cap.
   args.push('-e', `NANOCLAW_MAX_MESSAGES_PER_PROMPT=${MAX_MESSAGES_PER_PROMPT}`);
+
+  // Atomic Chat MCP tool: forward host overrides if set (default is host.docker.internal:1337).
+  if (process.env.ATOMIC_CHAT_HOST) {
+    args.push('-e', `ATOMIC_CHAT_HOST=${process.env.ATOMIC_CHAT_HOST}`);
+  }
+  if (process.env.ATOMIC_CHAT_API_KEY) {
+    args.push('-e', `ATOMIC_CHAT_API_KEY=${process.env.ATOMIC_CHAT_API_KEY}`);
+  }
 
   // Provider-contributed env vars (e.g. XDG_DATA_HOME, OPENCODE_*, NO_PROXY).
   if (providerContribution.env) {
