@@ -130,6 +130,7 @@ async function main(): Promise<void> {
   // MCP proxy integration: add proxy-connected servers for allowed MCP tools
   const allowedMcpTools = parseAllowedMcpTools(process.env as Record<string, string | undefined>);
   if (allowedMcpTools.length > 0 && process.env.MCP_PROXY_URL) {
+    log('Using legacy MCP proxy auto-discovery from allowed tool names; prefer explicit NANOCLAW_MCP_SERVERS provisioning for HTTP MCP servers.');
     // Derive which MCP servers to connect based on allowed tool prefixes
     const neededServers = new Set<string>();
     for (const tool of allowedMcpTools) {

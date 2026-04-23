@@ -105,6 +105,32 @@ describe('agent groups', () => {
     createAgentGroup(ag());
     expect(() => createAgentGroup({ ...ag(), id: 'ag-dup' })).toThrow();
   });
+
+  it('defaults admin coworker_type to main when omitted', () => {
+    createAgentGroup({ ...ag(), id: 'ag-admin', folder: 'admin-agent', is_admin: 1, coworker_type: null });
+    const result = getAgentGroup('ag-admin');
+    expect(result?.is_admin).toBe(1);
+    expect(result?.coworker_type).toBe('main');
+  });
+
+  it('preserves explicit coworker_type for admin groups', () => {
+    createAgentGroup({
+      ...ag(),
+      id: 'ag-admin-explicit',
+      folder: 'admin-explicit',
+      is_admin: 1,
+      coworker_type: 'main',
+    });
+    const result = getAgentGroup('ag-admin-explicit');
+    expect(result?.coworker_type).toBe('main');
+  });
+
+  it('leaves non-admin coworker_type null when omitted', () => {
+    createAgentGroup({ ...ag(), id: 'ag-nonadmin', folder: 'nonadmin-agent', is_admin: 0, coworker_type: null });
+    const result = getAgentGroup('ag-nonadmin');
+    expect(result?.is_admin).toBe(0);
+    expect(result?.coworker_type).toBeNull();
+  });
 });
 
 // ── Messaging Groups ──

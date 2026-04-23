@@ -1,9 +1,21 @@
 import type { AgentGroup } from '../types.js';
 import { getDb } from './connection.js';
 
+function normalizeAgentGroupDefaults(
+  group: Partial<AgentGroup> & Pick<AgentGroup, 'id' | 'name' | 'folder' | 'created_at'>,
+): Partial<AgentGroup> & Pick<AgentGroup, 'id' | 'name' | 'folder' | 'created_at'> {
+  const normalized = { ...group };
+  const isAdmin = Number(normalized.is_admin ?? 0) === 1;
+  if (isAdmin && (normalized.coworker_type == null || normalized.coworker_type === '')) {
+    normalized.coworker_type = 'main';
+  }
+  return normalized;
+}
+
 export function createAgentGroup(
   group: Partial<AgentGroup> & Pick<AgentGroup, 'id' | 'name' | 'folder' | 'created_at'>,
 ): void {
+  const normalized = normalizeAgentGroupDefaults(group);
   getDb()
     .prepare(
       `INSERT INTO agent_groups (id, name, folder, is_admin, agent_provider, container_config, coworker_type, allowed_mcp_tools, routing, created_at)
@@ -16,7 +28,7 @@ export function createAgentGroup(
       coworker_type: null,
       allowed_mcp_tools: null,
       routing: 'direct',
-      ...group,
+      ...normalized,
     });
 }
 

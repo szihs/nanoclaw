@@ -6,7 +6,7 @@
  */
 import path from 'path';
 
-import { DATA_DIR, MCP_PROXY_PORT, PROXY_BIND_HOST } from './config.js';
+import { DASHBOARD_INGRESS_HOST, DASHBOARD_INGRESS_PORT, DATA_DIR, MCP_PROXY_PORT, PROXY_BIND_HOST } from './config.js';
 import { initDb, getDb } from './db/connection.js';
 import { runMigrations } from './db/migrations/index.js';
 import { getMessagingGroupsByChannel, getMessagingGroupAgents } from './db/messaging-groups.js';
@@ -17,6 +17,8 @@ import { routeInbound } from './router.js';
 import { log } from './log.js';
 import { startMcpServers, getRunningServerNames, getServerUpstreamPort } from './mcp-registry.js';
 import { startMcpAuthProxy, setUpstreamPortResolver, discoverTools } from './mcp-auth-proxy.js';
+import { startDashboardIngress } from './dashboard-ingress.js';
+
 // Response + shutdown registries live in response-registry.ts to break the
 // circular import cycle: src/index.ts imports src/modules/index.js for side
 // effects, and the modules call registerResponseHandler/onShutdown at top
@@ -79,6 +81,7 @@ export interface ConversationConfig {
 // Module-level so shutdown() can access
 let mcpStackHandle: { stop: () => void } | null = null;
 let mcpProxyHandle: { stop: () => void } | null = null;
+let dashboardIngressHandle: { stop: () => Promise<void> } | null = null;
 
 async function main(): Promise<void> {
   log.info('NanoClaw starting');
@@ -169,6 +172,51 @@ async function main(): Promise<void> {
     };
   });
 
+  // 3b. Dashboard inbound bridge — standalone dashboard server sends browser
+  // chat here so routing still happens inside the host process.
+  dashboardIngressHandle = startDashboardIngress({
+    host: DASHBOARD_INGRESS_HOST,
+    port: DASHBOARD_INGRESS_PORT,
+    onActionFn: async (questionId, selectedOption, userId) => {
+      const { getResponseHandlers } = await import('./response-registry.js');
+      for (const handler of getResponseHandlers()) {
+        if (
+          await handler({
+            questionId,
+            value: selectedOption,
+            userId,
+            channelType: 'dashboard',
+            platformId: 'dashboard',
+            threadId: null,
+          })
+        )
+          break;
+      }
+    },
+    onQuestionFn: async (questionId, selectedOption, userId) => {
+      const { getResponseHandlers } = await import('./response-registry.js');
+      for (const handler of getResponseHandlers()) {
+        if (
+          await handler({
+            questionId,
+            value: selectedOption,
+            userId,
+            channelType: 'dashboard',
+            platformId: 'dashboard',
+            threadId: null,
+          })
+        )
+          break;
+      }
+    },
+    onCredentialSubmitFn: async (_credentialId, _value) => {
+      log.warn('Dashboard credential submit not yet wired to response registry');
+    },
+    onCredentialRejectFn: async (_credentialId) => {
+      log.warn('Dashboard credential reject not yet wired to response registry');
+    },
+  });
+
   // 4. Delivery adapter bridge — dispatches to channel adapters
   const deliveryAdapter = {
     async deliver(
@@ -256,6 +304,7 @@ async function shutdown(signal: string): Promise<void> {
   stopHostSweep();
   mcpProxyHandle?.stop();
   mcpStackHandle?.stop();
+  await dashboardIngressHandle?.stop();
   await teardownChannelAdapters();
   process.exit(0);
 }

@@ -85,6 +85,6 @@ Use workspace-local `npm install` when a dependency only needs to live in the mo
 
 Use `mcp__nanoclaw__add_mcp_server` to register an MCP server, then `mcp__nanoclaw__request_rebuild` to apply it.
 
-### Durable learnings
+### Shared learnings
 
-Share discoveries through `mcp__nanoclaw__append_learning` so future coworkers benefit from what you find.
+**IMPORTANT:** After solving a problem, finding a workaround, or discovering non-obvious behavior, share it via `mcp__nanoclaw__append_learning` so other coworkers benefit on their next session. At session start, read `/workspace/global/learnings/INDEX.md` for discoveries shared by the team.

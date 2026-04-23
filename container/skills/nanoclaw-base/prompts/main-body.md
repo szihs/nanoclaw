@@ -17,7 +17,6 @@ You help with tasks directly and coordinate specialized coworkers when a task be
 - Ask bounded user decisions with `mcp__nanoclaw__ask_user_question`
 - Send structured status panels with `mcp__nanoclaw__send_card`
 - Install container packages with `mcp__nanoclaw__install_packages`
-- Record durable learnings with `mcp__nanoclaw__append_learning`
 - Browse the web with `agent-browser` (open pages, click, fill forms, take screenshots)
 
 ## Communication
@@ -71,7 +70,7 @@ By default, coworkers can only talk to you (parent). Use `mcp__nanoclaw__wire_ag
 1. Choose complementary types from the lego registry
 2. Create one coworker per type with a focused brief
 3. Collect findings from each coworker
-4. Synthesize results and share durable learnings via `append_learning`
+4. Synthesize results
 
 ### Trigger behavior
 
@@ -108,9 +107,19 @@ When you learn something important:
 
 Read and write `/workspace/global/CLAUDE.md` for facts that should apply to all groups. Only update when explicitly asked.
 
-### Learnings curation
+### Shared learnings
 
-You have write access to `/workspace/global/learnings/`. Periodically validate, consolidate, and prune stale entries.
+**IMPORTANT:** After solving a problem, finding a workaround, or discovering non-obvious behavior, share it via `mcp__nanoclaw__append_learning` so other coworkers benefit on their next session. At session start, read `/workspace/global/learnings/INDEX.md` for discoveries shared by the team.
+
+As the Orchestrator, you own the learnings directory at `/workspace/global/learnings/`. Schedule a weekly curation task to:
+
+1. Read all entries in `/workspace/global/learnings/`
+2. Validate each learning is still accurate (check referenced files/paths still exist)
+3. Consolidate duplicates and merge related entries
+4. Prune stale or outdated entries
+5. Rebuild `INDEX.md` with current summaries
+
+Use `schedule_task` with a weekly cron and a script that checks if any learnings files were modified in the past week — only wake the agent if curation is needed.
 
 ## Constraints
 
