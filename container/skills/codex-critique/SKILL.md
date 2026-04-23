@@ -2,7 +2,7 @@
 name: codex-critique
 description: "Ask an external Codex MCP reviewer to critique a proposed patch, test, or design. Trigger after a patch is written but before commit, or when a workflow's critique-overlay is active. Read-only — produces a structured critique, not changes. Keywords: critique, review, second opinion, codex."
 provides: [critique.review]
-allowed-tools: Read, Grep, Glob, Bash(git diff:*), mcp__codex__review, mcp__codex__critique
+allowed-tools: Read, Grep, Glob, Bash(git diff:*), mcp__codex__codex, mcp__codex__codex-reply
 ---
 
 # Codex Critique
@@ -19,7 +19,7 @@ Project-agnostic critique skill. Wraps an external Codex MCP reviewer so any wor
 
 1. **Prepare the diff** — `git diff` against the branch point. Keep the diff focused; critique quality drops on sprawling changes.
 
-2. **Request critique** — `mcp__codex__critique` with: the diff, the stated intent, and the relevant invariants (from the coworker spine). Ask for verdict + must-fix + should-fix + nits.
+2. **Request critique** — `mcp__codex__codex` with `sandbox: read-only`. Pass: the diff, the stated intent, and the relevant invariants (from the coworker spine) in the prompt. Set `developer-instructions` to request verdict + must-fix + should-fix + nits format. Use `mcp__codex__codex-reply` if follow-up is needed.
 
 3. **Triage the response** —
    - `must-fix`: block the workflow from proceeding; loop back to patch.

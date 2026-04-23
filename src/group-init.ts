@@ -120,6 +120,22 @@ export function initGroupFilesystem(group: AgentGroup, opts?: { instructions?: s
     }
   }
 
+  // 2b. data/v2-sessions/<id>/.claude-shared/agents/ — subagent definitions
+  const agentsDst = path.join(claudeDir, 'agents');
+  fs.mkdirSync(agentsDst, { recursive: true });
+  if (fs.existsSync(skillsSrc)) {
+    for (const skill of fs.readdirSync(skillsSrc)) {
+      const agentFile = path.join(skillsSrc, skill, 'agent.md');
+      if (fs.existsSync(agentFile)) {
+        const dst = path.join(agentsDst, `${skill}.md`);
+        if (!fs.existsSync(dst)) {
+          fs.copyFileSync(agentFile, dst);
+          initialized.push(`agents/${skill}.md`);
+        }
+      }
+    }
+  }
+
   // 3. data/v2-sessions/<id>/agent-runner-src/ — per-group source copy
   const groupRunnerDir = path.join(DATA_DIR, 'v2-sessions', group.id, 'agent-runner-src');
   if (!fs.existsSync(groupRunnerDir)) {

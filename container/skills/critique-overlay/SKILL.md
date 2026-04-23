@@ -1,7 +1,7 @@
 ---
 name: critique-overlay
 type: overlay
-description: "Insert a critique gate after planning and after code changes. Runs up to 3 rounds per gate — blocks progress on must-fix items. Attach to a coworker type via `overlays: [critique-overlay]`."
+description: "Insert a critique gate after planning and after code changes. Spawns the codex-critique agent (fresh context + Codex MCP) for independent review. Blocks progress on must-fix items up to 3 rounds."
 applies-to:
   workflows: [investigate, implement, document]
   traits: [plan.research, code.edit, test.gen, doc.write]
@@ -10,26 +10,34 @@ uses:
   skills: [codex-critique]
 ---
 
-**Critique** {#critique} — invoke `/codex-critique` to review the work so far before proceeding.
+**Critique** {#critique} — spawn the `codex-critique` agent to review the work so far. The agent has a **fresh context window**, **read-only tools**, and uses the **Codex MCP** for an independent external review.
 
-**What to critique depends on the gate:**
+**What to pass depends on the gate:**
 
-- After `investigate` (plan gate) — critique the investigation findings and proposed approach. Pass the report draft, the original question/issue, and the decision rationale. The reviewer assesses: is the analysis sound? Are alternatives considered? Is the recommendation justified?
-- After `patch` (code gate) — critique the code change. Pass the diff, the stated intent, and the relevant invariants from the spine. The reviewer assesses: correctness, minimality, test coverage, style.
-- After `draft` (doc gate) — critique the documentation draft. Pass the draft, the feature/change it documents, and any accuracy constraints.
+- After `investigate` — pass: the problem statement, what you found, and the path to your report (`/workspace/group/reports/{{target_slug}}.md`). The agent will read the report itself.
+- After `patch` — pass: the problem statement, what you changed (file list + one-line per file), and the branch name. The agent will run `git diff` itself.
+- After `draft` — pass: the problem statement, what you documented, and the path to the draft. The agent will read it itself.
+
+**How to invoke:** Spawn `codex-critique` agent with three things:
+
+```
+Problem: [what issue you're solving]
+Changes: [what you changed and why]
+Thoughts: [your reasoning, tradeoffs considered, anything you're unsure about]
+```
+
+The agent has file access — it will read the code, run diffs, and launch a Codex session for the external review.
 
 **3-round protocol:**
 
-1. Run `/codex-critique` with the appropriate context for this gate.
-2. If the critique returns `must-fix` items:
-   - Address each must-fix by looping back to the step this overlay is attached to.
-   - Re-run `/codex-critique` with the updated work.
+1. Spawn `codex-critique` agent with the context above.
+2. If `must-fix` items returned:
+   - Fix each item, loop back to the step this overlay is attached to.
+   - Re-spawn the critique agent with the updated state.
    - This is round 2.
-3. If round 2 still has `must-fix` items:
-   - Address them and re-run one final time (round 3).
-4. If round 3 still has `must-fix` items:
-   - Stop. Do NOT proceed. Report the unresolved items and ask for human guidance.
-5. `should-fix` items may be declined with written justification in the workflow log.
-6. Record the final critique verdict (approve / approve-with-nits / request-changes / blocked) in the log before proceeding.
+3. Round 2 still has `must-fix`? Fix and re-spawn (round 3).
+4. Round 3 still has `must-fix`? **Stop.** Report unresolved items and ask the user.
+5. `should-fix` items may be declined with written justification in the log.
+6. Record the final verdict before proceeding.
 
 **Invariant:** Never proceed past a critique gate with unresolved `must-fix` items after 3 rounds. Escalate to the user instead.

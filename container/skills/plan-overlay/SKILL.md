@@ -18,10 +18,10 @@ uses:
 
 **3-round critique protocol:**
 
-1. Run `/codex-critique` with the plan document (not a diff). The reviewer assesses: is the approach sound? Is it minimal? Are risks identified? Will it actually solve the root cause?
+1. Spawn `@"codex-critique (agent)"` with the plan document (not a diff). Pass the plan text, the investigation findings, and the problem statement. The agent has fresh context and read-only access. The reviewer assesses: is the approach sound? Is it minimal? Are risks identified? Will it actually solve the root cause?
 2. If the critique returns `must-fix` items:
    - Revise the plan to address each must-fix item.
-   - Re-run `/codex-critique` with the updated plan.
+   - Re-spawn the critique agent with the updated plan.
    - This is round 2.
 3. If round 2 still has `must-fix` items:
    - Revise and re-run one final time (round 3).
@@ -30,6 +30,6 @@ uses:
 5. `should-fix` items may be declined with written justification in the plan file.
 6. Record the final critique verdict (approve / approve-with-nits / request-changes / blocked) at the top of the plan file before proceeding.
 
-**Handoff to implementation:** Once the plan is approved, subsequent steps (especially `patch`) MUST read `/workspace/group/plans/{{target_slug}}.md` and follow it. When invoking `/codex-critique` after `patch`, pass the plan file alongside the diff so the reviewer can verify the implementation matches the approved plan.
+**Handoff to implementation:** Once the plan is approved, subsequent steps (especially `patch`) MUST read `/workspace/group/plans/{{target_slug}}.md` and follow it. When spawning the critique agent after `patch`, pass the plan file alongside the diff so the reviewer can verify the implementation matches the approved plan.
 
 **Invariant:** Never proceed past the plan gate with unresolved `must-fix` items after 3 rounds. Escalate to the user instead.
