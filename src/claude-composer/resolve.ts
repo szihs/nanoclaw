@@ -86,7 +86,22 @@ export function resolveCoworkerManifest(
   const overlayNames: string[] = [];
   const bindings: Record<string, string> = {};
   const mcpServers: Record<string, import('./types.js').McpServerTypeConfig> = {};
+  let manifestProject: string | undefined;
   let flat = false;
+
+  // Build skill → native project. A skill is project-specific only when every
+  // project-typed type that lists it shares the same project. Skills listed by
+  // types from multiple different projects, or only by base types (no project),
+  // are universal and can bind to any manifest.
+  const skillProjectSets = new Map<string, Set<string>>();
+  for (const entry of Object.values(types)) {
+    if (!entry.skills || !entry.project) continue;
+    for (const s of entry.skills) {
+      const projs = skillProjectSets.get(s) || new Set();
+      projs.add(entry.project);
+      skillProjectSets.set(s, projs);
+    }
+  }
 
   for (const role of roles) {
     const chain = resolveTypeChain(types, role);
@@ -114,6 +129,10 @@ export function resolveCoworkerManifest(
       }
     }
     if (leafIdentity) identityParts.push(leafIdentity);
+    if (!manifestProject) {
+      const leaf = chain[chain.length - 1];
+      if (leaf?.project) manifestProject = leaf.project;
+    }
   }
 
   // Flat types are verbatim prose bodies (main/global). Skip workflow/skill/
@@ -184,17 +203,43 @@ export function resolveCoworkerManifest(
   //   1. Extracts the domain from a qualified trait (repo.pr → repo)
   //   2. Looks up the binding by domain
   //   3. Checks the bound skill provides the full qualified string
-  //   4. Falls back to any skill in the set that directly provides it
+  //   4. Falls back to a project-scoped skill scan (same project or base first)
   const requiredTraits = new Set<string>();
   for (const wf of workflowEntries) {
     for (const trait of wf.requires) requiredTraits.add(trait);
   }
+
+  // Build project-scoped fallback maps. Same-project/base skills are preferred;
+  // cross-project skills are a last resort with a warning.
+  // A skill is "compatible" if it's universal (no project affinity or multi-
+  // project), or if its sole project matches the manifest's project.
   const directlyProvided = new Map<string, string>();
+  const crossProjectProvided = new Map<string, string>();
+  const traitProviders = new Map<string, string[]>();
   for (const s of skillEntries) {
+    const projs = skillProjectSets.get(s.name);
+    const soleProject = projs?.size === 1 ? [...projs][0] : undefined;
+    const compatible = !soleProject || !manifestProject || soleProject === manifestProject;
     for (const trait of s.provides) {
-      if (!directlyProvided.has(trait)) directlyProvided.set(trait, s.name);
+      const providers = traitProviders.get(trait) || [];
+      providers.push(s.name);
+      traitProviders.set(trait, providers);
+      const target = compatible ? directlyProvided : crossProjectProvided;
+      if (!target.has(trait)) target.set(trait, s.name);
     }
   }
+
+  // Warn when multiple skills provide the same trait without an explicit binding.
+  for (const [trait, providers] of traitProviders) {
+    if (providers.length <= 1) continue;
+    const domain = trait.split('.')[0];
+    if (!bindings[domain] && !bindings[trait]) {
+      console.warn(
+        `Coworker type "${typeName}": trait "${trait}" provided by [${providers.join(', ')}] with no explicit binding. Using "${providers[0]}".`,
+      );
+    }
+  }
+
   const resolvedBindings: Record<string, string> = { ...bindings };
   const unresolvedTraits: string[] = [];
   for (const qualifiedTrait of requiredTraits) {
@@ -209,8 +254,11 @@ export function resolveCoworkerManifest(
         );
       }
       if (skill.provides.includes(qualifiedTrait)) {
-        continue; // bound skill covers it
+        continue;
       }
+      console.warn(
+        `Coworker type "${typeName}": binding "${domain}" → "${resolvedBindings[domain]}" does not provide "${qualifiedTrait}". Falling back to skill scan.`,
+      );
     }
 
     // 2. Check exact-key binding (backward compat with unqualified traits)
@@ -221,13 +269,22 @@ export function resolveCoworkerManifest(
       }
     }
 
-    // 3. Fallback: any skill in the set directly provides it.
-    // Set the domain binding only if no explicit binding exists for this domain,
-    // so the rendered binding table shows coverage without overriding explicit bindings.
+    // 3. Fallback: project-scoped skill scan. Prefer same-project or base skills.
     if (directlyProvided.has(qualifiedTrait)) {
       if (!resolvedBindings[domain]) {
         resolvedBindings[domain] = directlyProvided.get(qualifiedTrait)!;
       }
+      continue;
+    }
+
+    // 4. Cross-project skills are blocked — never silently auto-bind across projects.
+    if (crossProjectProvided.has(qualifiedTrait)) {
+      const crossSkill = crossProjectProvided.get(qualifiedTrait)!;
+      const projs = skillProjectSets.get(crossSkill);
+      const crossProject = projs ? [...projs].join(', ') : 'unknown';
+      unresolvedTraits.push(
+        `${qualifiedTrait} (only provided by cross-project skill "${crossSkill}" from project "${crossProject}")`,
+      );
       continue;
     }
 

@@ -27,7 +27,7 @@ export function readCoworkerTypes(projectRoot = process.cwd()): Record<string, C
     const loaded = yaml.load(fs.readFileSync(typesFile, 'utf-8'));
     if (!loaded || typeof loaded !== 'object') continue;
     for (const [name, entry] of Object.entries(loaded as Record<string, CoworkerTypeEntry>)) {
-      registry[name] = registry[name] ? mergeTypeEntries(registry[name], entry) : entry;
+      registry[name] = registry[name] ? mergeTypeEntries(registry[name], entry, name) : entry;
     }
   }
 
@@ -46,7 +46,16 @@ export function readCoworkerTypes(projectRoot = process.cwd()): Record<string, C
 //
 // This lets an addon skill extend an existing type (e.g. dashboard-base
 // contributes `context:` to `main`) without owning it.
-function mergeTypeEntries(base: CoworkerTypeEntry, addon: CoworkerTypeEntry): CoworkerTypeEntry {
+function mergeTypeEntries(base: CoworkerTypeEntry, addon: CoworkerTypeEntry, typeName?: string): CoworkerTypeEntry {
+  if (typeName && addon.bindings && base.bindings) {
+    for (const key of Object.keys(addon.bindings)) {
+      if (base.bindings[key] && base.bindings[key] !== addon.bindings[key]) {
+        console.warn(
+          `Coworker type "${typeName}": binding "${key}" overwritten during merge: "${base.bindings[key]}" → "${addon.bindings[key]}".`,
+        );
+      }
+    }
+  }
   return {
     extends: addon.extends ?? base.extends,
     project: addon.project ?? base.project,

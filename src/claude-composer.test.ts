@@ -2,7 +2,7 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import {
   composeCoworkerSpine,
@@ -70,7 +70,7 @@ base-common:
       );
       writeTypes(
         root,
-        'slang-spine',
+        'spine-slang',
         `
 slang-common:
   project: slang
@@ -185,7 +185,7 @@ base-common:
       );
       writeTypes(
         root,
-        'slang-spine',
+        'spine-slang',
         `
 slang-common:
   project: slang
@@ -335,7 +335,7 @@ base-common:
       );
       writeTypes(
         root,
-        'slang-spine',
+        'spine-slang',
         `
 slang-common:
   project: slang
@@ -792,6 +792,248 @@ child:
       const catalog = readSkillCatalog(root);
       const manifest = resolveCoworkerManifest(types, 'child', catalog, root);
       expect(manifest.bindings['code']).toBe('patched-edit');
+    });
+  });
+
+  describe('project-scoped binding resolution', () => {
+    function setupCrossProject(root: string): void {
+      writeFile(path.join(root, 'container', 'skills', 'spine-base', 'inv.md'), 'safety');
+      writeTypes(
+        root,
+        'spine-base',
+        `
+base-common:
+  description: "Base"
+  invariants:
+    - container/skills/spine-base/inv.md
+`,
+      );
+      writeSkill(root, 'base-nanoclaw', { name: 'base-nanoclaw', type: 'capability', provides: ['ops.send'] });
+      writeSkill(root, 'code-reader-slang', {
+        name: 'code-reader-slang',
+        type: 'capability',
+        provides: ['code.read', 'code.search'],
+      });
+      writeSkill(root, 'code-reader-py', {
+        name: 'code-reader-py',
+        type: 'capability',
+        provides: ['code.read', 'code.search'],
+      });
+      writeSkill(root, 'investigate-wf', {
+        name: 'investigate',
+        type: 'workflow',
+        requires: ['code.read'],
+        description: 'investigate',
+      });
+      writeFile(path.join(root, 'container', 'skills', 'spine-slang', 'id.md'), 'slang engineer');
+      writeTypes(
+        root,
+        'spine-slang',
+        `
+slang-common:
+  project: slang
+  extends: base-common
+  identity: container/skills/spine-slang/id.md
+  skills:
+    - code-reader-slang
+  workflows:
+    - investigate
+  bindings:
+    code: code-reader-slang
+`,
+      );
+      writeFile(path.join(root, 'container', 'skills', 'spine-slangpy', 'id.md'), 'slangpy engineer');
+      writeTypes(
+        root,
+        'spine-slangpy',
+        `
+slangpy-common:
+  project: slangpy
+  extends: base-common
+  identity: container/skills/spine-slangpy/id.md
+  skills:
+    - code-reader-py
+    - code-reader-slang
+  workflows:
+    - investigate
+`,
+      );
+    }
+
+    it('auto-binds to same-project skill over cross-project skill', () => {
+      const root = makeTempProject();
+      setupCrossProject(root);
+      const types = readCoworkerTypes(root);
+      const catalog = readSkillCatalog(root);
+      const manifest = resolveCoworkerManifest(types, 'slangpy-common', catalog, root);
+      expect(manifest.bindings['code']).toBe('code-reader-py');
+    });
+
+    it('explicit binding from same project resolves normally', () => {
+      const root = makeTempProject();
+      setupCrossProject(root);
+      const types = readCoworkerTypes(root);
+      const catalog = readSkillCatalog(root);
+      const manifest = resolveCoworkerManifest(types, 'slang-common', catalog, root);
+      expect(manifest.bindings['code']).toBe('code-reader-slang');
+    });
+
+    it('base skill (no project) binds to any project type', () => {
+      const root = makeTempProject();
+      writeFile(path.join(root, 'container', 'skills', 'spine-base', 'inv.md'), 'safety');
+      writeTypes(
+        root,
+        'spine-base',
+        `
+base-common:
+  description: "Base"
+  invariants:
+    - container/skills/spine-base/inv.md
+`,
+      );
+      writeSkill(root, 'base-tool', { name: 'base-tool', type: 'capability', provides: ['code.read'] });
+      writeSkill(root, 'wf', { name: 'wf', type: 'workflow', requires: ['code.read'], description: 'wf' });
+      writeFile(path.join(root, 'container', 'skills', 'spine-py', 'id.md'), 'py');
+      writeTypes(
+        root,
+        'spine-py',
+        `
+py-type:
+  project: pyproject
+  extends: base-common
+  identity: container/skills/spine-py/id.md
+  skills:
+    - base-tool
+  workflows:
+    - wf
+`,
+      );
+      const types = readCoworkerTypes(root);
+      const catalog = readSkillCatalog(root);
+      const manifest = resolveCoworkerManifest(types, 'py-type', catalog, root);
+      expect(manifest.bindings['code']).toBe('base-tool');
+    });
+
+    it('throws when only a cross-project skill provides a required trait', () => {
+      const root = makeTempProject();
+      writeFile(path.join(root, 'container', 'skills', 'spine-base', 'inv.md'), 'safety');
+      writeTypes(
+        root,
+        'spine-base',
+        `
+base-common:
+  description: "Base"
+  invariants:
+    - container/skills/spine-base/inv.md
+
+shared-base:
+  extends: base-common
+  skills:
+    - slang-only-reader
+`,
+      );
+      writeSkill(root, 'slang-only-reader', { name: 'slang-only-reader', type: 'capability', provides: ['code.read'] });
+      writeSkill(root, 'wf', { name: 'wf', type: 'workflow', requires: ['code.read'], description: 'wf' });
+      // slang-type (project: slang) lists the skill → skillProjectSets = {slang}.
+      // shared-base has no project → doesn't contribute to skillProjectSets.
+      writeTypes(
+        root,
+        'spine-slang',
+        `
+slang-type:
+  project: slang
+  extends: shared-base
+  skills:
+    - slang-only-reader
+`,
+      );
+      writeFile(path.join(root, 'container', 'skills', 'spine-py', 'id.md'), 'py');
+      // py-type extends shared-base which lists slang-only-reader. The skill
+      // enters py-type's chain, but skillProjectSets only records slang for it.
+      writeTypes(
+        root,
+        'spine-py',
+        `
+py-type:
+  project: pyproject
+  extends: shared-base
+  identity: container/skills/spine-py/id.md
+  workflows:
+    - wf
+`,
+      );
+      const types = readCoworkerTypes(root);
+      const catalog = readSkillCatalog(root);
+      expect(() => resolveCoworkerManifest(types, 'py-type', catalog, root)).toThrow(/cross-project.*slang/);
+    });
+
+    it('warns when multiple skills provide same trait without explicit binding', () => {
+      const root = makeTempProject();
+      setupCrossProject(root);
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        const types = readCoworkerTypes(root);
+        const catalog = readSkillCatalog(root);
+        resolveCoworkerManifest(types, 'slangpy-common', catalog, root);
+        const ambiguityWarning = warnSpy.mock.calls.find(
+          (call) => typeof call[0] === 'string' && call[0].includes('code.read') && call[0].includes('no explicit binding'),
+        );
+        expect(ambiguityWarning).toBeDefined();
+      } finally {
+        warnSpy.mockRestore();
+      }
+    });
+
+    it('warns when binding does not cover a required qualified trait', () => {
+      const root = makeTempProject();
+      writeFile(path.join(root, 'container', 'skills', 'spine-base', 'inv.md'), 'safety');
+      writeTypes(
+        root,
+        'spine-base',
+        `
+base-common:
+  description: "Base"
+  invariants:
+    - container/skills/spine-base/inv.md
+`,
+      );
+      writeSkill(root, 'partial-skill', { name: 'partial-skill', type: 'capability', provides: ['code.read'] });
+      writeSkill(root, 'edit-skill', { name: 'edit-skill', type: 'capability', provides: ['code.edit'] });
+      writeSkill(root, 'impl-wf', {
+        name: 'impl',
+        type: 'workflow',
+        requires: ['code.read', 'code.edit'],
+        description: 'impl',
+      });
+      writeFile(path.join(root, 'container', 'skills', 'spine-test', 'id.md'), 'test');
+      writeTypes(
+        root,
+        'spine-test',
+        `
+test-type:
+  extends: base-common
+  identity: container/skills/spine-test/id.md
+  skills:
+    - partial-skill
+    - edit-skill
+  workflows:
+    - impl
+  bindings:
+    code: partial-skill
+`,
+      );
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        const types = readCoworkerTypes(root);
+        const catalog = readSkillCatalog(root);
+        resolveCoworkerManifest(types, 'test-type', catalog, root);
+        const partialWarning = warnSpy.mock.calls.find(
+          (call) => typeof call[0] === 'string' && call[0].includes('does not provide') && call[0].includes('code.edit'),
+        );
+        expect(partialWarning).toBeDefined();
+      } finally {
+        warnSpy.mockRestore();
+      }
     });
   });
 });
