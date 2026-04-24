@@ -63,7 +63,41 @@ Common reusable skills: `base-nanoclaw`, `plan`, `deep-research`, `codex-critiqu
 
 Write the analysis to `/workspace/group/onboard-{project}.md`.
 
-### 1c. Derive project profile
+### 1c. Build trait capability map
+
+Scan ALL existing skills for their `provides:` traits. This tells you which capabilities are already covered and what the new project needs:
+
+```bash
+for f in container/skills/*/SKILL.md; do
+  name=$(grep -m1 "^name:" "$f" | sed 's/name: //')
+  provides=$(grep -m1 "^provides:" "$f" | sed 's/provides: //')
+  [ -n "$provides" ] && echo "$name: $provides"
+done
+```
+
+**Already covered by base skills (don't regenerate):**
+- `plan` → `plan.research`
+- `codex-critique` → `critique`
+- `deep-research` → `plan.research`
+
+**Must be generated per project (project-specific):**
+- `{project}-build` → `code.build, test.run, test.gen, ci.inspect`
+- `{project}-code-reader` → `code.read, doc.read`
+- `{project}-code-writer` → `code.read, code.edit, test.gen`
+- `{project}-docs` → `doc.read, doc.write`
+- `{project}-github` → `repo.read, repo.write, repo.pr, issues.read, issues.write, ci.rerun`
+
+When generating `coworker-types.yaml`, the `common` type lists both base skills (by reference) and project skills. The `reader` type inherits common. The `writer` type overrides bindings for write-capable traits (`code → {project}-code-writer`, `doc → {project}-docs`).
+
+**Auto-detect additional workflows from codebase signals:**
+- Benchmarks directory (`benchmarks/`, `perf/`, `bench/`) or benchmark config → generate `{project}-performance` workflow
+- Release/changelog files → generate `{project}-release` workflow  
+- Security policy or fuzzing config → generate `{project}-security` workflow
+- Migration files (`migrations/`, `alembic/`) → generate `{project}-migrate` workflow
+
+Only generate workflows for signals found in the actual codebase. Each additional workflow extends a base workflow or is standalone.
+
+### 1d. Derive project profile
 
 From the analysis, determine:
 
