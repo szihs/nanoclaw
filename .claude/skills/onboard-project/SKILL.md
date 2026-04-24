@@ -1,6 +1,6 @@
 ---
 name: onboard-project
-description: "Onboard a new project into the NanoClaw lego coworker system. Generates the full skeleton: spine, capability skills (5), workflow extensions (4), coworker types (common, reader, writer), and all 16 trait bindings. For OSS GitHub repos, uses DeepWiki for codebase analysis."
+description: "Onboard a new project into the NanoClaw lego coworker system. Generates the full skeleton: spine, capability skills (5), workflow extensions (4), coworker types (common, reader, writer), and all 16 trait bindings. Accepts a GitHub URL or local path. Uses DeepWiki for OSS GitHub repos."
 ---
 
 # Onboard Project
@@ -9,33 +9,52 @@ Generate a complete NanoClaw lego project skeleton — the full equivalent of wh
 
 ## Input
 
-The user passes the project as the prompt argument: `/onboard-project <github-url> [short-name]`
+The user passes the project as the prompt argument: `/onboard-project <repo> [short-name]`
 
-Example: `/onboard-project https://github.com/shader-slang/slangpy slangpy`
+- **`$1`** — GitHub URL (e.g. `https://github.com/shader-slang/slangpy`) OR local path (e.g. `/home/user/projects/mylib`)
+- **`$2`** — Project short name (optional; derived from repo/directory name if omitted)
 
-- **`$1`** — GitHub repo URL (required)
-- **`$2`** — Project short name (optional; derived from repo name if omitted: `shader-slang/slangpy` → `slangpy`)
+Examples:
+```
+/onboard-project https://github.com/shader-slang/slangpy slangpy
+/onboard-project /home/user/projects/mylib
+/onboard-project ~/code/graphics-engine gfx
+```
 
-Parse from the prompt. If the URL is missing, ask for it. The short name must be lowercase, hyphen-separated — it becomes the prefix for all generated skills.
+Parse from the prompt. If the path/URL is missing, ask for it. The short name must be lowercase, hyphen-separated — it becomes the prefix for all generated skills.
 
 ## Phase 1: Analyze the repository
 
-### 1a. Research via DeepWiki (OSS GitHub repos)
+### 1a. Determine input type
 
-Extract `{owner}/{repo}` from the URL. Use `mcp__deepwiki__ask_question` if available (the agent has it when the type includes `deepwiki` MCP server). Ask these questions — store each answer as a section in `/workspace/group/onboard-{project}.md`:
+- **GitHub URL** (starts with `https://github.com/`): Extract `{owner}/{repo}`. Use DeepWiki if available. If not, clone to `/tmp/{project}`.
+- **Local path** (starts with `/`, `~`, or `.`): Use directly — no cloning needed. Read files from the path.
+- **Other git URL** (gitlab, bitbucket, etc.): Clone to `/tmp/{project}`.
 
-1. "What are the primary programming languages, build system (CMake/npm/cargo/pip/etc), and how do you build and run tests in {owner}/{repo}?"
-2. "What is the source directory layout of {owner}/{repo}? List the top-level directories and what each contains."
-3. "What is the public API surface of {owner}/{repo}? What classes, functions, or modules are user-facing and should be treated as stable?"
-4. "What are the contribution guidelines for {owner}/{repo}? Branch naming, PR process, code style, pre-commit hooks, CI requirements?"
-5. "What CI/CD system does {owner}/{repo} use? What are the key workflow files and test commands?"
-6. "What documentation system does {owner}/{repo} use? Where are docs, how are they generated?"
+### 1b. Discover existing skills
 
-### 1b. Fallback (no DeepWiki or private repo)
+Before generating anything, scan `container/skills/` for reusable skills. These exist on lego-main and should be referenced, not recreated:
 
-Clone to `/tmp/{project}`: `git clone --depth 1 {url} /tmp/{project}`
+```bash
+ls container/skills/*/SKILL.md | while read f; do
+  grep -m1 "^name:" "$f" | sed 's/name: //'
+done
+```
 
-Read these files to extract the same information:
+Common reusable skills: `base-nanoclaw`, `plan`, `deep-research`, `codex-critique`, `investigate` (workflow), `implement` (workflow), `review` (workflow), `document` (workflow), `critique-overlay`, `plan-overlay`. These are shared across ALL projects — the new project's `coworker-types.yaml` references them, no need to generate duplicates.
+
+### 1c. Research the codebase
+
+**For OSS GitHub repos (DeepWiki available):** Use `mcp__deepwiki__ask_question` with `{owner}/{repo}`. Ask:
+
+1. "What are the primary programming languages, build system, and how do you build and run tests?"
+2. "What is the source directory layout? List top-level directories and what each contains."
+3. "What is the public API surface? What classes, functions, or modules are user-facing?"
+4. "What are the contribution guidelines? Branch naming, PR process, code style, CI requirements?"
+5. "What CI/CD system is used? Key workflow files and test commands?"
+6. "What documentation system is used? Where are docs, how are they generated?"
+
+**For local paths or non-GitHub repos:** Read files directly from the path:
 - `README.md`, `CONTRIBUTING.md`, `AGENTS.md`, `CLAUDE.md`
 - Build files: `CMakeLists.txt`, `package.json`, `pyproject.toml`, `Cargo.toml`, `Makefile`
 - CI: `.github/workflows/*.yml` (first 2-3 files)
