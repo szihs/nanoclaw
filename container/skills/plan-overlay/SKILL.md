@@ -10,6 +10,10 @@ uses:
   skills: [plan, codex-critique]
 ---
 
+<IMPORTANT>
+This is a MANDATORY gate. You MUST stop here and write a plan before writing any code. Do NOT skip to the patch step. Do NOT start editing source files until the plan is written and critique-approved. If you find yourself about to edit code without a written plan, STOP and re-read this block.
+</IMPORTANT>
+
 **Plan** {#plan} — invoke `/plan` for `{{target}}` before writing any code. Write the plan to `/workspace/agent/plans/{{target_slug}}.md`.
 
 **What to plan depends on the workflow context:**

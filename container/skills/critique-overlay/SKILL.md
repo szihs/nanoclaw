@@ -10,6 +10,10 @@ uses:
   skills: [codex-critique]
 ---
 
+<IMPORTANT>
+This is a MANDATORY gate. You MUST stop at this point in the workflow and spawn the codex-critique agent before proceeding. Do NOT skip this step. Do NOT continue to the next workflow step without completing the critique. If you find yourself about to move past this gate without spawning the agent, STOP and re-read this block.
+</IMPORTANT>
+
 **Critique** {#critique} — spawn the `codex-critique` agent to review the work so far. The agent has a **fresh context window**, **read-only tools**, and uses the **Codex MCP** for an independent external review.
 
 **What to pass depends on the gate:**
