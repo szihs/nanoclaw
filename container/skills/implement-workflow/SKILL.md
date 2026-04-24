@@ -11,7 +11,7 @@ params:
   repo: { type: string, required: true }
   branch: { type: string, required: false, description: "Branch name; auto-generated if omitted." }
 produces:
-  - implementation_log: { path: "/workspace/group/fixes/{{target_slug}}.md" }
+  - implementation_log: { path: "/workspace/agent/fixes/{{target_slug}}.md" }
   - patch: { path: "git commit on {{branch}}" }
 ---
 

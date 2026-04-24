@@ -73,7 +73,7 @@ If a task requires judgment every time (daily briefings, reports), skip the scri
 
 ### Workspace
 
-Files you create are saved in `/workspace/group/`.
+Files you create are saved in `/workspace/agent/`.
 
 ### Installing packages
 

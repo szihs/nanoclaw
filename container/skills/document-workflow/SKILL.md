@@ -11,7 +11,7 @@ params:
   repo:    { type: string, required: true }
   audience: { type: enum, default: "user", enum: ["user", "contributor", "maintainer"] }
 produces:
-  - docs_log: { path: "/workspace/group/docs/{{target_slug}}.md" }
+  - docs_log: { path: "/workspace/agent/docs/{{target_slug}}.md" }
   - patch:    { path: "git commit on {{branch}}" }
 ---
 

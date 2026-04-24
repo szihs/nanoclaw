@@ -9,8 +9,8 @@ uses:
 params:
   target: { type: string, required: true, description: "Issue, question, CI failure, or topic to investigate." }
 produces:
-  - report: { path: "/workspace/group/reports/{{target_slug}}.md" }
-  - report_index: { path: "/workspace/group/reports/index.md", append_only: true }
+  - report: { path: "/workspace/agent/reports/{{target_slug}}.md" }
+  - report_index: { path: "/workspace/agent/reports/index.md", append_only: true }
 ---
 
 # Investigate

@@ -14,7 +14,7 @@ uses:
 
 **What to pass depends on the gate:**
 
-- After `investigate` — pass: the problem statement, what you found, and the path to your report (`/workspace/group/reports/{{target_slug}}.md`). The agent will read the report itself.
+- After `investigate` — pass: the problem statement, what you found, and the path to your report (`/workspace/agent/reports/{{target_slug}}.md`). The agent will read the report itself.
 - After `patch` — pass: the problem statement, what you changed (file list + one-line per file), and the branch name. The agent will run `git diff` itself.
 - After `draft` — pass: the problem statement, what you documented, and the path to the draft. The agent will read it itself.
 

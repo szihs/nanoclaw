@@ -10,7 +10,7 @@ params:
   target: { type: string, required: true, description: "PR URL, commit range, or patch reference." }
   focus: { type: enum, default: "balanced", enum: ["security", "correctness", "performance", "style", "balanced"] }
 produces:
-  - review_log: { path: "/workspace/group/reviews/{{target_slug}}.md" }
+  - review_log: { path: "/workspace/agent/reviews/{{target_slug}}.md" }
 ---
 
 # Base Review

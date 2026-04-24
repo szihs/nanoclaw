@@ -10,7 +10,7 @@ uses:
   skills: [plan, codex-critique]
 ---
 
-**Plan** {#plan} — invoke `/plan` for `{{target}}` before writing any code. Write the plan to `/workspace/group/plans/{{target_slug}}.md`.
+**Plan** {#plan} — invoke `/plan` for `{{target}}` before writing any code. Write the plan to `/workspace/agent/plans/{{target_slug}}.md`.
 
 **What to plan depends on the workflow context:**
 
@@ -30,6 +30,6 @@ uses:
 5. `should-fix` items may be declined with written justification in the plan file.
 6. Record the final critique verdict (approve / approve-with-nits / request-changes / blocked) at the top of the plan file before proceeding.
 
-**Handoff to implementation:** Once the plan is approved, subsequent steps (especially `patch`) MUST read `/workspace/group/plans/{{target_slug}}.md` and follow it. When spawning the critique agent after `patch`, pass the plan file alongside the diff so the reviewer can verify the implementation matches the approved plan.
+**Handoff to implementation:** Once the plan is approved, subsequent steps (especially `patch`) MUST read `/workspace/agent/plans/{{target_slug}}.md` and follow it. When spawning the critique agent after `patch`, pass the plan file alongside the diff so the reviewer can verify the implementation matches the approved plan.
 
 **Invariant:** Never proceed past the plan gate with unresolved `must-fix` items after 3 rounds. Escalate to the user instead.
