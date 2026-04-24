@@ -25,11 +25,15 @@ Parse from the prompt. If the path/URL is missing, ask for it. The short name mu
 
 ## Phase 1: Analyze the repository
 
-### 1a. Determine input type
+### 1a. Get the code on disk
 
-- **GitHub URL** (starts with `https://github.com/`): Extract `{owner}/{repo}`. Use DeepWiki if available. If not, clone to `/tmp/{project}`.
-- **Local path** (starts with `/`, `~`, or `.`): Use directly — no cloning needed. Read files from the path.
-- **Other git URL** (gitlab, bitbucket, etc.): Clone to `/tmp/{project}`.
+**Always clone or locate the code first.** You need files on disk to read `.claude/`, `AGENTS.md`, build configs, and tests.
+
+- **GitHub URL**: `git clone --depth 1 https://github.com/{owner}/{repo}.git /tmp/{project}`
+- **Local path** (starts with `/`, `~`, or `.`): Use directly — already on disk.
+- **Other git URL**: `git clone --depth 1 {url} /tmp/{project}`
+
+Set `PROJECT_PATH` to the directory containing the code. All subsequent steps read from this path.
 
 ### 1b. Discover existing skills
 
@@ -45,24 +49,18 @@ Common reusable skills: `base-nanoclaw`, `plan`, `deep-research`, `codex-critiqu
 
 ### 1c. Research the codebase
 
-**For OSS GitHub repos (DeepWiki available):** Use `mcp__deepwiki__ask_question` with `{owner}/{repo}`. Ask:
+**Read from `PROJECT_PATH` first** — this is the authoritative source:
 
-1. "What are the primary programming languages, build system, and how do you build and run tests?"
-2. "What is the source directory layout? List top-level directories and what each contains."
-3. "What is the public API surface? What classes, functions, or modules are user-facing?"
-4. "What are the contribution guidelines? Branch naming, PR process, code style, CI requirements?"
-5. "What CI/CD system is used? Key workflow files and test commands?"
-6. "What documentation system is used? Where are docs, how are they generated?"
+1. **AI agent config** (highest signal): `{PROJECT_PATH}/.claude/`, `.agent/`, `.codex/`, `CLAUDE.md`, `AGENTS.md` — import and adapt these.
+2. `README.md`, `CONTRIBUTING.md`
+3. Build files: `CMakeLists.txt`, `package.json`, `pyproject.toml`, `Cargo.toml`, `Makefile`
+4. CI: `.github/workflows/*.yml` (first 2-3 files)
+5. Test directory: find `tests/`, `test/`, `**/test_*.py`, `**/*.test.ts`
+6. Source layout: `src/`, `lib/`, `{project}/`
 
-**For local paths or non-GitHub repos:** Read files directly from the path:
-- **AI agent config** (highest signal): `.claude/`, `.agent/`, `.codex/`, `CLAUDE.md`, `AGENTS.md` — these contain the project's own skill definitions, commands, settings, and architecture descriptions. Import and adapt them.
-- `README.md`, `CONTRIBUTING.md`
-- Build files: `CMakeLists.txt`, `package.json`, `pyproject.toml`, `Cargo.toml`, `Makefile`
-- CI: `.github/workflows/*.yml` (first 2-3 files)
-- Test directory: find `tests/`, `test/`, `**/test_*.py`, `**/*.test.ts`
-- Source entry: `src/`, `lib/`, `{project}/`
+**If the project has `.claude/` or `AGENTS.md`:** These are authoritative — use them as the primary source for identity, architecture, build commands, and coding conventions.
 
-**If the project has `.claude/` or `AGENTS.md`:** These are authoritative — use them as the primary source for identity, architecture, build commands, and coding conventions. The generated skills should reference and extend what's already defined there, not duplicate it.
+**Supplemental: DeepWiki** (for OSS GitHub repos only). Use `mcp__deepwiki__ask_question` with `{owner}/{repo}` for deeper architecture questions that aren't answered by the files on disk. This is optional — the clone has everything needed.
 
 Write the analysis to `/workspace/group/onboard-{project}.md`.
 
