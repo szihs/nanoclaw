@@ -55,11 +55,14 @@ Common reusable skills: `base-nanoclaw`, `plan`, `deep-research`, `codex-critiqu
 6. "What documentation system is used? Where are docs, how are they generated?"
 
 **For local paths or non-GitHub repos:** Read files directly from the path:
-- `README.md`, `CONTRIBUTING.md`, `AGENTS.md`, `CLAUDE.md`
+- **AI agent config** (highest signal): `.claude/`, `.agent/`, `.codex/`, `CLAUDE.md`, `AGENTS.md` — these contain the project's own skill definitions, commands, settings, and architecture descriptions. Import and adapt them.
+- `README.md`, `CONTRIBUTING.md`
 - Build files: `CMakeLists.txt`, `package.json`, `pyproject.toml`, `Cargo.toml`, `Makefile`
 - CI: `.github/workflows/*.yml` (first 2-3 files)
 - Test directory: find `tests/`, `test/`, `**/test_*.py`, `**/*.test.ts`
 - Source entry: `src/`, `lib/`, `{project}/`
+
+**If the project has `.claude/` or `AGENTS.md`:** These are authoritative — use them as the primary source for identity, architecture, build commands, and coding conventions. The generated skills should reference and extend what's already defined there, not duplicate it.
 
 Write the analysis to `/workspace/group/onboard-{project}.md`.
 
