@@ -49,22 +49,43 @@ Common reusable skills: `base-nanoclaw`, `plan`, `deep-research`, `codex-critiqu
 
 ### 1c. Research the codebase
 
-**Read from `PROJECT_PATH` first** — this is the authoritative source:
+**IMPORTANT: Mine ALL AI config from the project.** Do NOT skip any file found below. These are the highest-signal sources because they describe how agents should work with this code. Every skill, agent, command, and instruction file must be read and incorporated into the generated skills. Read every file found:
 
-1. **AI agent config** (highest signal): `{PROJECT_PATH}/.claude/`, `.agent/`, `.codex/`, `CLAUDE.md`, `AGENTS.md` — import and adapt these.
-2. `README.md`, `CONTRIBUTING.md`
-3. Build files: `CMakeLists.txt`, `package.json`, `pyproject.toml`, `Cargo.toml`, `Makefile`
-4. CI: `.github/workflows/*.yml` (first 2-3 files)
-5. Test directory: find `tests/`, `test/`, `**/test_*.py`, `**/*.test.ts`
-6. Source layout: `src/`, `lib/`, `{project}/`
+```bash
+# Find all AI agent config files
+find {PROJECT_PATH} -maxdepth 3 \( \
+  -name "CLAUDE.md" -o -name "AGENTS.md" -o -name "CONTRIBUTING.md" \
+  -o -name "copilot-instructions.md" -o -name ".cursorrules" \
+  -o -path "*/.claude/skills/*/SKILL.md" \
+  -o -path "*/.claude/agents/*.md" \
+  -o -path "*/.claude/commands/*.md" \
+  -o -path "*/.codex/*.md" \
+  -o -path "*/.cursor/rules/*.mdc" \
+\) -type f 2>/dev/null
+```
 
-**If the project has `.claude/` or `AGENTS.md`:** These are authoritative — use them as the primary source for identity, architecture, build commands, and coding conventions.
+**For each file found:**
+1. Read it fully
+2. Extract: build commands, test patterns, code style, architecture, debugging tools, review checklists
+3. Map to our 16 traits — each project skill/agent/command covers one or more traits
+
+**Especially important — project's existing skills and agents:**
+- `.claude/skills/*/SKILL.md` — the project's own automation. Reference them by name in our generated skills (e.g. "See project's `/{skill}` skill for {purpose}").
+- `.claude/agents/*.md` — review/analysis patterns. Incorporate their checklists into `{project}-review` overrides and `{project}-code-reader` review lenses.
+- Don't recreate what the project already has — reference it and add trait declarations.
+
+**Then read standard project files:**
+1. `README.md`
+2. Build files: `CMakeLists.txt`, `package.json`, `pyproject.toml`, `Cargo.toml`, `Makefile`
+3. CI: `.github/workflows/*.yml` (first 2-3 files)
+4. Test directory: find `tests/`, `test/`, `**/test_*.py`, `**/*.test.ts`
+5. Source layout: `src/`, `lib/`, `{project}/`
 
 **Supplemental: DeepWiki** (for OSS GitHub repos only). Use `mcp__deepwiki__ask_question` with `{owner}/{repo}` for deeper architecture questions that aren't answered by the files on disk. This is optional — the clone has everything needed.
 
 Write the analysis to `/workspace/group/onboard-{project}.md`.
 
-### 1c. Build trait capability map
+### 1d. Build trait capability map
 
 Scan ALL existing skills for their `provides:` traits. This tells you which capabilities are already covered and what the new project needs:
 
@@ -81,29 +102,32 @@ done
 - `codex-critique` → `critique`
 - `deep-research` → `plan.research`
 
-### 1d. Wrap project's existing skills with trait declarations
+### 1d. Incorporate project's existing skills, agents, and commands
 
-If the project has its own skills (in `.claude/skills/`, `.claude/commands/`, or similar), **do not recreate or rename them**. Instead, generate thin **wrapper SKILL.md** files that teach our trait system what each skill provides.
+The project's own AI config is the best source for building our skills. The priority is to **reuse** what exists, not recreate it.
 
-For each project skill found:
+**Strategy: reference first, build only when missing.**
 
-1. Read the skill's name and description
-2. Infer which trait(s) it covers based on its name, description, and allowed-tools
-3. Generate a wrapper at `container/skills/{project}-{skillname}/SKILL.md`:
+For each of the 16 traits, check if the project already has a skill/agent/command covering it:
 
-```yaml
----
-name: {project}-{skillname}
-description: "Wrapper: {original description}. Delegates to the project's /{skillname} skill."
-provides: [{inferred traits}]
-allowed-tools: {copy from original, or infer}
----
+1. **Project has a matching skill** (`.claude/skills/*/SKILL.md`) → reference it by name in our generated skill body: "See project's `/repro-remix` skill for RTX Remix testing." Add the project skill's knowledge to the relevant NanoClaw skill.
 
-Delegates to the project's native `/{skillname}` skill. This wrapper provides
-trait declarations for the NanoClaw coworker type system.
+2. **Project has matching agents** (`.claude/agents/*.md`) → extract their review checklists, patterns, and focus areas. Incorporate into our `{project}-review` workflow overrides and `{project}-code-reader` review lenses section.
 
-Run `/{skillname}` to invoke the project's skill directly.
+3. **Project has commands** (`.claude/commands/*.md`) → reference in the relevant skill body.
+
+4. **No project coverage for a trait** → generate the skill from scratch using CLAUDE.md, README, build files, and CI.
+
+**For each generated skill, include a "From project" section** that links back to the original sources used:
+
+```markdown
+## From project
+
+- `/{skill-name}` — {description} (`.claude/skills/{skill-name}/`)
+- `{agent-name}` agent — {what it checks} (`.claude/agents/{agent-name}.md`)
 ```
+
+This ensures knowledge isn't lost and the coworker knows where to find deeper guidance.
 
 **Trait inference heuristic** (map skill name/description to traits):
 
@@ -401,12 +425,7 @@ All types must compose cleanly with zero warnings. If `validate:templates` fails
 - Unresolved trait → check `provides:` in the relevant capability skill
 - Cross-project binding → check that all skills are listed under the correct project's types
 
-**Activate the new types** — restart the service so the dashboard and coworker creation see them:
-
-```bash
-systemctl --user restart nanoclaw-haaggarwal-lego 2>/dev/null || systemctl --user restart nanoclaw 2>/dev/null || true
-systemctl --user restart nanoclaw-haaggarwal-lego-dashboard 2>/dev/null || true
-```
+**Activate the new types** — restart the running NanoClaw service (and dashboard if running) so new types are immediately visible in the UI. The agent should know the service name from setup context.
 
 Rebuild the container image if needed (new skills may add allowed-tools that need to be baked in):
 
