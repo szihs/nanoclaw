@@ -624,6 +624,18 @@ async function buildContainerArgs(
   try {
     if (agentIdentifier) {
       await onecli.ensureAgent({ name: agentGroup.name, identifier: agentIdentifier });
+      // Default to selective secret mode — agents start with no secrets until
+      // the operator explicitly grants access via onecli agents set-secrets.
+      try {
+        const agentList = JSON.parse(execSync('onecli agents list --json', { encoding: 'utf8', timeout: 5000 }));
+        const agent = (agentList.data ?? agentList).find((a: { identifier: string }) => a.identifier === agentIdentifier);
+        if (agent && agent.secretMode === 'all') {
+          execSync(`onecli agents set-secret-mode --id ${agent.id} --mode selective`, { timeout: 5000 });
+          log.info('Set agent to selective secret mode (no secrets until approved)', { containerName, agentId: agent.id });
+        }
+      } catch {
+        // Non-fatal — agent stays with whatever mode OneCLI defaulted to
+      }
     }
     const onecliApplied = await onecli.applyContainerConfig(args, { addHostMapping: false, agent: agentIdentifier });
     if (onecliApplied) {
