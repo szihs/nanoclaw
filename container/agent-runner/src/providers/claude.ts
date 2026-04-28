@@ -34,8 +34,8 @@ const SDK_DISALLOWED_TOOLS = [
   'ExitWorktree',
 ];
 
-// Tool allowlist for NanoClaw agent containers
-const TOOL_ALLOWLIST = [
+// Base tool allowlist for NanoClaw agent containers (always included)
+const BASE_TOOL_ALLOWLIST = [
   'Bash',
   'Read',
   'Write',
@@ -56,6 +56,40 @@ const TOOL_ALLOWLIST = [
   'NotebookEdit',
   'mcp__nanoclaw__*',
 ];
+
+export function parseAllowedMcpTools(env?: Record<string, string | undefined>): string[] {
+  if (!env?.NANOCLAW_ALLOWED_MCP_TOOLS) return [];
+  try {
+    return (JSON.parse(env.NANOCLAW_ALLOWED_MCP_TOOLS) as string[]).filter((tool) => tool.startsWith('mcp__'));
+  } catch {
+    log('Failed to parse NANOCLAW_ALLOWED_MCP_TOOLS');
+    return [];
+  }
+}
+
+function computeBlockedTools(
+  env: Record<string, string | undefined> | undefined,
+  allowed: string[],
+): string[] | undefined {
+  if (allowed.length === 0 || !env?.NANOCLAW_MCP_TOOL_INVENTORY) return undefined;
+  try {
+    const inventory = JSON.parse(env.NANOCLAW_MCP_TOOL_INVENTORY) as Record<string, string[]>;
+    const allowSet = new Set(allowed);
+    const blocked: string[] = [];
+    for (const tools of Object.values(inventory)) {
+      for (const tool of tools) {
+        if (!allowSet.has(tool)) blocked.push(tool);
+      }
+    }
+    if (blocked.length > 0) {
+      log(`Blocking ${blocked.length} MCP tools not in allowed list`);
+      return blocked;
+    }
+  } catch {
+    log('Failed to parse NANOCLAW_MCP_TOOL_INVENTORY');
+  }
+  return undefined;
+}
 
 interface SDKUserMessage {
   type: 'user';
@@ -224,10 +258,18 @@ function createPreCompactHook(assistantName?: string): HookCallback {
 // ── Provider ──
 
 /**
- * Claude Code auto-compacts context at this window (tokens). Kept here so
- * the generic bootstrap doesn't need to know about Claude-specific env vars.
+ * Claude Code auto-compacts context at this window (tokens). Default is
+ * tuned for a 200K context model (~80% fill). For 1M models (model ID
+ * contains "[1m]"), we raise the window to 900K so the agent can use the
+ * full context before compacting.
  */
-const CLAUDE_CODE_AUTO_COMPACT_WINDOW = '165000';
+function getAutoCompactWindow(): string {
+  if (process.env.CLAUDE_CODE_AUTO_COMPACT_WINDOW) return process.env.CLAUDE_CODE_AUTO_COMPACT_WINDOW;
+  const model = process.env.ANTHROPIC_MODEL || '';
+  if (model.includes('[1m]')) return '900000';
+  return '165000';
+}
+const CLAUDE_CODE_AUTO_COMPACT_WINDOW = getAutoCompactWindow();
 
 /**
  * Stale-session detection. Matches Claude Code's error text when a
@@ -243,6 +285,8 @@ export class ClaudeProvider implements AgentProvider {
   private mcpServers: Record<string, McpServerConfig>;
   private env: Record<string, string | undefined>;
   private additionalDirectories?: string[];
+  private extraAllowedTools: string[];
+  private blockedTools?: string[];
 
   constructor(options: ProviderOptions = {}) {
     this.assistantName = options.assistantName;
@@ -252,6 +296,8 @@ export class ClaudeProvider implements AgentProvider {
       ...(options.env ?? {}),
       CLAUDE_CODE_AUTO_COMPACT_WINDOW,
     };
+    this.extraAllowedTools = parseAllowedMcpTools(this.env);
+    this.blockedTools = computeBlockedTools(this.env, this.extraAllowedTools);
   }
 
   isSessionInvalid(err: unknown): boolean {
@@ -268,13 +314,13 @@ export class ClaudeProvider implements AgentProvider {
     const sdkResult = sdkQuery({
       prompt: stream,
       options: {
+        pathToClaudeCodeExecutable: '/app/node_modules/@anthropic-ai/claude-agent-sdk-linux-x64/claude',
         cwd: input.cwd,
         additionalDirectories: this.additionalDirectories,
         resume: input.continuation,
-        pathToClaudeCodeExecutable: '/pnpm/claude',
         systemPrompt: instructions ? { type: 'preset' as const, preset: 'claude_code' as const, append: instructions } : undefined,
-        allowedTools: TOOL_ALLOWLIST,
-        disallowedTools: SDK_DISALLOWED_TOOLS,
+        allowedTools: [...BASE_TOOL_ALLOWLIST, ...this.extraAllowedTools],
+        disallowedTools: [...SDK_DISALLOWED_TOOLS, ...(this.blockedTools ?? [])],
         env: this.env,
         permissionMode: 'bypassPermissions',
         allowDangerouslySkipPermissions: true,
