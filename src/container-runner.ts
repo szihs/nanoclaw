@@ -419,7 +419,11 @@ export function recomposeAndUpdateHash(sessionId: string): void {
   try {
     const coworkerType = ag.coworker_type || 'global';
     let extra: string | null = null;
-    try { extra = fs.readFileSync(path.join(GROUPS_DIR, ag.folder, '.instructions.md'), 'utf-8'); } catch { /* */ }
+    try {
+      extra = fs.readFileSync(path.join(GROUPS_DIR, ag.folder, '.instructions.md'), 'utf-8');
+    } catch {
+      /* */
+    }
     const composed = composeCoworkerSpine({ coworkerType, extraInstructions: extra });
     spawnedClaudeMdHash.set(sessionId, crypto.createHash('sha256').update(composed).digest('hex'));
   } catch {
@@ -686,6 +690,20 @@ async function buildContainerArgs(
   mcpProxy?: { proxyToken: string; allowedTools: string[] },
 ): Promise<string[]> {
   const args: string[] = ['run', '--rm', '--name', containerName, '--label', CONTAINER_INSTALL_LABEL];
+
+  // GPU passthrough: expose host GPU if available and Docker nvidia runtime is configured.
+  // Check /etc/docker/daemon.json for nvidia runtime to avoid container startup failures.
+  if (process.env.ENABLE_GPU === '1' || fs.existsSync('/usr/bin/nvidia-smi')) {
+    try {
+      const daemonJson = JSON.parse(fs.readFileSync('/etc/docker/daemon.json', 'utf-8'));
+      if (daemonJson.runtimes?.nvidia) {
+        args.push('--runtime', 'nvidia');
+        args.push('-e', 'NVIDIA_VISIBLE_DEVICES=all');
+      }
+    } catch {
+      // daemon.json missing or unreadable — skip GPU passthrough
+    }
+  }
 
   // Environment
   args.push('-e', `TZ=${TIMEZONE}`);
