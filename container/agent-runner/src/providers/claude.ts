@@ -258,10 +258,18 @@ function createPreCompactHook(assistantName?: string): HookCallback {
 // ── Provider ──
 
 /**
- * Claude Code auto-compacts context at this window (tokens). Kept here so
- * the generic bootstrap doesn't need to know about Claude-specific env vars.
+ * Claude Code auto-compacts context at this window (tokens). Default is
+ * tuned for a 200K context model (~80% fill). For 1M models (model ID
+ * contains "[1m]"), we raise the window to 900K so the agent can use the
+ * full context before compacting.
  */
-const CLAUDE_CODE_AUTO_COMPACT_WINDOW = '165000';
+function getAutoCompactWindow(): string {
+  if (process.env.CLAUDE_CODE_AUTO_COMPACT_WINDOW) return process.env.CLAUDE_CODE_AUTO_COMPACT_WINDOW;
+  const model = process.env.ANTHROPIC_MODEL || '';
+  if (model.includes('[1m]')) return '900000';
+  return '165000';
+}
+const CLAUDE_CODE_AUTO_COMPACT_WINDOW = getAutoCompactWindow();
 
 /**
  * Stale-session detection. Matches Claude Code's error text when a
