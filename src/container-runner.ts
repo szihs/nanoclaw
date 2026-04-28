@@ -4,6 +4,7 @@
  * The container runs the v2 agent-runner which polls the session DB.
  */
 import { ChildProcess, execSync, spawn } from 'child_process';
+import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
 
@@ -35,6 +36,7 @@ import { readContainerConfig, writeContainerConfig } from './container-config.js
 import { CONTAINER_RUNTIME_BIN, hostGatewayArgs, readonlyMountArgs, stopContainer } from './container-runtime.js';
 import { getAgentGroup } from './db/agent-groups.js';
 import { getDb, hasTable } from './db/connection.js';
+import { getSession } from './db/sessions.js';
 import { initGroupFilesystem } from './group-init.js';
 import { stopTypingRefresh } from './modules/typing/index.js';
 import { log } from './log.js';
@@ -112,6 +114,9 @@ export function resetCoworkerTypesCacheForTests(): void {
 
 /** Active containers tracked by session ID. */
 const activeContainers = new Map<string, { process: ChildProcess; containerName: string }>();
+
+/** SHA-256 hash of CLAUDE.md at spawn time, keyed by session ID. */
+const spawnedClaudeMdHash = new Map<string, string>();
 
 /**
  * In-flight wake promises, keyed by session id. Deduplicates concurrent
@@ -265,6 +270,15 @@ async function spawnContainer(session: Session): Promise<void> {
   // Compose CLAUDE.md for typed coworkers (lego spine model).
   composeCoworkerClaudeMd(agentGroup);
 
+  // Store a hash of the just-composed CLAUDE.md so the host sweep can detect
+  // staleness if skills/overlays/workflows change while the container is running.
+  try {
+    const claudeContent = fs.readFileSync(path.join(GROUPS_DIR, agentGroup.folder, 'CLAUDE.md'));
+    spawnedClaudeMdHash.set(session.id, crypto.createHash('sha256').update(claudeContent).digest('hex'));
+  } catch {
+    /* composition failed — no hash to track */
+  }
+
   // Refresh the destination map and default reply routing so any admin
   // changes take effect on wake. Destinations come from the agent-to-agent
   // module — skip when the module isn't installed (table absent).
@@ -330,6 +344,7 @@ async function spawnContainer(session: Session): Promise<void> {
 
   container.on('close', (code) => {
     activeContainers.delete(session.id);
+    spawnedClaudeMdHash.delete(session.id);
     markContainerStopped(session.id);
     stopTypingRefresh(session.id);
     revokeContainerToken(proxyToken);
@@ -355,6 +370,40 @@ export function killContainer(sessionId: string, reason: string): void {
   } catch {
     entry.process.kill('SIGKILL');
   }
+}
+
+/**
+ * Detect containers whose CLAUDE.md has become stale (skills/overlays/
+ * .instructions.md changed since spawn). Returns session IDs that need a
+ * fresh context. Does NOT kill or send messages — the caller decides.
+ */
+export function detectStaleContainers(): Array<{ sessionId: string; agentGroupId: string; folder: string }> {
+  const stale: Array<{ sessionId: string; agentGroupId: string; folder: string }> = [];
+  for (const [sessionId] of activeContainers) {
+    const session = getSession(sessionId);
+    if (!session) continue;
+    const ag = getAgentGroup(session.agent_group_id);
+    if (!ag) continue;
+
+    const spawnHash = spawnedClaudeMdHash.get(sessionId);
+    if (!spawnHash) continue;
+
+    const coworkerType = ag.coworker_type || 'global';
+    let extra: string | null = null;
+    try {
+      extra = fs.readFileSync(path.join(GROUPS_DIR, ag.folder, '.instructions.md'), 'utf-8');
+    } catch {
+      /* no instructions */
+    }
+
+    const composed = composeCoworkerSpine({ coworkerType, extraInstructions: extra });
+    const currentHash = crypto.createHash('sha256').update(composed).digest('hex');
+
+    if (currentHash !== spawnHash) {
+      stale.push({ sessionId, agentGroupId: ag.id, folder: ag.folder });
+    }
+  }
+  return stale;
 }
 
 function resolveProviderContribution(

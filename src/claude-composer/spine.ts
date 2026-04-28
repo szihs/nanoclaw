@@ -149,7 +149,9 @@ export function renderCoworkerSpine(
     parts.push('## How to Work');
     parts.push(
       routeLines.join('\n') +
-        '\n\nAlways start with a workflow. Never jump straight to code.\nYour role-specific standing orders: [Additional Instructions](#additional-instructions)',
+        '\n\nAlways start with a workflow. Never jump straight to code.' +
+        '\nWhen you receive a task unrelated to your current work, run `/clear` first to start with a fresh context.' +
+        '\nYour role-specific standing orders: [Additional Instructions](#additional-instructions)',
     );
   }
 
@@ -193,7 +195,9 @@ export function renderCoworkerSpine(
               if (!stepSet.has(anchor.step)) {
                 // Warn: overlay references a step that doesn't exist in this workflow.
                 // eslint-disable-next-line no-console
-                console.warn(`[composer] overlay "${ov.overlayName}" anchors to step "${anchor.step}" which does not exist in workflow "${w.name}" (steps: ${w.steps.join(', ')})`);
+                console.warn(
+                  `[composer] overlay "${ov.overlayName}" anchors to step "${anchor.step}" which does not exist in workflow "${w.name}" (steps: ${w.steps.join(', ')})`,
+                );
                 continue;
               }
               const gateName = (ov.overlayName || 'overlay').toUpperCase().replaceAll('-', ' ');

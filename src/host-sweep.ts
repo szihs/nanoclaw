@@ -43,8 +43,17 @@ import {
 } from './db/session-db.js';
 import { log } from './log.js';
 import { openInboundDb, openOutboundDb, inboundDbPath, heartbeatPath } from './session-manager.js';
-import { isContainerRunning, killContainer, wakeContainer } from './container-runner.js';
+import { detectStaleContainers, isContainerRunning, killContainer, wakeContainer } from './container-runner.js';
+import { writeSessionMessage } from './session-manager.js';
 import type { Session } from './types.js';
+
+/**
+ * Tracks /clear commands sent for stale CLAUDE.md. If the container doesn't
+ * process the clear within STALE_CLEAR_TIMEOUT_MS, escalate to kill on the
+ * next sweep tick.
+ */
+const pendingClearForStale = new Map<string, number>(); // sessionId → timestamp
+const STALE_CLEAR_TIMEOUT_MS = 30_000;
 
 const SWEEP_INTERVAL_MS = 60_000;
 // Absolute idle ceiling for a running container. If the heartbeat file hasn't
@@ -124,6 +133,57 @@ async function sweep(): Promise<void> {
     const sessions = getActiveSessions();
     for (const session of sessions) {
       await sweepSession(session);
+    }
+
+    // CLAUDE.md staleness: /clear first, kill as fallback.
+    // Step 1: Escalate timed-out /clear attempts to kill.
+    for (const [sessionId, sentAt] of pendingClearForStale) {
+      if (!isContainerRunning(sessionId)) {
+        pendingClearForStale.delete(sessionId);
+        continue;
+      }
+      if (Date.now() - sentAt > STALE_CLEAR_TIMEOUT_MS) {
+        log.warn('Stale CLAUDE.md /clear timed out — killing container', { sessionId });
+        killContainer(sessionId, 'claude-md-stale-clear-timeout');
+        pendingClearForStale.delete(sessionId);
+      }
+    }
+
+    // Step 2: Detect newly stale containers and send /clear.
+    const stale = detectStaleContainers();
+    for (const { sessionId, agentGroupId, folder } of stale) {
+      if (pendingClearForStale.has(sessionId)) continue; // already sent /clear
+      log.warn('CLAUDE.md stale — sending /clear to container', { sessionId, folder });
+
+      // Send /clear to reset the SDK session, then a follow-up with context.
+      const now = new Date().toISOString();
+      writeSessionMessage(agentGroupId, sessionId, {
+        id: `claudemd-clear-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+        kind: 'chat',
+        timestamp: now,
+        platformId: agentGroupId,
+        channelType: 'agent',
+        threadId: null,
+        content: JSON.stringify({ text: '/clear', sender: 'system', senderId: 'system' }),
+      });
+      writeSessionMessage(agentGroupId, sessionId, {
+        id: `claudemd-refresh-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+        kind: 'chat',
+        timestamp: now,
+        platformId: agentGroupId,
+        channelType: 'agent',
+        threadId: null,
+        content: JSON.stringify({
+          text: 'Your instructions were updated (skill/overlay/workflow changes detected). Session cleared to apply them. Continue your current task with the updated instructions.',
+          sender: 'system',
+          senderId: 'system',
+        }),
+        processAfter: new Date(Date.now() + 2000)
+          .toISOString()
+          .replace('T', ' ')
+          .replace(/\.\d+Z$/, ''),
+      });
+      pendingClearForStale.set(sessionId, Date.now());
     }
   } catch (err) {
     log.error('Host sweep error', { err });
