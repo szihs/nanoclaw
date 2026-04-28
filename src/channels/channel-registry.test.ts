@@ -140,6 +140,7 @@ describe('channel + router integration', () => {
       platform_id: 'chan-100',
       name: 'Test Channel',
       is_group: 1,
+      admin_user_id: null,
       unknown_sender_policy: 'public',
       created_at: now(),
     });
@@ -147,6 +148,8 @@ describe('channel + router integration', () => {
       id: 'mga-1',
       messaging_group_id: 'mg-1',
       agent_group_id: 'ag-1',
+      trigger_rules: null,
+      response_scope: 'all',
       engage_mode: 'pattern',
       engage_pattern: '.',
       sender_scope: 'all',

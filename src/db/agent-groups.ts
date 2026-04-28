@@ -1,13 +1,23 @@
 import type { AgentGroup } from '../types.js';
 import { getDb } from './connection.js';
 
-export function createAgentGroup(group: AgentGroup): void {
+export function createAgentGroup(
+  group: Partial<AgentGroup> & Pick<AgentGroup, 'id' | 'name' | 'folder' | 'created_at'>,
+): void {
   getDb()
     .prepare(
-      `INSERT INTO agent_groups (id, name, folder, agent_provider, created_at)
-       VALUES (@id, @name, @folder, @agent_provider, @created_at)`,
+      `INSERT INTO agent_groups (id, name, folder, is_admin, agent_provider, container_config, coworker_type, allowed_mcp_tools, routing, created_at)
+       VALUES (@id, @name, @folder, @is_admin, @agent_provider, @container_config, @coworker_type, @allowed_mcp_tools, @routing, @created_at)`,
     )
-    .run(group);
+    .run({
+      is_admin: 0,
+      agent_provider: null,
+      container_config: null,
+      coworker_type: null,
+      allowed_mcp_tools: null,
+      routing: 'direct',
+      ...group,
+    });
 }
 
 export function getAgentGroup(id: string): AgentGroup | undefined {
@@ -22,7 +32,16 @@ export function getAllAgentGroups(): AgentGroup[] {
   return getDb().prepare('SELECT * FROM agent_groups ORDER BY name').all() as AgentGroup[];
 }
 
-export function updateAgentGroup(id: string, updates: Partial<Pick<AgentGroup, 'name' | 'agent_provider'>>): void {
+export function getAdminAgentGroup(): AgentGroup | undefined {
+  return getDb().prepare('SELECT * FROM agent_groups WHERE is_admin = 1 LIMIT 1').get() as AgentGroup | undefined;
+}
+
+export function updateAgentGroup(
+  id: string,
+  updates: Partial<
+    Pick<AgentGroup, 'name' | 'agent_provider' | 'container_config' | 'coworker_type' | 'allowed_mcp_tools'>
+  >,
+): void {
   const fields: string[] = [];
   const values: Record<string, unknown> = { id };
 

@@ -124,6 +124,20 @@ export function getDestinationReferencers(targetAgentGroupId: string): string[] 
   return rows.map((r) => r.agent_group_id);
 }
 
+/**
+ * Allocate a unique local_name in the agent's namespace.
+ * Tries `preferred`, then `preferred-2`, `preferred-3`, etc.
+ */
+export function allocateDestinationName(agentGroupId: string, preferred: string): string {
+  const base = normalizeName(preferred);
+  if (!getDestinationByName(agentGroupId, base)) return base;
+  let suffix = 2;
+  while (getDestinationByName(agentGroupId, `${base}-${suffix}`)) {
+    suffix++;
+  }
+  return `${base}-${suffix}`;
+}
+
 /** Normalize a human-readable name into a lowercase, dash-separated identifier. */
 export function normalizeName(name: string): string {
   return (

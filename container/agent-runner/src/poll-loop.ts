@@ -12,6 +12,7 @@ import type { AgentProvider, AgentQuery, ProviderEvent } from './providers/types
 
 const POLL_INTERVAL_MS = 1000;
 const ACTIVE_POLL_INTERVAL_MS = 500;
+const IDLE_END_MS = 600_000; // End stream after 600s with no SDK events (background subagents need longer)
 
 function log(msg: string): void {
   console.error(`[poll-loop] ${msg}`);
@@ -253,6 +254,7 @@ async function processQuery(
 ): Promise<QueryResult> {
   let queryContinuation: string | undefined;
   let done = false;
+  let lastEventTime = Date.now();
 
   // Concurrent polling: push follow-ups into the active query as they arrive.
   // We do NOT force-end the stream on silence — keeping the query open is
@@ -284,11 +286,19 @@ async function processQuery(
       query.push(prompt);
 
       markCompleted(newIds);
+      lastEventTime = Date.now(); // new input counts as activity
+    }
+
+    // End stream when agent is idle: no SDK events and no pending messages
+    if (Date.now() - lastEventTime > IDLE_END_MS) {
+      log(`No SDK events for ${IDLE_END_MS / 1000}s, ending query`);
+      query.end();
     }
   }, ACTIVE_POLL_INTERVAL_MS);
 
   try {
     for await (const event of query.events) {
+      lastEventTime = Date.now();
       handleEvent(event, routing);
       touchHeartbeat();
 

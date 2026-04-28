@@ -119,7 +119,7 @@ export function countDueMessages(db: Database.Database): number {
         `SELECT COUNT(*) as count FROM messages_in
        WHERE status = 'pending'
          AND trigger = 1
-         AND (process_after IS NULL OR datetime(process_after) <= datetime('now'))`,
+         AND (process_after IS NULL OR REPLACE(REPLACE(process_after, 'T', ' '), 'Z', '') <= datetime('now'))`,
       )
       .get() as { count: number }
   ).count;

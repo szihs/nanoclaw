@@ -345,6 +345,8 @@ async function handleChannelApprovalResponse(payload: ResponsePayload): Promise<
     id: mgaId,
     messaging_group_id: row.messaging_group_id,
     agent_group_id: row.agent_group_id,
+    trigger_rules: null,
+    response_scope: 'all',
     engage_mode: engageMode,
     engage_pattern: engagePattern,
     sender_scope: 'known',

@@ -31,6 +31,9 @@ jobs:
       - name: Typecheck container
         run: pnpm exec tsc -p container/agent-runner/tsconfig.json --noEmit
 
+      - name: Validate coworker templates
+        run: pnpm run validate:templates
+
       - name: Host tests
         run: pnpm exec vitest run
 

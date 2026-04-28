@@ -184,6 +184,19 @@ export function updatePendingApprovalStatus(approvalId: string, status: PendingA
   getDb().prepare('UPDATE pending_approvals SET status = ? WHERE approval_id = ?').run(status, approvalId);
 }
 
+export function updatePendingApprovalDelivery(
+  approvalId: string,
+  updates: Pick<PendingApproval, 'channel_type' | 'platform_id' | 'platform_message_id'>,
+): void {
+  getDb()
+    .prepare(
+      `UPDATE pending_approvals
+       SET channel_type = ?, platform_id = ?, platform_message_id = ?
+       WHERE approval_id = ?`,
+    )
+    .run(updates.channel_type, updates.platform_id, updates.platform_message_id, approvalId);
+}
+
 export function deletePendingApproval(approvalId: string): void {
   getDb().prepare('DELETE FROM pending_approvals WHERE approval_id = ?').run(approvalId);
 }
