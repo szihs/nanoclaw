@@ -802,7 +802,7 @@
 </head>
 <body>
   <div class="header">
-    <h1><span>NVIDIA</span> Coworker Dashboard</h1>
+    <h1><span>NVIDIA</span> Coworker Dashboard <span id="hdr-version" style="font-weight:400;opacity:0.6"></span></h1>
     <div class="tabs">
       <button class="tab active" data-tab="pixel-office">Pixel Office</button>
       <button class="tab" data-tab="coworkers">Coworkers</button>
@@ -1148,6 +1148,7 @@
   </div>
 
   <script src="sprites.js"></script>
+  <script>fetch('/api/state').then(r=>r.json()).then(d=>{const el=document.getElementById('hdr-version');if(el&&d.version)el.textContent='v'+d.version;}).catch(()=>{});</script>
   <script type="module" src="app.js"></script>
 </body>
 </html>

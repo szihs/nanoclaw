@@ -169,6 +169,10 @@ function postImportGroupInit(
 
 const DASHBOARD_PORT_DEFAULT = '3737';
 const DASHBOARD_HOST_DEFAULT = '127.0.0.1'; // localhost-only; set to 0.0.0.0 to expose on all interfaces
+const PKG_VERSION: string = (() => {
+  try { return JSON.parse(readFileSync(join(getProjectRoot(), 'package.json'), 'utf-8')).version; }
+  catch { return 'unknown'; }
+})();
 const MAX_CONCURRENT_CONTAINERS = Math.max(1, parseInt(process.env.MAX_CONCURRENT_CONTAINERS || '5', 10) || 5);
 const DASHBOARD_INGRESS_PORT_DEFAULT = '3738';
 const DASHBOARD_AUTH_COOKIE = 'nanoclaw_dashboard_auth';
@@ -754,6 +758,7 @@ interface DashboardState {
   registeredGroups: any[];
   hookEvents: HookEvent[];
   timestamp: number;
+  version: string;
 }
 
 interface HookEvent {
@@ -1633,6 +1638,7 @@ function getState(): DashboardState {
     hookEvents: hookEvents.slice(-MAX_HOOK_EVENTS),
     timestamp: Date.now(),
     maxConcurrentContainers: MAX_CONCURRENT_CONTAINERS,
+    version: PKG_VERSION,
   };
 }
 
