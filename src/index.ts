@@ -4,6 +4,7 @@
  * Thin orchestrator: init DB, run migrations, start channel adapters,
  * start delivery polls, start sweep, handle shutdown.
  */
+import fs from 'fs';
 import path from 'path';
 
 import { DASHBOARD_INGRESS_HOST, DASHBOARD_INGRESS_PORT, DATA_DIR, MCP_PROXY_PORT, PROXY_BIND_HOST } from './config.js';
@@ -84,6 +85,33 @@ let mcpProxyHandle: { stop: () => void } | null = null;
 let dashboardIngressHandle: { stop: () => Promise<void> } | null = null;
 
 async function main(): Promise<void> {
+  // Singleton guard: prevent duplicate orchestrators on the same data directory
+  const pidfilePath = path.join(DATA_DIR, 'nanoclaw.pid');
+  if (fs.existsSync(pidfilePath)) {
+    const existingPid = parseInt(
+      fs.readFileSync(pidfilePath, 'utf-8').trim(),
+      10,
+    );
+    try {
+      process.kill(existingPid, 0);
+      log.fatal('Another NanoClaw instance is already running', { existingPid, pidfilePath });
+      process.exit(1);
+    } catch {
+      log.warn('Removing stale pidfile', { existingPid });
+      fs.unlinkSync(pidfilePath);
+    }
+  }
+  fs.mkdirSync(DATA_DIR, { recursive: true });
+  fs.writeFileSync(pidfilePath, String(process.pid));
+  const cleanPidfile = () => {
+    try {
+      fs.unlinkSync(pidfilePath);
+    } catch {
+      /* ignore */
+    }
+  };
+  process.on('exit', cleanPidfile);
+
   log.info('NanoClaw starting');
 
   // 1. Init central DB
@@ -294,6 +322,8 @@ function buildConversationConfigs(channelType: string): ConversationConfig[] {
 /** Graceful shutdown. */
 async function shutdown(signal: string): Promise<void> {
   log.info('Shutdown signal received', { signal });
+  // Remove pidfile immediately before any async work that might hang
+  try { fs.unlinkSync(path.join(DATA_DIR, 'nanoclaw.pid')); } catch { /* ignore */ }
   for (const cb of getShutdownCallbacks()) {
     try {
       await cb();
