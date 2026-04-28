@@ -37,8 +37,10 @@ from ..config import IsDebug  # noqa: E402
 class SendMessageArgs(BaseModel):
     """Arguments for the send_message tool."""
 
-    channel_id: str = Field(..., description="Discord channel ID")
+    channel_id: str = Field(..., description="Discord channel ID (text channel, thread, or forum channel)")
     content: str = Field(..., description="Message content")
+    thread_name: Optional[str] = Field(None, description="For forum channels: creates a new thread/post with this title. Ignored for text channels and threads.")
+    add_feedback_buttons: bool = Field(False, description="If true, attach Resolved/Helpful/Not Helpful feedback buttons to the message")
 
 
 class ReadMessagesArgs(BaseModel):
@@ -200,7 +202,10 @@ async def init_discord_client():
     @client.event
     async def on_ready():
         logger.info(f"Discord client initialized as {client.user}")
+        client.add_view(FeedbackView())
+        logger.info("FeedbackView registered for persistent buttons")
         ready_event.set()
+
 
     # Start the client
     try:
@@ -276,8 +281,63 @@ async def cleanup_discord_client():
             client = None
 
 
+FEEDBACK_DIR = os.environ.get("DISCORD_FEEDBACK_DIR", "/tmp/discord-feedback")
+
+
+class FeedbackView(discord.ui.View):
+    """Persistent feedback buttons: Resolved / Helpful / Not Helpful."""
+
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    def _save_feedback(self, label: str, interaction: discord.Interaction):
+        os.makedirs(FEEDBACK_DIR, exist_ok=True)
+        entry = json.dumps({
+            "label": label,
+            "message_id": str(interaction.message.id) if interaction.message else None,
+            "channel_id": str(interaction.channel_id),
+            "user": interaction.user.name,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        })
+        with open(os.path.join(FEEDBACK_DIR, "feedback.jsonl"), "a") as f:
+            f.write(entry + "\n")
+
+    @discord.ui.button(label="Resolved", style=discord.ButtonStyle.green, custom_id="feedback:resolved")
+    async def resolved(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self._save_feedback("resolved", interaction)
+        await interaction.response.edit_message(view=self._disabled_view("Resolved"))
+
+    @discord.ui.button(label="Helpful", style=discord.ButtonStyle.blurple, custom_id="feedback:helpful")
+    async def helpful(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self._save_feedback("helpful", interaction)
+        await interaction.response.edit_message(view=self._disabled_view("Helpful"))
+
+    @discord.ui.button(label="Not Helpful", style=discord.ButtonStyle.grey, custom_id="feedback:not_helpful")
+    async def not_helpful(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self._save_feedback("not_helpful", interaction)
+        await interaction.response.edit_message(view=self._disabled_view("Not Helpful"))
+
+    def _disabled_view(self, selected: str) -> discord.ui.View:
+        view = discord.ui.View(timeout=None)
+        for item in self.children:
+            b = discord.ui.Button(
+                label=f"{item.label} {'(selected)' if item.label == selected else ''}",  # type: ignore
+                style=discord.ButtonStyle.green if item.label == selected else discord.ButtonStyle.grey,  # type: ignore
+                custom_id=item.custom_id,  # type: ignore
+                disabled=True,
+            )
+            view.add_item(b)
+        return view
+
+
 async def send_message(args: SendMessageArgs) -> Dict[str, Any]:
-    """Send a message to a Discord channel.
+    """Send a message to a Discord channel or forum thread.
+
+    Allowed targets:
+    - Channels listed in DISCORD_ALLOWED_SEND_CHANNELS (comma-separated IDs)
+    - Threads whose parent forum is listed in DISCORD_ALLOWED_SEND_FORUMS
+
+    If neither env var is set, all sends are blocked.
 
     Args:
         args: Arguments for sending a message
@@ -288,6 +348,14 @@ async def send_message(args: SendMessageArgs) -> Dict[str, Any]:
     global client
 
     try:
+        allowed_channels_raw = os.environ.get("DISCORD_ALLOWED_SEND_CHANNELS", "")
+        allowed_channels = {c.strip() for c in allowed_channels_raw.split(",") if c.strip()}
+        allowed_forums_raw = os.environ.get("DISCORD_ALLOWED_SEND_FORUMS", "")
+        allowed_forums = {c.strip() for c in allowed_forums_raw.split(",") if c.strip()}
+
+        if not allowed_channels and not allowed_forums:
+            return {"error": "No allowed send channels or forums configured"}
+
         # Ensure the client is connected
         await ensure_client_connected()
 
@@ -306,8 +374,39 @@ async def send_message(args: SendMessageArgs) -> Dict[str, Any]:
                     "error": f"Not authorized to access channel with ID {channel_id}"
                 }
 
-        # Send the message
-        message = await channel.send(args.content)
+        # Enforce allowlist: direct channel match, thread in allowed forum, or forum itself
+        is_allowed = args.channel_id in allowed_channels
+        if not is_allowed and isinstance(channel, discord.Thread) and channel.parent:
+            is_allowed = str(channel.parent.id) in allowed_forums
+        if not is_allowed and isinstance(channel, discord.ForumChannel):
+            is_allowed = args.channel_id in allowed_forums
+        if not is_allowed:
+            return {"error": f"Channel {args.channel_id} is not in the allowed send list"}
+
+        # Handle forum channels: create a thread/post
+        view = FeedbackView() if args.add_feedback_buttons else None
+
+        if isinstance(channel, discord.ForumChannel):
+            thread_name = args.thread_name or "Bot Report"
+            thread_with_message = await channel.create_thread(
+                name=thread_name,
+                content=args.content,
+                view=view,
+            )
+            thread = thread_with_message.thread
+            message = thread_with_message.message
+            return {
+                "message_id": str(message.id),
+                "thread_id": str(thread.id),
+                "thread_name": thread.name,
+                "channel_id": str(channel.id),
+                "content": message.content,
+                "timestamp": message.created_at.isoformat(),
+                "url": message.jump_url,
+            }
+
+        # Send to text channel or thread
+        message = await channel.send(args.content, view=view)
 
         # Return message data
         return {
@@ -349,7 +448,11 @@ def filter_message_data(message) -> dict:
     3. Removes rarely used fields and identifiers
     """
     # Core message data that's always included
+    guild_id = message.guild.id if message.guild else None
+    channel_id = message.channel.id if message.channel else None
     filtered = {
+        "id": str(message.id),
+        "url": f"https://discord.com/channels/{guild_id}/{channel_id}/{message.id}" if guild_id and channel_id else None,
         "content": message.content,
         "timestamp": message.created_at.isoformat(),
         "author": {

@@ -383,6 +383,15 @@ class CreateOrUpdateFileArgs(BaseModel):
     )
 
 
+class GetFileContentsArgs(BaseModel):
+    """Arguments for the get_file_contents tool (read-only)."""
+
+    owner: str = Field("shader-slang", description="Repository owner")
+    repo: str = Field("slang", description="Repository name")
+    path: str = Field(..., description="File path within the repository")
+    ref: Optional[str] = Field(None, description="Branch, tag, or commit SHA (defaults to default branch)")
+
+
 class GetDiscussionsArgs(BaseModel):
     """Arguments for the get_discussions tool."""
 
@@ -1968,6 +1977,41 @@ async def list_issues(args: ListIssuesArgs) -> dict:
         }
     except Exception as e:
         console.print(f"[red]Error in list_issues: {str(e)}[/red]")
+        return {"error": str(e)}
+
+
+async def get_file_contents(args: GetFileContentsArgs) -> dict:
+    """Read a file from a GitHub repository (read-only).
+
+    Returns the decoded file content and metadata.
+    """
+    try:
+        url = f"repos/{args.owner}/{args.repo}/contents/{args.path}"
+        params: Dict[str, str] = {}
+        if args.ref:
+            params["ref"] = args.ref
+        result = await github_request("GET", url, params=params)
+        if isinstance(result, dict) and "error" in result:
+            return result
+        if isinstance(result, list):
+            # Directory listing
+            return {
+                "type": "directory",
+                "path": args.path,
+                "entries": [{"name": e["name"], "type": e["type"], "path": e["path"]} for e in result],
+            }
+        # File content
+        content = ""
+        if result.get("encoding") == "base64" and result.get("content"):
+            content = base64.b64decode(result["content"]).decode("utf-8", errors="replace")
+        return {
+            "type": "file",
+            "path": result.get("path", args.path),
+            "size": result.get("size"),
+            "sha": result.get("sha"),
+            "content": content,
+        }
+    except Exception as e:
         return {"error": str(e)}
 
 

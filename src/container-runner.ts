@@ -797,8 +797,8 @@ async function buildContainerArgs(
   }
 
   // Bypass proxy for host-local traffic (dashboard hooks, MCP proxy)
-  args.push('-e', 'NO_PROXY=host.docker.internal,localhost,127.0.0.1');
-  args.push('-e', 'no_proxy=host.docker.internal,localhost,127.0.0.1');
+  args.push('-e', 'NO_PROXY=host.docker.internal,localhost,127.0.0.1,discord.com,api.github.com,raw.githubusercontent.com');
+  args.push('-e', 'no_proxy=host.docker.internal,localhost,127.0.0.1,discord.com,api.github.com,raw.githubusercontent.com');
 
   // Host gateway
   args.push(...hostGatewayArgs());
