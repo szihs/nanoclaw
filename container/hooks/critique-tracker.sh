@@ -1,23 +1,19 @@
 #!/bin/bash
 # SubagentStart hook: track critique agent spawns in workflow state.
-# Stdin: JSON with agent_id, agent_type, description, etc.
+# Stdin: JSON with agent_id, agent_type (SubagentStart schema — no tool_input).
 # Outputs additionalContext to remind the agent of the 3-round protocol.
 set -euo pipefail
 
 STATE="/workspace/.claude/workflow-state.json"
 INPUT=$(cat)
 
-DESC=$(echo "$INPUT" | jq -r '.tool_input.description // empty')
-PROMPT=$(echo "$INPUT" | jq -r '.tool_input.prompt // empty' | head -c 500)
+# SubagentStart provides agent_type (e.g., "codex-critique") and agent_id.
+AGENT_TYPE=$(echo "$INPUT" | jq -r '.agent_type // empty')
 
-# Check if this is a critique-related subagent
 IS_CRITIQUE=false
-for keyword in "critique" "codex-critique" "code review" "plan review"; do
-  if echo "$DESC $PROMPT" | grep -qi "$keyword"; then
-    IS_CRITIQUE=true
-    break
-  fi
-done
+case "$AGENT_TYPE" in
+  *critique*|*review*) IS_CRITIQUE=true ;;
+esac
 
 [ "$IS_CRITIQUE" = "false" ] && exit 0
 
