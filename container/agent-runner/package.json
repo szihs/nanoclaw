@@ -9,7 +9,7 @@
     "test": "bun test"
   },
   "dependencies": {
-    "@anthropic-ai/claude-agent-sdk": "^0.2.116",
+    "@anthropic-ai/claude-agent-sdk": "^0.2.121",
     "@modelcontextprotocol/sdk": "^1.12.1",
     "@openai/codex-sdk": "^0.120.0",
     "better-sqlite3": "^11.10.0",
