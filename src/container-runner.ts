@@ -189,13 +189,14 @@ function composeCoworkerClaudeMd(agentGroup: AgentGroup): void {
   }
 }
 
-/** Resolve the coworker manifest once; returns tools, mcpServers, and overlay names. */
+/** Resolve the coworker manifest once; returns tools, mcpServers, overlay names, and workflow summaries. */
 function resolveTypeManifest(agentGroup: AgentGroup): {
   tools: string[];
   mcpServers: Record<string, unknown>;
   overlayNames: string[];
+  workflows: { name: string; description: string }[];
 } {
-  if (!agentGroup.coworker_type) return { tools: [], mcpServers: {}, overlayNames: [] };
+  if (!agentGroup.coworker_type) return { tools: [], mcpServers: {}, overlayNames: [], workflows: [] };
   try {
     const { types, catalog } = loadRegistry();
     const manifest = resolveCoworkerManifest(types, agentGroup.coworker_type, catalog, process.cwd());
@@ -208,10 +209,11 @@ function resolveTypeManifest(agentGroup: AgentGroup): {
       tools: manifest.tools.filter((t) => t.startsWith('mcp__')),
       mcpServers: manifest.mcpServers ?? {},
       overlayNames,
+      workflows: manifest.workflows.map((w) => ({ name: w.name, description: w.description })),
     };
   } catch (err) {
     log.warn('Failed to resolve coworker manifest', { coworkerType: agentGroup.coworker_type, err });
-    return { tools: [], mcpServers: {}, overlayNames: [] };
+    return { tools: [], mcpServers: {}, overlayNames: [], workflows: [] };
   }
 }
 
@@ -611,9 +613,11 @@ function buildMounts(
     // Reads the resolved manifest to see which overlays apply to this type.
     const hooksDir = path.join(process.cwd(), 'container', 'hooks');
     if (fs.existsSync(hooksDir)) {
-      const { overlayNames } = resolveTypeManifest(agentGroup);
-      const hasPlan = overlayNames.includes('plan-overlay');
+      const { overlayNames, workflows: wfManifest } = resolveTypeManifest(agentGroup);
       const hasCritique = overlayNames.includes('critique-overlay');
+      // Plan gate is now part of critique-overlay (insert-before: [patch]).
+      // It applies when the coworker has implement-family workflows.
+      const hasPlan = hasCritique && wfManifest.some((w) => w.name.includes('implement'));
 
       const hasCmd = (event: string, cmd: string): boolean =>
         (settings.hooks[event] ?? []).some((h: { hooks?: { command?: string }[] }) =>
@@ -627,12 +631,39 @@ function buildMounts(
             hooks: [{ type: 'command', command: 'bash /app/hooks/workflow-state-reset.sh', timeout: 5 }],
           });
         }
+        // Intent router: LLM-based workflow classification on each user message.
+        // Builds a routing table from the manifest's workflows and passes it as
+        // an env var so the hook can present options to the classifier.
+        const { workflows: wfList } = resolveTypeManifest(agentGroup);
+        if (wfList.length > 0 && !hasCmd('UserPromptSubmit', 'intent-router.sh')) {
+          const routingTable = wfList
+            .map((w) => `${w.name}:${w.description.slice(0, 60).replace(/[;:]/g, ' ')}`)
+            .join(';');
+          settings.hooks.UserPromptSubmit.push({
+            hooks: [
+              {
+                type: 'command',
+                command: `OVERLAY_WORKFLOWS='${routingTable}' bash /app/hooks/intent-router.sh`,
+                timeout: 8,
+              },
+            ],
+          });
+        }
       }
-      if (hasPlan) {
+      if (hasPlan || hasCritique) {
+        // plan-gate.sh enforces BOTH plan and critique gates — inject it
+        // whenever either overlay is active (critique-only types still need
+        // the blocking hook for critique_required enforcement).
         if (!hasCmd('PreToolUse', 'plan-gate.sh')) {
           settings.hooks.PreToolUse.push({
-            matcher: 'Edit|Write',
-            hooks: [{ type: 'command', command: 'bash /app/hooks/plan-gate.sh', timeout: 5 }],
+            matcher: 'Edit|Write|Bash',
+            hooks: [
+              {
+                type: 'command',
+                command: `OVERLAY_HAS_PLAN=${hasPlan ? '1' : '0'} bash /app/hooks/plan-gate.sh`,
+                timeout: 5,
+              },
+            ],
           });
         }
         if (!settings.hooks.PostToolUse) settings.hooks.PostToolUse = [];
@@ -652,6 +683,13 @@ function buildMounts(
         }
       }
       if (hasPlan || hasCritique) {
+        if (!settings.hooks.PostToolUse) settings.hooks.PostToolUse = [];
+        if (!hasCmd('PostToolUse', 'edit-counter.sh')) {
+          settings.hooks.PostToolUse.push({
+            matcher: 'Edit|Write|Bash',
+            hooks: [{ type: 'command', command: 'bash /app/hooks/edit-counter.sh', timeout: 5 }],
+          });
+        }
         log.debug('Overlay hooks injected', { folder: agentGroup.folder, plan: hasPlan, critique: hasCritique });
       }
     }

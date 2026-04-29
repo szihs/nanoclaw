@@ -321,13 +321,26 @@ export function resolveCoworkerManifest(
     }
     const overlay = overlayMeta.overlay;
     const targets = new Set<string>();
-    for (const wfName of overlay.appliesToWorkflows) {
-      if (workflowSet.has(wfName)) targets.add(wfName);
-    }
+    const appliesToSet = new Set(overlay.appliesToWorkflows);
     for (const wf of workflowEntries) {
+      // Direct name match
+      if (appliesToSet.has(wf.name)) {
+        targets.add(wf.name);
+        continue;
+      }
+      // Child workflow that extends a listed parent (e.g. slang-review extends review)
+      const meta = catalog[wf.name];
+      if (meta?.extendsWorkflow && appliesToSet.has(meta.extendsWorkflow)) {
+        targets.add(wf.name);
+        continue;
+      }
+      // Trait match
       for (const trait of wf.requires) {
         const domain = trait.split('.')[0];
-        if (overlay.appliesToTraits.includes(trait) || overlay.appliesToTraits.includes(domain)) targets.add(wf.name);
+        if (overlay.appliesToTraits.includes(trait) || overlay.appliesToTraits.includes(domain)) {
+          targets.add(wf.name);
+          break;
+        }
       }
     }
     // Deduplicate: if a child workflow extends a parent that's also a target,
@@ -350,6 +363,17 @@ export function resolveCoworkerManifest(
         anchorSteps.push({ position: 'before', step });
       }
       const where = anchors.length > 0 ? anchors.join(' and ') : 'at the end';
+      if (anchorSteps.length > 0) {
+        const targetWf = workflowEntries.find((w) => w.name === target);
+        const targetStepSet = new Set(targetWf?.steps ?? []);
+        const matched = anchorSteps.filter((a) => targetStepSet.has(a.step));
+        if (matched.length === 0) {
+          const declared = [...overlay.insertAfter, ...overlay.insertBefore];
+          console.warn(
+            `Overlay "${overlayName}" targets workflow "${target}" but none of its anchors [${declared.join(', ')}] match steps [${[...targetStepSet].join(', ')}]. No inline gate markers will render.`,
+          );
+        }
+      }
       customizations.push({
         workflow: target,
         kind: 'overlay',

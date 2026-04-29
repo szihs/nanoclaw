@@ -706,6 +706,65 @@ render-check:
       expect(out).toContain('CRIT OVERLAY GATE (mandatory)');
     });
 
+    it('warns when overlay anchors match zero steps in the target workflow', () => {
+      const root = setupTraitProject();
+      writeSkill(
+        root,
+        'investigate-workflow',
+        {
+          name: 'investigate',
+          type: 'workflow',
+          description: 'Research a problem.',
+          requires: ['code.read'],
+          uses: { skills: [], workflows: [] },
+        },
+        [
+          '## Steps',
+          '',
+          '1. **Ingest** {#ingest} — read the target.',
+          '2. **Report** {#report} — write findings.',
+        ].join('\n'),
+      );
+      writeSkill(
+        root,
+        'no-match-overlay',
+        {
+          name: 'no-match-overlay',
+          type: 'overlay',
+          description: 'Overlay with non-matching anchors.',
+          'applies-to': { workflows: ['investigate'] },
+          'insert-after': ['nonexistent-step'],
+        },
+        '**Gate** — this should warn.',
+      );
+      writeTypes(
+        root,
+        'spine',
+        `
+warn-check:
+  description: "overlay anchor mismatch"
+  identity: spine/identity.md
+  skills:
+    - explore-skill
+  workflows:
+    - investigate
+  overlays:
+    - no-match-overlay
+`,
+      );
+      const spy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        const types = readCoworkerTypes(root);
+        const catalog = readSkillCatalog(root);
+        resolveCoworkerManifest(types, 'warn-check', catalog, root);
+        expect(spy).toHaveBeenCalledWith(expect.stringContaining('none of its anchors'));
+        expect(spy).toHaveBeenCalledWith(expect.stringContaining('no-match-overlay'));
+        expect(spy).toHaveBeenCalledWith(expect.stringContaining('investigate'));
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
     it('extends + overrides are surfaced as customizations on the derived workflow', () => {
       const root = setupTraitProject();
       writeSkill(

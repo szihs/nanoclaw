@@ -185,10 +185,6 @@ export function renderCoworkerSpine(
         const stepSet = new Set(w.steps);
         const gatesAfter = new Map<string, string[]>();
         const gatesBefore = new Map<string, string[]>();
-        const GATE_DIRECTIVES: Record<string, string> = {
-          'critique-overlay': 'STOP and spawn codex-critique agent for review',
-          'plan-overlay': 'STOP and write a plan before coding',
-        };
         for (const ov of overlays) {
           if (ov.anchorSteps) {
             for (const anchor of ov.anchorSteps) {
@@ -196,7 +192,10 @@ export function renderCoworkerSpine(
                 continue;
               }
               const gateName = (ov.overlayName || 'overlay').toUpperCase().replaceAll('-', ' ');
-              const directive = GATE_DIRECTIVES[ov.overlayName || ''] || 'see ## Gate Protocols below';
+              const directive =
+                anchor.position === 'before'
+                  ? 'STOP — write a plan + spawn PLAN_REVIEW critique before coding'
+                  : 'STOP — spawn codex-critique for stage-aware review';
               const label = `── ${gateName} GATE (mandatory) ── ${directive}`;
               if (anchor.position === 'after') {
                 const arr = gatesAfter.get(anchor.step) || [];
@@ -247,12 +246,12 @@ export function renderCoworkerSpine(
     if (overlayBodies.size > 0) {
       const GATE_SUMMARIES: Record<string, string> = {
         'critique-overlay':
-          '**Critique gate:** Spawn `codex-critique` agent with: Problem, Changes, Thoughts. ' +
-          'If `must-fix` items returned, fix and re-spawn (up to 3 rounds). Escalate after 3 rounds.',
-        'plan-overlay':
-          '**Plan gate:** Write plan to `/workspace/agent/plans/{{target_slug}}.md` before coding. ' +
-          'Spawn `codex-critique` to review the plan (up to 3 rounds). ' +
-          'Implementation must follow the approved plan.',
+          '**Stage-aware critique gates:** Same `codex-critique` agent, different role per stage. ' +
+          'PLAN_REVIEW (before patch): write plan + critique spec↔plan. ' +
+          'DIAGNOSIS_REVIEW (after root-cause/report): critique spec↔findings. ' +
+          'CODE_REVIEW (after patch): critique spec↔plan↔code. ' +
+          'OUTPUT_REVIEW (after draft/write): critique spec↔deliverable. ' +
+          '3-round protocol: fix must-fix items and re-spawn, escalate after 3 rounds.',
       };
       const lines = [...overlayBodies.keys()]
         .sort()
