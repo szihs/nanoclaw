@@ -1,0 +1,57 @@
+slang-common:
+  description: "Slang compiler spine — identity, ABI invariants, repo layout."
+  project: slang
+  extends: base-common
+  identity: container/skills/spine-slang/identity/compiler-engineer.md
+  invariants:
+    - container/skills/spine-slang/invariants/abi-stability.md
+  context:
+    - container/skills/spine-slang/context/layout.md
+  skills:
+    - slang-build
+    - slang-code-reader
+    - slang-github
+    - deep-research
+    - codex-critique
+  workflows: []
+  overlays:
+    - critique-overlay
+    - plan-overlay
+  mcpServers:
+    deepwiki:
+      type: http
+      url: https://mcp.deepwiki.com/mcp
+  bindings:
+    repo: slang-github
+    issues: slang-github
+    ci: slang-github
+    code: slang-code-reader
+    doc: slang-code-reader
+    test: slang-build
+    plan: deep-research
+    critique: codex-critique
+
+slang-reader:
+  description: "Read-only Slang coworker — investigate issues, review PRs, research codebase. Cannot edit code or create PRs."
+  project: slang
+  extends: slang-common
+  workflows:
+    - slang-investigate
+    - slang-review
+
+slang-writer:
+  description: "Write-capable Slang coworker — investigate, implement, review, document. Can edit code, write tests, create PRs."
+  project: slang
+  extends: slang-common
+  skills:
+    - slang-code-writer
+    - slang-docs
+  workflows:
+    - slang-investigate
+    - slang-implement
+    - slang-review
+    - slang-document
+  bindings:
+    code: slang-code-writer
+    test: slang-build
+    doc: slang-docs

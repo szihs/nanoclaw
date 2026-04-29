@@ -510,7 +510,10 @@ function channelDmLabel(choice: ChannelChoice): string | null {
     case 'imessage':
       return 'iMessage';
     case 'slack':
-      return 'Slack DMs';
+      // Slack install doesn't wire an agent or send a welcome DM — the
+      // driver prints its own "finish in your Slack app" note. Falling
+      // through to null avoids a misleading "check your Slack DMs" banner.
+      return null;
     default:
       return null;
   }

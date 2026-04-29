@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "slang-maintainer": {
+      "command": "uv",
+      "args": ["run", "slang-mcp-server"],
+      "env": {}
+    }
+  }
+}
