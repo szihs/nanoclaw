@@ -49,7 +49,9 @@ let nextInternalPort = 0;
 
 /**
  * Auto-detect stdio MCP servers from container/mcp-servers/ directory.
- * Each subdirectory with a pyproject.toml is a candidate.
+ * Two conventions:
+ *   - Python: subdirectory with pyproject.toml → `uv run <name>-server`
+ *   - Shell:  subdirectory with run.sh → `bash run.sh`
  */
 function detectStdioServers(): McpServerDef[] {
   const mcpDir = path.join(process.cwd(), 'container', 'mcp-servers');
@@ -59,9 +61,15 @@ function detectStdioServers(): McpServerDef[] {
   for (const entry of fs.readdirSync(mcpDir, { withFileTypes: true })) {
     if (!entry.isDirectory()) continue;
     const serverDir = path.join(mcpDir, entry.name);
-    if (!fs.existsSync(path.join(serverDir, 'pyproject.toml'))) continue;
-
     const name = entry.name;
+
+    const hasPyproject = fs.existsSync(path.join(serverDir, 'pyproject.toml'));
+    const hasRunSh = fs.existsSync(path.join(serverDir, 'run.sh'));
+    if (!hasPyproject && !hasRunSh) continue;
+
+    const command = hasPyproject
+      ? `uv run --directory ${serverDir} ${name}-server`
+      : `bash ${path.join(serverDir, 'run.sh')}`;
 
     // Per-server env vars: read from .env-vars file in the server directory.
     const envVarsFile = path.join(serverDir, '.env-vars');
@@ -77,7 +85,7 @@ function detectStdioServers(): McpServerDef[] {
     defs.push({
       name,
       type: 'stdio',
-      command: `uv run --directory ${serverDir} ${name}-server`,
+      command,
       workDir: serverDir,
       envVars,
       auth: envVars.length > 0 ? 'shared-token' : 'none',
