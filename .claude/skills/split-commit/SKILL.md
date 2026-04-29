@@ -1,269 +1,366 @@
 ---
 name: split-commit
-description: Split a mixed-concerns commit on the current repo into one branch per concern. Interactive — prompts for the split plan, creates per-bucket worktrees, commits neutral + specialized content separately, runs tests per branch, and verifies that merging all branches reproduces the source commit. Triggers on "split this commit", "split commit into branches", "carve apart commit", or when the user describes a commit that couples multiple independent concerns they want in separate PRs.
+description: Split branches that were built from merged states into clean, disjoint branches with zero file overlap and zero merge conflicts. Battle-tested workflow for NanoClaw nv-* branch topology. Triggers on "split this commit", "split branches", "clean up branches", "strip overlap", or when branches carry leaked files from other branches.
 ---
 
 # Split Commit
 
-Carve a commit that touches multiple concerns into one branch per concern. Use when a single change couples independent subsystems and needs to be re-shaped for reviewability or selective adoption (e.g. splitting a combined "feature + project integration" commit into a neutral infra branch and one branch per integration).
+Split branches that were built from merged states into clean, disjoint branches. Each branch owns a disjoint set of files. Merging all branches into the base produces zero conflicts.
 
-Runs from the host — drives `git worktree`, local filesystem edits, and the project's test command.
+**When to use:** A set of branches (e.g. `nv-main`, `nv-dashboard`, `nv-slang`, `nv-slangpy`, `nv-nanoclaw`) were created by squashing from a merged state. Each squash silently carries the full tree of every ancestor branch — not just its own files. This skill strips the leaked content so each branch carries only what it owns.
 
-## Invariants
+**Minimum scope example:** The NanoClaw `nv-*` branch topology — 6 branches all forked from `origin/main`, each a squash of 40-70 commits, with 100+ files of leaked overlap per branch. After splitting: zero file overlap, zero merge conflicts, each branch carries only its owned files (6 to 148 files each).
 
-- Tests pass per bucket branch before that branch is declared done.
-- Merging all bucket branches (in order) into the base produces a tree **diff-equal** to the source. `git diff <merged> <source>` = empty is the acceptance gate.
-- Source commit and its branch are never modified. All work happens in new worktrees on new branches.
-- Mixed files are split at the content level, not dropped into a single bucket.
-- Never run destructive git operations (`reset --hard`, `push --force`, `branch -D` of anything other than the verify branch) without asking the user first.
-- When a classification call is ambiguous, ask the user — do not guess.
+## Core invariants
 
-## UX Note
+1. **Single ownership.** Every changed file is owned by exactly one bucket. `comm -12` between any two buckets' file lists = empty.
+2. **Zero merge conflicts.** Merging all buckets into the base in any order produces no conflicts.
+3. **No phantom deletions.** No bucket deletes a file that exists in the base unless the deletion is the bucket's explicit purpose (e.g. removing legacy files to create a clean slate).
+4. **Merge-verification tree is the truth.** After every bucket is stripped, merge them all into a fresh worktree. If it conflicts, the strip is wrong — fix the bucket, not the merge.
+5. **Authorship preserved.** All commits retain original author/date via `--author`.
+6. **PRs, not direct pushes.** Each cleaned bucket creates a PR for review before force-pushing.
 
-Use `AskUserQuestion` only for multiple-choice prompts (bucket selection for a mixed file, choosing a base branch from a list). For free-text input (commit SHAs, bucket names, marker patterns) ask in plain text and wait for the user's reply.
-
-## 1. Gather the split plan
-
-### 1a. Ask for the basics
+## Phase 1: Gather
 
 Ask the user for:
 
-1. **Source commit** to split (default: `HEAD`). Free-text.
-2. **Base branch** the buckets diverge from (default: `main`). Free-text.
-3. **Test command** per branch. Default: read `scripts.test` from `package.json`; if absent, ask.
+1. **Base branch** all buckets fork from (e.g. `origin/main`).
+2. **Bucket list** — the branches to split. For each: name, current ref, intended purpose (one sentence).
+3. **Merge order** — the order buckets should merge into the base (matters for the verification tree).
+4. **Test command** (optional) — run per bucket after stripping.
 
-### 1b. Auto-detect candidate projects / buckets
-
-Before asking the user to enumerate buckets, scan the source commit for evidence of distinct concerns. Propose the bucket list; the user confirms or edits it. This keeps the common case low-friction — the user rarely has to hand-type project names.
-
-Signals to use (stop at the first strong signal; fall back to weaker ones if needed):
-
-1. **Top-level directory names** introduced or modified in the commit, especially under `container/skills/`, `projects/`, `groups/templates/projects/`, or equivalent. Each distinct top-level directory name is a candidate project marker.
-2. **File-naming prefixes / suffixes** in added or modified files (e.g. `<name>-*.ts`, `*-<name>-adapter.*`). Cluster these and treat each cluster as a candidate bucket.
-3. **Identifier / import hotspots** in the diff — run `git diff <source>^ <source> | grep -E 'from .*\b<name>\b'` across the vocabulary pulled from signals 1 and 2, counting hits per name. Names with many hits are confirmed; single-hit names are probably cosmetic.
-4. **Frontmatter / config keys** in added YAML (e.g. `coworker-types.yaml`, `project: <name>`). The `project:` key is authoritative when present.
-
-Produce a candidate bucket list:
-
-- Exactly one `neutral` bucket. Default-name it from the commit (e.g. the commit's topic prefix + `-base`, or `<base-branch>-base` if the commit has no clear topic). Do not use the literal name of any detected project.
-- One `specialized` bucket per distinct project signal, named after the signal. The marker patterns are pre-filled with the signals used to detect that project.
-
-### 1c. Confirm the proposed buckets
-
-Present the proposed list to the user, each bucket showing:
-
-- Proposed name
-- Role (neutral / specialized)
-- Auto-detected marker patterns
-- Example files from the source commit that matched
-
-Use `AskUserQuestion` per bucket to accept / rename / drop, and offer a free-text follow-up to add buckets the detector missed. Also ask whether any specialized bucket depends on another (default: each specialized bucket depends only on the neutral bucket).
-
-Echo the final plan back as a table. Wait for explicit confirmation before any filesystem changes.
-
-## 2. Inventory the source
+Fetch all remotes so refs are current:
 
 ```bash
-git diff --name-status <source>^ <source>
+git fetch --all
 ```
 
-First-pass classify each file into one of:
-
-- **pure-neutral** — no bucket-specific references
-- **pure-<bucket>** — entire file is specific to one bucket (filename, imports, stated purpose)
-- **mixed** — spans multiple buckets; needs content-level splitting
-
-For mixed files, flag whether the bucket references are:
-
-- **structural** — imports, code paths, env-gated branches, real dependencies → must split out
-- **cosmetic** — mock fixture names, doc examples, comment labels → can stay in neutral
-
-Write the classification to `/tmp/split-plan-<source-short-sha>.md` so later steps can re-read without recomputing.
-
-## 3. Confirm the classification
-
-Show the user the bucketed inventory. For every `mixed` file and every ambiguous case, present the judgment with surrounding context and `AskUserQuestion` for the final bucket assignment. Rewrite the plan file with the user's answers.
-
-## 4. Create the neutral worktree + branch
+Create a **merge-verification worktree** — this is the central proof tree used throughout:
 
 ```bash
-git worktree add ../<repo>-<neutral-bucket> -b <neutral-bucket> <base_branch>
+git worktree add /tmp/split-merge-verify <base> -b merge-verify
 ```
 
-Bring the source commit's tree into the neutral worktree, then:
+## Phase 2: Analyze
 
-- Delete `pure-<specialized>` files.
-- For each `mixed` file, strip the bucket-specific sections. Prefer rewriting with generic placeholders over deleting, so neutral readers still understand the feature.
-- Leave cosmetic references alone unless the user flagged them as needing generalization.
+For each bucket, compute:
 
-Stage only neutrally-classified content. Commit with a message that names the neutral base. Run the test command. Do not proceed until tests pass. If a test fails, fix it in the neutral worktree before moving on — do not paper over a failure by shifting content into a specialized bucket just to make the test pass.
-
-## 5. Create each specialized worktree + branch
-
-For each specialized bucket, in dependency order (buckets with no `depends_on` first, then buckets depending on them, etc.):
+### 2a. File inventory
 
 ```bash
-# If depends_on is <other-bucket>, branch off that. Otherwise branch off the neutral bucket.
-git worktree add ../<repo>-<bucket> -b <bucket> <parent-branch>
+git diff <base>..<bucket> --name-only | sort > /tmp/<bucket>-files.txt
 ```
 
-Then:
+### 2b. Overlap matrix
 
-- Copy in the bucket's `pure` files from the source commit.
-- For each `mixed` file, apply only this bucket's content diff on top of the parent version.
-- Stage only this bucket's content. Verify no sibling-bucket files leak in (`git status` should show only what this bucket owns).
-- Commit. Run the test command. Must pass before moving to the next bucket.
-
-## 6. Verify the sum
-
-Prove the split is lossless. From the original repo directory (not any worktree):
+For every pair of buckets (A, B):
 
 ```bash
-git checkout -b split-verify <base_branch>
-git merge --no-ff <neutral-bucket> <bucket-1> <bucket-2> ... <bucket-N>
-git diff split-verify <source>
+comm -12 /tmp/<bucket-A>-files.txt /tmp/<bucket-B>-files.txt
 ```
 
-The diff must be empty. If it is not:
+Any file appearing in two buckets is an overlap that must be resolved.
 
-- List each missing / extra hunk and its file.
-- Re-classify the hunk — it belongs in exactly one branch.
-- Apply to the correct branch in its worktree, re-run the test command for that branch.
-- Re-run verification from scratch (delete `split-verify`, recreate).
+### 2c. Divergence check on overlapping files
 
-Do not hand-edit the verify branch to force the diff to zero. Classification errors compound silently when patched over.
-
-If verification fails twice in a row, stop and re-enter step 3: the classification itself is wrong. Re-bucket and re-apply cleanly rather than chasing hunks.
-
-## 7. Cleanup + summary
+For each overlapping file, check whether the two buckets have identical or different content:
 
 ```bash
-git branch -D split-verify
-git worktree list
+diff <(git show <bucket-A>:<file>) <(git show <bucket-B>:<file>) > /dev/null 2>&1
 ```
 
-Tell the user:
+- **Identical** → pure leak. Strip from whichever bucket doesn't own it.
+- **Divergent** → one bucket has the base version, the other has additions. Diff to determine:
+  - Does bucket-A ADD anything beyond bucket-B? Or is it just MISSING things bucket-B has (stale copy)?
+  - If stale: strip entirely from the stale bucket.
+  - If has unique additions: extract only the unique additions as a separate commit on that bucket. Strip the shared base portion.
 
-- The worktree paths for each bucket branch.
-- The branch names.
-- Per-branch test status (pass / fail).
-- Verification result (diff empty / non-empty).
-- Next suggested action — typically "open PRs in dependency order: neutral first, then each specialization".
+Present the overlap matrix to the user. For each overlapping file, propose which bucket owns it. Get confirmation before proceeding.
 
-Do not delete the bucket worktrees. The user reviews, rebases, and pushes from them.
+### 2d. Deletion audit
 
-## Classification rules
-
-Apply in order; the first rule that matches wins.
-
-1. **Structural dependency** — if code imports bucket-specific modules, calls bucket-specific APIs, or declares bucket-specific interfaces, it's in that bucket even if the file is otherwise generic.
-2. **Environment-gated code** — code that only executes when a bucket-specific env var / config is set belongs to that bucket.
-3. **User-visible behavior** — removing the line changes the neutral branch's runtime behavior (e.g. an import that self-registers a channel) → specialized bucket.
-4. **Mock / fixture / example strings** — a project-named label (e.g. `'<project>-mcp'`) used as an arbitrary fixture inside a generic test is *not* a dependency. Keep in neutral; the test is exercising general logic.
-5. **Documentation examples** — prose using bucket-specific names as illustrations → rewrite with generic examples in the neutral branch; let the specialized branch reintroduce concrete examples.
-
-## Amending neutral after specialized branches exist
-
-Verification or late user feedback often surfaces a generic file sitting in a specialized branch (or a generic change needed on neutral after specialized branches were already committed). Relocating it requires a cascade:
-
-1. Edit in the neutral worktree. `git add` + `git commit --amend --no-edit`. Neutral's SHA changes.
-2. For each specialized branch, record the old neutral SHA it was stacked on, then:
-   ```bash
-   git stash push -u -m "wip"                 # if anything uncommitted
-   git rebase --onto <neutral-branch> <old-neutral-sha>
-   git stash pop
-   git add -u && git commit --amend --no-edit  # fold the stashed work in
-   ```
-   `--onto <neutral> <old-neutral-sha>` tells git: "drop the commit at `<old-neutral-sha>` and replay what follows on top of `<neutral>`." Without the third argument, git replays the *old* neutral commit too, producing a duplicate and pointless conflicts.
-3. Files like `vitest.config.ts` commonly conflict here — neutral adds a generic change (e.g. `testTimeout`), specialized branch added its own entry to the same list (e.g. `include` glob). Keep both sides.
-4. If you use a file-edit tool that re-reads before writing, and the underlying file changed between read and write (normal during conflict resolution), the write can fail silently and leave conflict markers committed. Always `cat` the resolved file before `git add`.
-5. Re-run tests on each specialized branch. Re-run verification (step 6) from scratch.
-
-## Troubleshooting & recurring pitfalls
-
-- **Parallel-only test failures.** A test that fails in `npm test` but passes when you run just its file is thread-contention on per-test sqlite/migration setup, not a split regression. Confirm with `npm test -- --no-file-parallelism` — if the full suite passes sequentially, bump `testTimeout` on neutral (and cascade per the section above). Do not reshuffle test content between buckets to paper over this.
-
-- **Multi-bucket test files.** A single test file covering install permutations ("scenario 1: plain; scenario 2: +A; scenario 3: +A+B; scenario 4: typed") is a common mixed case. Partition at the `describe` / `it` level: scenarios that only touch neutral stay in neutral; scenarios depending on project-specific skills or registered types move to that project's branch. Keep shared imports in whichever branch still needs them.
-
-- **Residual-diff categories during verification.** When `git diff split-verify <source>` is non-empty, residuals usually fall into:
-  - *Project content leaked into neutral* — strip from neutral, restore on the project branch.
-  - *Generic content missing from neutral* — port to neutral (this triggers the cascade above).
-  - *Test coverage lost in the split* — source had describes/its that got dropped when a file was partitioned; diff the test file per branch against source and restore.
-
-- **False positives for "project-specific".** These stay neutral despite looking specialized:
-  - Architecture docs using a project as the illustrative example. If removing examples leaves the doc unreadable, it's about *how the system works*, not about the project.
-  - Fixture strings inside generic tests (e.g. `'<project>-compiler'` as a test-identifier where the logic exercised is generic extends-chain resolution).
-  - Comment labels listing a project as one of several examples — replace with a placeholder (`<type>`) only if the sentence still parses.
-
-- **Generic functionality always flows to neutral.** When the user says "this is generic" about content in a specialized branch, treat it as a classification error: re-enter step 3 and re-apply, don't hand-edit the diff.
-
-## Independent vs stacked topology
-
-When the user says specialized branches should be **independent** (each forks from neutral, not from each other), extra discipline is required.
-
-### Why it matters
-
-If branch A and B are independent:
-```
-neutral → branch-A
-neutral → branch-B
-```
-Merging both into neutral must produce zero conflicts. Each branch carries ONLY its own files. Neither branch inherits the other's content.
-
-If they're stacked:
-```
-neutral → branch-A → branch-B
-```
-branch-B includes everything from A. Merging B alone brings A's content too. This is simpler but means B can't be adopted without A.
-
-### Creating independent branches from a stacked source
-
-When the source was stacked (e.g. `nv-slang` was on top of `nv-dashboard`), **`git merge --squash` from the stacked branch brings in ALL ancestor content** — not just that branch's own files. You MUST manually extract only the branch-owned files:
+For each bucket, check what files it deletes from the base:
 
 ```bash
-# WRONG — brings in dashboard files too:
-git merge --squash origin/nv-slang
-
-# RIGHT — cherry-pick only slang-owned files:
-git checkout origin/nv-slang -- container/skills/slang-* coworkers/ src/slang-*
+git diff <base>..<bucket> --diff-filter=D --name-only
 ```
 
-### Shared infrastructure files (register.ts, index.ts, package.json)
+**Critical:** Any file that exists in the base and is deleted by a bucket must be explicitly justified. The squash-from-merged-state pattern creates **phantom deletions** — when the original squash predates files that were later added to the base (e.g. `circuit-breaker.ts` added to main after the squash was created), rebasing creates a deletion that was never intended.
 
-These are owned by the neutral branch. Specialized branches should NOT modify them. If a specialized branch needs changes to shared files (e.g. dashboard needs `startDashboardIngress` added to `src/index.ts`), those changes must be **additive** — they add new lines but don't change existing ones.
+Flag every deletion. Ask the user: "Is this deletion intentional, or a phantom from the old base?"
 
-**The merge-override trap:** When a specialized branch includes a copy of a shared file, `git merge` may silently take the specialized version over the neutral one. This loses neutral-only fixes (e.g. register.ts flags that were added after the specialized branch was created).
+## Phase 3: Strip
 
-**Prevention:** After creating a specialized branch via `merge --squash`, restore all shared infrastructure files from neutral:
+For each bucket (process one at a time, in merge order):
+
+### 3a. Create a rebase worktree
 
 ```bash
-git checkout origin/<neutral-branch> -- setup/register.ts package.json src/index.ts
-git add -u
+git worktree add /tmp/split-rebase-<bucket> <bucket-ref>
+cd /tmp/split-rebase-<bucket>
+git checkout -b <bucket>-rebased
+```
+
+### 3b. Soft reset and selective restage
+
+```bash
+git reset --soft <base>
+```
+
+All changes are now staged. Unstage every file that doesn't belong to this bucket:
+
+```bash
+# Unstage files owned by other buckets
+cat /tmp/<other-bucket-1>-files.txt /tmp/<other-bucket-2>-files.txt ... | sort -u | \
+  xargs git reset HEAD --
+```
+
+Also unstage any file flagged as a phantom deletion in Phase 2d.
+
+### 3c. Restore phantom deletions
+
+For files that were incorrectly deleted (phantom deletions from Phase 2d):
+
+```bash
+git checkout <base> -- <file1> <file2> ...
+```
+
+### 3d. Recommit
+
+```bash
+git commit --author="<original-author>" -m "<original-message>"
+```
+
+### 3e. Discard unstaged leftovers
+
+```bash
+git checkout -- .
+git clean -fd
+```
+
+### 3f. Verify staged file count
+
+```bash
+git diff <base>..<bucket>-rebased --stat | tail -3
+```
+
+Confirm the file count matches expectations (only this bucket's owned files).
+
+### 3g. Check for remaining deletions
+
+```bash
+git diff <base>..<bucket>-rebased --diff-filter=D --name-only
+```
+
+Must be empty (or contain only intentional, user-approved deletions).
+
+### 3h. Merge-verification tree checkpoint
+
+After EVERY bucket is stripped, test on the verification tree:
+
+```bash
+cd /tmp/split-merge-verify
+git reset --hard <base>
+git merge <bucket-1-rebased> --no-edit   # for each bucket stripped so far
+git merge <bucket-2-rebased> --no-edit
+...
+```
+
+**Must be zero conflicts.** If a conflict appears, the strip was incomplete — go back to step 3b and remove the conflicting overlap.
+
+### 3i. Run tests (if test command was provided)
+
+```bash
+cd /tmp/split-rebase-<bucket>
+<test-command>
+```
+
+## Phase 4: Verify
+
+After ALL buckets are stripped, run the final verification:
+
+### 4a. Zero-overlap check
+
+For every pair of stripped buckets:
+
+```bash
+comm -12 \
+  <(git diff <base>..<bucket-A>-rebased --name-only | sort) \
+  <(git diff <base>..<bucket-B>-rebased --name-only | sort)
+```
+
+Must be empty for every pair.
+
+### 4b. Full merge-verification tree
+
+```bash
+cd /tmp/split-merge-verify
+git reset --hard <base>
+for bucket in <merge-order>; do
+  git merge <bucket>-rebased --no-edit
+done
+```
+
+Zero conflicts required. Report the merge result for each bucket (fast-forward / auto-merge / conflict).
+
+### 4c. Zero-deletion check
+
+For each bucket:
+
+```bash
+git diff <base>..<bucket>-rebased --diff-filter=D --name-only
+```
+
+Only intentional, user-approved deletions should remain.
+
+## Phase 5: Audit
+
+For each bucket, spawn a subagent to independently verify the diff:
+
+```
+Agent(subagent_type="general-purpose", prompt="
+  Audit the rebased <bucket> branch.
+  Run: git diff <base>..<bucket>-rebased --stat
+  Then: git diff <base>..<bucket>-rebased
+  
+  This bucket should ONLY contain: <bucket-description>
+  
+  It should NOT contain:
+  - Files belonging to <other-bucket-1>: <description>
+  - Files belonging to <other-bucket-2>: <description>
+  ...
+  
+  Report:
+  1. Files that clearly belong to <bucket>
+  2. Files that look suspicious / may belong to other buckets
+  3. Any deletions of base files
+  4. Verdict: clean or has leaks
+")
+```
+
+**Challenge the status quo** for each bucket:
+- Does this bucket modify any shared infrastructure file (index.ts, container-runner.ts, package.json, etc.)?
+- If yes: does it ADD anything unique, or is it a stale copy of another bucket's version?
+- If stale copy: strip it — the other bucket owns it.
+- If has unique additions: extract only the additions. Confirm with the user.
+
+If any audit finds issues, return to Phase 3 for that bucket.
+
+## Phase 6: PR & Finalize
+
+### 6a. Push and create PRs
+
+For each bucket:
+
+```bash
+git push origin <bucket>-rebased
+gh pr create \
+  --base <bucket> \
+  --head <bucket>-rebased \
+  --title "chore: clean <bucket> branch — strip leaked overlap" \
+  --body "$(cat <<'EOF'
+## Summary
+- Stripped files leaked from other branches (squash-from-merged-state artifact)
+- <N> files owned by this bucket (was <M> before stripping)
+- Zero overlap with all other buckets
+- Zero merge conflicts in verification tree
+
+## Verification
+- Overlap matrix: zero shared files with any other bucket
+- Merge tree: all buckets merge cleanly in order
+- Deletion audit: no phantom deletions
+- Subagent audit: clean
+
+🤖 Generated with [Claude Code](https://claude.com/claude-code)
+EOF
+)"
+```
+
+### 6b. Final summary
+
+Report to the user:
+
+| Bucket | Files | Overlap | Deletions | PR |
+|--------|-------|---------|-----------|-----|
+
+Plus:
+- Merge-verification tree result (all zero conflicts)
+- Worktree paths for each bucket
+- PR URLs
+- Next step: review PRs, then force-push to the target branches
+
+## Recipes
+
+### The soft-reset-and-restage pattern
+
+This is the core operation. Instead of trying to surgically edit commits, we:
+
+1. `git reset --soft <base>` — puts all changes in staging
+2. `git reset HEAD -- <files-to-remove>` — unstages files that belong to other buckets
+3. `git commit` — only the owned files are committed
+4. `git checkout -- . && git clean -fd` — discard unstaged leftovers
+
+This is idempotent and avoids all merge/rebase conflict resolution.
+
+### Detecting stale copies vs unique additions
+
+When a file appears in two buckets:
+
+```bash
+diff <(git show <bucket-A>:<file>) <(git show <bucket-B>:<file>)
+```
+
+- Empty diff → identical → pure leak, strip from the non-owner
+- Non-empty diff → check which direction:
+  - Bucket-A has MORE lines than bucket-B → A has additions, B is a subset
+  - Bucket-A has FEWER lines → A is stale, B has the real version
+  - Both add different things → file has genuine changes from both buckets, needs content-level split
+
+### Catching phantom deletions
+
+Files added to the base AFTER the original squash was created appear as deletions when rebasing. Always check:
+
+```bash
+git diff <base>..<bucket>-rebased --diff-filter=D --name-only
+```
+
+For each deletion, verify the file doesn't exist in the base:
+
+```bash
+git show <base>:<deleted-file> > /dev/null 2>&1 && echo "EXISTS — phantom deletion" || echo "OK — file was added by bucket"
+```
+
+Restore phantom deletions:
+
+```bash
+git checkout <base> -- <phantom-deleted-file>
 git commit --amend --no-edit
 ```
 
-### Verification for independent topology
+### Moving a file between buckets
 
-After pushing, verify that merging ALL specialized branches onto neutral produces the expected tree:
+If the audit discovers a file in the wrong bucket:
 
-```bash
-git checkout <neutral> && git checkout -b verify
-git merge <branch-A> --no-edit
-git merge <branch-B> --no-edit
-# Check: all specialized content present, all neutral fixes preserved
-grep <critical-fix> <shared-file>  # must show neutral's version, not stale
-```
+1. Strip it from the wrong bucket: soft reset, unstage, recommit
+2. Add it to the right bucket: cherry-pick or checkout from the old commit
+3. Re-run merge verification
 
-If a shared file shows the specialized branch's stale version, the branch needs to be rebuilt with the neutral version of that file.
+### Handling files owned by a bucket that also need a one-line addition from another
 
-### Squash workflow for independent skill branches
+Example: `setup/service.ts` is owned by bucket-A, but bucket-B needs to add one line (`EnvironmentFile=...`).
 
-1. Create worktree from neutral: `git worktree add /tmp/sq <neutral>`
-2. For each specialized branch:
-   a. `git checkout <neutral>` (reset to base)
-   b. `git checkout -b squashed-<branch>`
-   c. Cherry-pick ONLY branch-owned files from the source
-   d. Restore shared files from neutral: `git checkout <neutral> -- setup/ package.json src/index.ts`
-   e. Commit with descriptive message
-   f. Push
-3. Verify: merge all branches onto neutral, check no regressions
+Resolution: add bucket-B's line to bucket-A (the owner). Bucket-B should not touch the file at all. Single ownership is more important than perfect attribution.
+
+## Anti-patterns
+
+1. **Merging to get content.** Never `git merge --squash <source>` to populate a bucket — it brings the entire ancestor tree. Use `git reset --soft` + selective staging instead.
+
+2. **Checking overlap only against other buckets' diffs.** Also check for deletions of base files. The overlap matrix catches files modified by multiple buckets, but misses files that exist in the base and are silently deleted by a squash.
+
+3. **Skipping the merge-verification tree.** "It should work" is not verification. Merge the actual commits. Every time.
+
+4. **Fixing merge conflicts in the verification tree.** Never hand-edit the merge tree. If it conflicts, the bucket is wrong — go back and fix the bucket.
+
+5. **Assuming identical file names mean identical content.** Always `diff` overlapping files. A file can be in both buckets with different content — one has fixes the other lacks.
+
+6. **Direct force-push without review.** Create PRs. The stripped branches may have lost content that was intentionally placed. PRs give a chance to catch this before the force-push destroys the old refs.
