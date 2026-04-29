@@ -24,11 +24,34 @@ DB_PATH = Path(__file__).parent / "pr-knowledge.db"
 mcp = FastMCP("slang-pr-knowledge")
 
 
+def _ensure_schema(db):
+    db.executescript("""
+        CREATE TABLE IF NOT EXISTS prs (
+            number INTEGER, repo TEXT, title TEXT, author TEXT, body TEXT,
+            merged_at TEXT, labels TEXT, files_json TEXT, state TEXT, created_at TEXT,
+            PRIMARY KEY (number, repo)
+        );
+        CREATE TABLE IF NOT EXISTS reviews (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, pr_number INTEGER, repo TEXT,
+            reviewer TEXT, body TEXT, state TEXT, submitted_at TEXT
+        );
+        CREATE TABLE IF NOT EXISTS review_comments (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, pr_number INTEGER, repo TEXT,
+            reviewer TEXT, file_path TEXT, line INTEGER, body TEXT, created_at TEXT
+        );
+        CREATE TABLE IF NOT EXISTS issue_comments (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, pr_number INTEGER, repo TEXT,
+            author TEXT, body TEXT, created_at TEXT
+        );
+    """)
+
+
 def get_db():
     if not DB_PATH.exists():
         return None
     db = sqlite3.connect(str(DB_PATH))
     db.row_factory = sqlite3.Row
+    _ensure_schema(db)
     return db
 
 
