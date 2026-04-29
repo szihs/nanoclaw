@@ -68,25 +68,28 @@ export function runMigrations(db: Database.Database): void {
       name    TEXT NOT NULL,
       applied TEXT NOT NULL
     );
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_schema_version_name ON schema_version(name);
   `);
 
-  const currentVersion =
-    (db.prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number | null })?.v ?? 0;
-
-  const pending = migrations.filter((m) => m.version > currentVersion);
+  const applied = new Set<string>(
+    (db.prepare('SELECT name FROM schema_version').all() as { name: string }[]).map((r) => r.name),
+  );
+  const pending = migrations.filter((m) => !applied.has(m.name));
   if (pending.length === 0) return;
 
   log.info('Running migrations', {
-    from: currentVersion,
-    to: pending[pending.length - 1].version,
+    from: applied.size,
+    to: applied.size + pending.length,
     count: pending.length,
   });
 
   for (const m of pending) {
     db.transaction(() => {
       m.up(db);
+      const next = (db.prepare('SELECT COALESCE(MAX(version), 0) + 1 AS v FROM schema_version').get() as { v: number })
+        .v;
       db.prepare('INSERT INTO schema_version (version, name, applied) VALUES (?, ?, ?)').run(
-        m.version,
+        next,
         m.name,
         new Date().toISOString(),
       );

@@ -89,10 +89,7 @@ async function main(): Promise<void> {
   // Singleton guard: prevent duplicate orchestrators on the same data directory
   const pidfilePath = path.join(DATA_DIR, 'nanoclaw.pid');
   if (fs.existsSync(pidfilePath)) {
-    const existingPid = parseInt(
-      fs.readFileSync(pidfilePath, 'utf-8').trim(),
-      10,
-    );
+    const existingPid = parseInt(fs.readFileSync(pidfilePath, 'utf-8').trim(), 10);
     try {
       process.kill(existingPid, 0);
       log.fatal('Another NanoClaw instance is already running', { existingPid, pidfilePath });
@@ -327,7 +324,11 @@ function buildConversationConfigs(channelType: string): ConversationConfig[] {
 async function shutdown(signal: string): Promise<void> {
   log.info('Shutdown signal received', { signal });
   // Remove pidfile immediately before any async work that might hang
-  try { fs.unlinkSync(path.join(DATA_DIR, 'nanoclaw.pid')); } catch { /* ignore */ }
+  try {
+    fs.unlinkSync(path.join(DATA_DIR, 'nanoclaw.pid'));
+  } catch {
+    /* ignore */
+  }
   for (const cb of getShutdownCallbacks()) {
     try {
       await cb();

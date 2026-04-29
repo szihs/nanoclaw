@@ -4,7 +4,11 @@ export const migration015: Migration = {
   version: 15,
   name: 'agent-routing',
   up(db) {
-    const hasCol = (db.prepare("SELECT count(*) as c FROM pragma_table_info('agent_groups') WHERE name = 'routing'").get() as { c: number }).c;
+    const hasCol = (
+      db.prepare("SELECT count(*) as c FROM pragma_table_info('agent_groups') WHERE name = 'routing'").get() as {
+        c: number;
+      }
+    ).c;
     if (!hasCol) {
       db.exec(`ALTER TABLE agent_groups ADD COLUMN routing TEXT NOT NULL DEFAULT 'direct'`);
     }

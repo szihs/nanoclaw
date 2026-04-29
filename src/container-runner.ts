@@ -233,7 +233,9 @@ export function resolveAllowedMcpTools(agentGroup: AgentGroup): string[] {
     try {
       const parsed = JSON.parse(agentGroup.allowed_mcp_tools);
       if (Array.isArray(parsed)) return parsed.filter(Boolean);
-    } catch { /* not JSON, fall through to comma-split */ }
+    } catch {
+      /* not JSON, fall through to comma-split */
+    }
     return agentGroup.allowed_mcp_tools
       .split(',')
       .map((t) => t.trim())

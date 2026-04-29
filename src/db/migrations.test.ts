@@ -50,7 +50,9 @@ describe('migration 006 — coworker fields', () => {
     const db = initTestDb();
     runMigrations(db);
 
-    const row = db.prepare('SELECT name FROM schema_version WHERE version = 6').get() as { name: string } | undefined;
+    const row = db.prepare("SELECT name FROM schema_version WHERE name = 'coworker-fields'").get() as
+      | { name: string }
+      | undefined;
     expect(row?.name).toBe('coworker-fields');
   });
 });
