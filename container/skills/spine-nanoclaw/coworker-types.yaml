@@ -18,7 +18,6 @@ nanoclaw-common:
     - review
   overlays:
     - critique-overlay
-    - plan-overlay
   mcpServers:
     deepwiki:
       type: http
