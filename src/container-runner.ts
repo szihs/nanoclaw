@@ -694,6 +694,27 @@ function buildMounts(
       }
     }
 
+    // Write MCP servers to settings.json so subagents (spawned via the Agent
+    // tool) can access them. The SDK only passes mcpServers to the parent
+    // query — subagents get a fresh tool catalog from settings.json.
+    // Read DEFAULT_MCP_SERVERS from .env file directly (process.env mangles
+    // the JSON when bash sources .env with unescaped quotes).
+    let envMcpServers: Record<string, unknown> = {};
+    try {
+      const envFile = fs.readFileSync(path.join(process.cwd(), '.env'), 'utf-8');
+      const match = envFile.match(/^DEFAULT_MCP_SERVERS=(.+)$/m);
+      if (match) {
+        const raw = match[1].replace(/^['"]|['"]$/g, '');
+        envMcpServers = JSON.parse(raw);
+      }
+    } catch { /* no .env or invalid — skip */ }
+    const typeMcpForSettings = resolveTypeManifest(agentGroup).mcpServers;
+    const ccForSettings = readContainerConfig(agentGroup.folder);
+    const settingsMcpServers = { ...envMcpServers, ...typeMcpForSettings, ...ccForSettings.mcpServers };
+    if (Object.keys(settingsMcpServers).length > 0) {
+      settings.mcpServers = settingsMcpServers;
+    }
+
     fs.writeFileSync(settingsFile, JSON.stringify(settings, null, 2) + '\n');
   }
   mounts.push({ hostPath: claudeDir, containerPath: '/home/node/.claude', readonly: false });
