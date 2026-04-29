@@ -16,7 +16,6 @@ slang-common:
   workflows: []
   overlays:
     - critique-overlay
-    - plan-overlay
   mcpServers:
     deepwiki:
       type: http
