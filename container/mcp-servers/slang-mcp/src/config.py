@@ -39,12 +39,14 @@ def IsDebug():
 
 def get_ssl_verify_config():
     """Get SSL verification configuration for the current platform."""
-    ssl_verify = True
+    cert_file = os.environ.get("SSL_CERT_FILE")
+    if cert_file and os.path.exists(cert_file):
+        return cert_file
     if platform.system() == "Linux":
         cert_path = "/etc/ssl/certs/ca-certificates.crt"
         if os.path.exists(cert_path):
-            ssl_verify = cert_path
-    return ssl_verify
+            return cert_path
+    return True
 
 
 class GitHubConfig(BaseModel):
