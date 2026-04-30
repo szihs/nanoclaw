@@ -897,8 +897,41 @@ async function buildContainerArgs(
     if (agentIdentifier) {
       await onecli.ensureAgent({ name: agentGroup.name, identifier: agentIdentifier });
     }
+    // Snapshot the shared CA files before applyContainerConfig overwrites them —
+    // another instance's running containers may mount these paths.
+    const sharedCaPath = path.join('/tmp', 'onecli-proxy-ca.pem');
+    const sharedCombinedPath = path.join('/tmp', 'onecli-combined-ca.pem');
+    let savedCa: Buffer | null = null;
+    let savedCombined: Buffer | null = null;
+    try { savedCa = fs.readFileSync(sharedCaPath); } catch {}
+    try { savedCombined = fs.readFileSync(sharedCombinedPath); } catch {}
+
     const onecliApplied = await onecli.applyContainerConfig(args, { addHostMapping: false, agent: agentIdentifier });
     if (onecliApplied) {
+      // The SDK writes to shared /tmp/onecli-{proxy,combined}-ca.pem. When
+      // multiple instances use different OneCLI vaults, the last writer wins.
+      // Copy our CA to instance-specific paths, rewrite docker -v args to
+      // mount those, then restore the original shared files for other instances.
+      const caPrefix = `onecli-${CONTAINER_PREFIX}`;
+      const instanceCaPath = path.join('/tmp', `${caPrefix}-proxy-ca.pem`);
+      const instanceCombinedPath = path.join('/tmp', `${caPrefix}-combined-ca.pem`);
+      try {
+        if (fs.existsSync(sharedCaPath)) fs.copyFileSync(sharedCaPath, instanceCaPath);
+        if (fs.existsSync(sharedCombinedPath)) fs.copyFileSync(sharedCombinedPath, instanceCombinedPath);
+        // Restore the original shared files for other instances
+        if (savedCa) fs.writeFileSync(sharedCaPath, savedCa);
+        if (savedCombined) fs.writeFileSync(sharedCombinedPath, savedCombined);
+        // Only rewrite -v host:container mount sources, not -e env values.
+        // The container-side paths (/tmp/onecli-gateway-ca.pem, /tmp/onecli-combined-ca.pem)
+        // must stay unchanged — only the host-side source path changes.
+        for (let i = 0; i < args.length; i++) {
+          if (args[i] === '-v' && typeof args[i + 1] === 'string') {
+            args[i + 1] = args[i + 1]
+              .replace(`${sharedCaPath}:`, `${instanceCaPath}:`)
+              .replace(`${sharedCombinedPath}:`, `${instanceCombinedPath}:`);
+          }
+        }
+      } catch {}
       log.info('OneCLI gateway applied', { containerName });
     } else {
       log.warn('OneCLI gateway not applied — container will have no credentials', { containerName });
