@@ -139,83 +139,32 @@ async function sweep(): Promise<void> {
     // CLAUDE.md staleness: detect containers whose composed CLAUDE.md
     // has changed since spawn (skills/overlays/instructions edited).
     //
-    // Strategy: The container's poll-loop is single-threaded — while a
-    // Claude SDK query is running, new messages (including /clear) are
-    // explicitly skipped by the concurrent poller (poll-loop.ts:265).
-    // So /clear only works when the container is idle (between turns).
-    //
-    // - Idle container: send /clear + follow-up. The poll-loop picks
-    //   it up on the next iteration and starts a fresh session.
-    // - Mid-turn container: kill directly. The sweep will respawn it
-    //   with fresh CLAUDE.md on the next tick when due messages exist.
+    // Strategy: kill the container so it respawns with fresh CLAUDE.md.
+    // Session history is preserved in the inbound/outbound DBs — the
+    // agent picks up where it left off with updated instructions.
+    // No /clear: that wipes conversation context and causes amnesia.
     const stale = detectStaleContainers();
     for (const { sessionId, agentGroupId, folder } of stale) {
-      let midTurn = false;
-      try {
-        const outDb = openOutboundDb(agentGroupId, sessionId);
-        try {
-          midTurn = getProcessingClaims(outDb).length > 0;
-        } finally {
-          outDb.close();
-        }
-      } catch {
-        midTurn = true; // can't read outbound.db → assume busy
-      }
-
-      if (midTurn) {
-        log.warn('CLAUDE.md stale (mid-turn) — killing container', { sessionId, folder });
-        killContainer(sessionId, 'claude-md-stale');
-        writeSessionMessage(agentGroupId, sessionId, {
-          id: `claudemd-refresh-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-          kind: 'chat',
-          timestamp: new Date().toISOString(),
-          platformId: agentGroupId,
-          channelType: 'agent',
-          threadId: null,
-          content: JSON.stringify({
-            text: 'Your instructions were updated. Container restarted to apply them. Continue your current task.',
-            sender: 'system',
-            senderId: 'system',
-          }),
-          processAfter: new Date(Date.now() + 5000)
-            .toISOString()
-            .replace('T', ' ')
-            .replace(/\.\d+Z$/, ''),
-        });
-      } else {
-        log.warn('CLAUDE.md stale (idle) — sending /clear', { sessionId, folder });
-        // Recompose CLAUDE.md on disk and update the hash so the next sweep
-        // doesn't re-detect as stale. The /clear resets the SDK session;
-        // the fresh file is picked up on the next Claude turn.
-        recomposeAndUpdateHash(sessionId);
-        const now = new Date().toISOString();
-        writeSessionMessage(agentGroupId, sessionId, {
-          id: `claudemd-clear-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-          kind: 'chat',
-          timestamp: now,
-          platformId: agentGroupId,
-          channelType: 'agent',
-          threadId: null,
-          content: JSON.stringify({ text: '/clear', sender: 'system', senderId: 'system' }),
-        });
-        writeSessionMessage(agentGroupId, sessionId, {
-          id: `claudemd-refresh-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-          kind: 'chat',
-          timestamp: now,
-          platformId: agentGroupId,
-          channelType: 'agent',
-          threadId: null,
-          content: JSON.stringify({
-            text: 'Your instructions were updated. Session cleared to apply them. Continue your current task.',
-            sender: 'system',
-            senderId: 'system',
-          }),
-          processAfter: new Date(Date.now() + 2000)
-            .toISOString()
-            .replace('T', ' ')
-            .replace(/\.\d+Z$/, ''),
-        });
-      }
+      log.warn('CLAUDE.md stale — killing container for respawn', { sessionId, folder });
+      recomposeAndUpdateHash(sessionId);
+      killContainer(sessionId, 'claude-md-stale');
+      writeSessionMessage(agentGroupId, sessionId, {
+        id: `claudemd-refresh-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+        kind: 'chat',
+        timestamp: new Date().toISOString(),
+        platformId: agentGroupId,
+        channelType: 'agent',
+        threadId: null,
+        content: JSON.stringify({
+          text: 'Your instructions were updated. Container restarted to apply them. Continue your current task.',
+          sender: 'system',
+          senderId: 'system',
+        }),
+        processAfter: new Date(Date.now() + 5000)
+          .toISOString()
+          .replace('T', ' ')
+          .replace(/\.\d+Z$/, ''),
+      });
     }
   } catch (err) {
     log.error('Host sweep error', { err });

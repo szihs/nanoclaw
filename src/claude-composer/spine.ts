@@ -150,7 +150,6 @@ export function renderCoworkerSpine(
     parts.push(
       routeLines.join('\n') +
         '\n\nAlways start with a workflow. Never jump straight to code.' +
-        '\nWhen you receive a task unrelated to your current work, run `/clear` first to start with a fresh context.' +
         '\nYour role-specific standing orders: [Additional Instructions](#additional-instructions)',
     );
   }
