@@ -1,3 +1,6 @@
+import fs from 'fs';
+import path from 'path';
+
 import { findByName, getAllDestinations, type DestinationEntry } from './destinations.js';
 import { getPendingMessages, markProcessing, markCompleted, type MessageInRow } from './db/messages-in.js';
 import { writeMessageOut } from './db/messages-out.js';
@@ -158,7 +161,15 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
 
     // Format messages: passthrough commands get raw text (only if the
     // provider natively handles slash commands), others get XML.
-    const prompt = formatMessagesWithCommands(keep, config.provider.supportsNativeSlashCommands);
+    let prompt = formatMessagesWithCommands(keep, config.provider.supportsNativeSlashCommands);
+
+    // Non-native providers: run intent router on the initial prompt too.
+    // Claude SDK fires UserPromptSubmit hooks natively; for Codex/OpenCode
+    // we call the same bridge so workflow classification applies to every
+    // user message regardless of provider.
+    if (!config.provider.supportsNativeSlashCommands) {
+      prompt = await classifyAndPrepend(prompt);
+    }
 
     log(`Processing ${keep.length} message(s), kinds: ${[...new Set(keep.map((m) => m.kind))].join(',')}`);
 
@@ -210,27 +221,77 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
 }
 
 /**
+ * For non-native providers, resolve a slash command to its SKILL.md body.
+ * Claude Code's SDK loads SKILL.md on demand via its Skill tool; for Codex
+ * and other providers we inject the body directly into the prompt so the
+ * agent gets the same information without needing to `cat` the file.
+ */
+function resolveSkillBody(command: string): string | null {
+  const skillName = command.replace(/^\//, '').split(/\s/)[0];
+  if (!skillName) return null;
+
+  const candidates = [
+    path.join('/home/node/.claude/skills', skillName, 'SKILL.md'),
+    // Additional dirs: cloned repos may put skills under the agent workspace
+    ...fs.readdirSync('/workspace/agent').flatMap((dir) => {
+      const p = path.join('/workspace/agent', dir, '.claude', 'skills', skillName, 'SKILL.md');
+      return fs.existsSync(p) ? [p] : [];
+    }),
+  ];
+
+  for (const candidate of candidates) {
+    try {
+      if (!fs.existsSync(candidate)) continue;
+      let body = fs.readFileSync(candidate, 'utf-8');
+      // Strip YAML frontmatter
+      body = body.replace(/^---\s*\n[\s\S]*?\n---\s*\n/, '');
+      return body.trim();
+    } catch { /* skip */ }
+  }
+  return null;
+}
+
+/**
  * Format messages, handling passthrough commands differently.
  * When the provider handles slash commands natively (Claude Code),
  * passthrough commands are sent raw (no XML wrapping) so the SDK can
- * dispatch them. Otherwise they fall through to standard XML formatting.
+ * dispatch them. For non-native providers, skill bodies are resolved and
+ * injected so the agent gets the full SKILL.md content on invocation.
  */
 function formatMessagesWithCommands(messages: MessageInRow[], nativeSlashCommands: boolean): string {
   const parts: string[] = [];
   const normalBatch: MessageInRow[] = [];
 
   for (const msg of messages) {
-    if (nativeSlashCommands && (msg.kind === 'chat' || msg.kind === 'chat-sdk')) {
+    if ((msg.kind === 'chat' || msg.kind === 'chat-sdk')) {
       const cmdInfo = categorizeMessage(msg);
       if (cmdInfo.category === 'passthrough' || cmdInfo.category === 'admin') {
-        // Flush normal batch first
-        if (normalBatch.length > 0) {
-          parts.push(formatMessages(normalBatch));
-          normalBatch.length = 0;
+        if (nativeSlashCommands) {
+          // Flush normal batch first
+          if (normalBatch.length > 0) {
+            parts.push(formatMessages(normalBatch));
+            normalBatch.length = 0;
+          }
+          // Pass raw command text (no XML wrapping) — SDK handles it natively
+          parts.push(cmdInfo.text);
+          continue;
         }
-        // Pass raw command text (no XML wrapping) — SDK handles it natively
-        parts.push(cmdInfo.text);
-        continue;
+
+        // Non-native provider: resolve SKILL.md body and inject it
+        if (cmdInfo.category === 'passthrough') {
+          const body = resolveSkillBody(cmdInfo.command);
+          if (body) {
+            if (normalBatch.length > 0) {
+              parts.push(formatMessages(normalBatch));
+              normalBatch.length = 0;
+            }
+            const args = cmdInfo.text.slice(cmdInfo.command.length).trim();
+            parts.push(
+              `<skill-invocation name="${cmdInfo.command.slice(1)}"${args ? ` args="${args}"` : ''}>\n${body}\n</skill-invocation>`,
+            );
+            continue;
+          }
+        }
       }
     }
     normalBatch.push(msg);

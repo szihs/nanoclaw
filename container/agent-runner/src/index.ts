@@ -55,21 +55,10 @@ async function main(): Promise<void> {
   log(`Starting v2 agent-runner (provider: ${providerName})`);
 
   // Build the system context instructions.
-  // Claude Code loads CLAUDE.md natively from the filesystem, so for the
-  // claude provider we only need the routing addendum. Codex doesn't read
-  // CLAUDE.md — it reads AGENTS.md (which doesn't exist in our containers).
-  // For codex, we read CLAUDE.md ourselves and inject it via
-  // developer_instructions in config.toml.
-  const routingAddendum = buildSystemPromptAddendum();
-  let instructions: string;
-  if (providerName === 'codex') {
-    const claudeMdPath = path.join(CWD, 'CLAUDE.md');
-    const claudeMd = fs.existsSync(claudeMdPath) ? fs.readFileSync(claudeMdPath, 'utf-8') : '';
-    instructions = claudeMd ? `${claudeMd}\n\n${routingAddendum}` : routingAddendum;
-    log(`Codex provider: loaded ${claudeMd.length} bytes from CLAUDE.md into developer_instructions`);
-  } else {
-    instructions = routingAddendum;
-  }
+  // Claude Code loads CLAUDE.md natively from the filesystem; Codex loads it
+  // in its own provider (codex.ts:composeBaseInstructions). index.ts only
+  // provides the routing addendum — CLAUDE.md ownership lives in the provider.
+  const instructions = buildSystemPromptAddendum();
 
   // Discover additional directories: /workspace/extra/* (host-mounted)
   // and /workspace/agent/* subdirs that have their own .claude/ config

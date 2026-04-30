@@ -90,9 +90,140 @@ function readAgentAndGlobalClaudeMd(): string | undefined {
   return parts.length > 0 ? parts.join('\n\n---\n\n') : undefined;
 }
 
-function composeBaseInstructions(promptAddendum: string | undefined): string | undefined {
+/**
+ * Parse YAML frontmatter from a SKILL.md or command .md file.
+ * Returns { name, description } or null if the file lacks frontmatter.
+ * Handles multiline YAML descriptions conservatively (quoted values,
+ * continuation lines) by concatenating until the next key or fence.
+ */
+function parseFrontmatter(content: string): { name?: string; description?: string } | null {
+  const match = content.match(/^---\s*\n([\s\S]*?)\n---/);
+  if (!match) return null;
+  const block = match[1];
+  const result: Record<string, string> = {};
+  let currentKey = '';
+  for (const line of block.split('\n')) {
+    const kvMatch = line.match(/^(\w[\w-]*):\s*(.*)/);
+    if (kvMatch) {
+      currentKey = kvMatch[1];
+      let val = kvMatch[2].trim();
+      // Strip surrounding quotes
+      if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) {
+        val = val.slice(1, -1);
+      }
+      result[currentKey] = val;
+    } else if (currentKey && /^\s+\S/.test(line)) {
+      // Continuation line for the current key
+      result[currentKey] += ' ' + line.trim();
+    }
+  }
+  return { name: result.name, description: result.description };
+}
+
+/** Cap individual content blocks to avoid blowing up the prompt. */
+const MAX_PROJECT_CLAUDE_MD_BYTES = 8_000;
+
+/**
+ * Scan additional directories for project instructions, skills, and commands.
+ * Returns a formatted string block ready for injection into baseInstructions,
+ * or undefined if nothing was found.
+ */
+function discoverAdditionalContent(dirs: string[]): string | undefined {
+  const sections: string[] = [];
+
+  for (const dir of dirs) {
+    if (!fs.existsSync(dir)) continue;
+    const dirName = path.basename(dir);
+    const parts: string[] = [];
+
+    // Project CLAUDE.md + CLAUDE.local.md
+    for (const name of ['CLAUDE.md', 'CLAUDE.local.md']) {
+      const filePath = path.join(dir, name);
+      if (!fs.existsSync(filePath)) continue;
+      let content = resolveClaudeImports(fs.readFileSync(filePath, 'utf-8'), dir);
+      if (content.length > MAX_PROJECT_CLAUDE_MD_BYTES) {
+        content = content.slice(0, MAX_PROJECT_CLAUDE_MD_BYTES) + '\n\n[…truncated]';
+      }
+      parts.push(content);
+    }
+
+    // Skills: .claude/skills/*/SKILL.md
+    const skillsDir = path.join(dir, '.claude', 'skills');
+    const skillEntries: string[] = [];
+    if (fs.existsSync(skillsDir)) {
+      try {
+        for (const entry of fs.readdirSync(skillsDir)) {
+          const skillMd = path.join(skillsDir, entry, 'SKILL.md');
+          if (!fs.existsSync(skillMd)) continue;
+          try {
+            const fm = parseFrontmatter(fs.readFileSync(skillMd, 'utf-8'));
+            const skillName = fm?.name || entry;
+            const desc = fm?.description || '(no description)';
+            skillEntries.push(`- \`/${skillName}\` — ${desc}`);
+          } catch { /* skip unreadable */ }
+        }
+      } catch { /* skip unreadable dir */ }
+    }
+
+    // Commands: .claude/commands/*.md
+    const cmdsDir = path.join(dir, '.claude', 'commands');
+    const cmdEntries: string[] = [];
+    if (fs.existsSync(cmdsDir)) {
+      try {
+        for (const entry of fs.readdirSync(cmdsDir)) {
+          if (!entry.endsWith('.md')) continue;
+          const cmdPath = path.join(cmdsDir, entry);
+          try {
+            const content = fs.readFileSync(cmdPath, 'utf-8');
+            const fm = parseFrontmatter(content);
+            const cmdName = fm?.name || entry.replace(/\.md$/, '');
+            const desc = fm?.description || content.split('\n').find((l) => l.trim().length > 0)?.slice(0, 120) || '(no description)';
+            cmdEntries.push(`- \`/${cmdName}\` — ${desc}`);
+          } catch { /* skip */ }
+        }
+      } catch { /* skip */ }
+    }
+
+    if (parts.length === 0 && skillEntries.length === 0 && cmdEntries.length === 0) continue;
+
+    const block: string[] = [];
+    block.push(`## Project: ${dirName} (${dir})`);
+    if (parts.length > 0) {
+      block.push('');
+      block.push(parts.join('\n\n'));
+    }
+    if (skillEntries.length > 0) {
+      block.push('');
+      block.push(`### Skills from ${dirName}`);
+      block.push('');
+      block.push(skillEntries.join('\n'));
+      block.push('');
+      block.push(`Invoke by name. Full instructions: ${skillsDir}/<name>/SKILL.md`);
+    }
+    if (cmdEntries.length > 0) {
+      block.push('');
+      block.push(`### Commands from ${dirName}`);
+      block.push('');
+      block.push(cmdEntries.join('\n'));
+      block.push('');
+      block.push(`Full instructions: ${cmdsDir}/<name>.md`);
+    }
+
+    sections.push(block.join('\n'));
+  }
+
+  return sections.length > 0 ? sections.join('\n\n---\n\n') : undefined;
+}
+
+function composeBaseInstructions(
+  promptAddendum: string | undefined,
+  additionalDirectories?: string[],
+): string | undefined {
   const claudeMd = readAgentAndGlobalClaudeMd();
-  const pieces = [claudeMd, promptAddendum].filter((s): s is string => Boolean(s));
+  const additionalContent = additionalDirectories?.length
+    ? discoverAdditionalContent(additionalDirectories)
+    : undefined;
+  const pieces = [claudeMd, additionalContent, promptAddendum].filter((s): s is string => Boolean(s));
   return pieces.length > 0 ? pieces.join('\n\n---\n\n') : undefined;
 }
 
@@ -103,10 +234,12 @@ export class CodexProvider implements AgentProvider {
 
   private readonly mcpServers: Record<string, { command: string; args: string[]; env: Record<string, string> }>;
   private readonly model: string;
+  private readonly additionalDirectories?: string[];
 
   constructor(options: ProviderOptions = {}) {
     this.mcpServers = options.mcpServers ?? {};
     this.model = (options.env?.CODEX_MODEL as string | undefined) ?? 'gpt-5.4-mini';
+    this.additionalDirectories = options.additionalDirectories;
   }
 
   isSessionInvalid(err: unknown): boolean {
@@ -131,7 +264,7 @@ export class CodexProvider implements AgentProvider {
       // One app-server per query invocation. The poll-loop keeps a single
       // query active per batch of pending messages and ends it on idle, so
       // spawn-per-query matches that cadence naturally.
-      writeCodexMcpConfigToml(self.mcpServers);
+      writeCodexMcpConfigToml(self.mcpServers, self.additionalDirectories);
       const server = spawnCodexAppServer(createCodexConfigOverrides());
       attachCodexAutoApproval(server);
 
@@ -147,7 +280,7 @@ export class CodexProvider implements AgentProvider {
           sandbox: 'danger-full-access',
           approvalPolicy: 'never',
           personality: 'friendly',
-          baseInstructions: composeBaseInstructions(input.systemContext?.instructions),
+          baseInstructions: composeBaseInstructions(input.systemContext?.instructions, self.additionalDirectories),
         };
 
         threadId = await startOrResumeCodexThread(server, threadId, threadParams);
