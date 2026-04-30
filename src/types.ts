@@ -10,6 +10,7 @@ export interface AgentGroup {
   coworker_type: string | null; // coworker-types.yaml key, e.g. "slang-reader" or "slang-writer"
   allowed_mcp_tools: string | null; // JSON: string[] of allowed MCP tool names
   routing: string; // 'direct' | 'internal'
+  disable_overlays: number; // 0 | 1 — when 1, skip overlay hook injection
   created_at: string;
 }
 

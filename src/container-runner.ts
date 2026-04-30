@@ -611,8 +611,9 @@ function buildMounts(
 
     // Overlay hook injection: enforce plan/critique gates via runtime hooks.
     // Reads the resolved manifest to see which overlays apply to this type.
+    // Skipped entirely when disable_overlays is set on the agent group.
     const hooksDir = path.join(process.cwd(), 'container', 'hooks');
-    if (fs.existsSync(hooksDir)) {
+    if (fs.existsSync(hooksDir) && !agentGroup.disable_overlays) {
       const { overlayNames, workflows: wfManifest } = resolveTypeManifest(agentGroup);
       const hasCritique = overlayNames.includes('critique-overlay');
       // Plan gate is now part of critique-overlay (insert-before: [patch]).
