@@ -16,6 +16,7 @@
     "prepare": "husky",
     "setup": "tsx setup/index.ts",
     "setup:auto": "tsx setup/auto.ts",
+    "setup:local": "tsx setup/index.ts --step local",
     "chat": "tsx scripts/chat.ts",
     "auth": "tsx src/whatsapp-auth.ts",
     "validate:templates": "tsx scripts/validate-templates.ts",

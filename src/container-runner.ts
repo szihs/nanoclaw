@@ -19,6 +19,7 @@ import {
   type SkillMeta,
 } from './claude-composer.js';
 import {
+  AGENT_RUNTIME,
   CONTAINER_IMAGE,
   CONTAINER_IMAGE_BASE,
   CONTAINER_INSTALL_LABEL,
@@ -34,6 +35,7 @@ import {
 } from './config.js';
 import { readContainerConfig, writeContainerConfig } from './container-config.js';
 import { CONTAINER_RUNTIME_BIN, hostGatewayArgs, readonlyMountArgs, stopContainer } from './container-runtime.js';
+import { killLocalAgent, type LocalAgentHandle, spawnLocalAgent } from './local-runner.js';
 import { getAgentGroup } from './db/agent-groups.js';
 import { getDb, hasTable } from './db/connection.js';
 import { getSession } from './db/sessions.js';
@@ -144,8 +146,16 @@ function detectGpuMode(): GpuMode {
   return (gpuModeCache = 'gpus-all');
 }
 
-/** Active containers tracked by session ID. */
-const activeContainers = new Map<string, { process: ChildProcess; containerName: string }>();
+/**
+ * Active agent processes tracked by session ID. The same map serves both
+ * runtimes; `kind` disambiguates the termination path (docker stop vs
+ * SIGTERM). For Docker, `process` is the `docker run` child; for local,
+ * it is the `bun` child and `worktreePath` points at the checkout.
+ */
+type ActiveEntry =
+  | { kind: 'docker'; process: ChildProcess; containerName: string }
+  | { kind: 'local'; process: ChildProcess; containerName: string; worktreePath: string };
+const activeContainers = new Map<string, ActiveEntry>();
 
 /** SHA-256 hash of CLAUDE.md at spawn time, keyed by session ID. */
 const spawnedClaudeMdHash = new Map<string, string>();
@@ -420,6 +430,60 @@ async function spawnContainer(session: Session): Promise<void> {
   const allowedTools = resolveAllowedMcpTools(agentGroup);
   const proxyToken = registerContainerToken(agentGroup.folder, allowedTools);
 
+  // Local-runtime path: spawn the agent-runner as a bun child on the host.
+  // Docker-specific work (mounts, container args, OneCLI applyContainerConfig)
+  // is skipped — local mode inherits host env for proxy/CA.
+  if (AGENT_RUNTIME === 'local') {
+    const { mcpServers } = resolveTypeManifest(agentGroup);
+    const containerConfig = readContainerConfig(agentGroup.folder);
+    const mergedMcpServers = { ...mcpServers, ...(containerConfig.mcpServers ?? {}) };
+    fs.rmSync(heartbeatPath(agentGroup.id, session.id), { force: true });
+    let handle: LocalAgentHandle;
+    try {
+      handle = await spawnLocalAgent({
+        session,
+        agentGroup,
+        provider,
+        contribution,
+        proxyToken,
+        allowedTools,
+        mcpServers: mergedMcpServers,
+      });
+    } catch (err) {
+      revokeContainerToken(proxyToken);
+      log.error('Local agent spawn failed', { sessionId: session.id, err });
+      throw err;
+    }
+    activeContainers.set(session.id, {
+      kind: 'local',
+      process: handle.process,
+      containerName: handle.name,
+      worktreePath: handle.worktreePath,
+    });
+    markContainerRunning(session.id);
+    handle.process.stderr?.on('data', (data) => {
+      for (const line of data.toString().trim().split('\n')) {
+        if (line) log.debug(line, { agent: agentGroup.folder });
+      }
+    });
+    handle.process.stdout?.on('data', () => {});
+    handle.process.on('close', (code) => {
+      activeContainers.delete(session.id);
+      spawnedClaudeMdHash.delete(session.id);
+      markContainerStopped(session.id);
+      stopTypingRefresh(session.id);
+      revokeContainerToken(proxyToken);
+      log.info('Local agent exited', { sessionId: session.id, code, name: handle.name });
+    });
+    handle.process.on('error', (err) => {
+      activeContainers.delete(session.id);
+      markContainerStopped(session.id);
+      stopTypingRefresh(session.id);
+      log.error('Local agent spawn error', { sessionId: session.id, err });
+    });
+    return;
+  }
+
   const args = await buildContainerArgs(mounts, containerName, agentGroup, provider, contribution, agentIdentifier, {
     proxyToken,
     allowedTools,
@@ -441,7 +505,7 @@ async function spawnContainer(session: Session): Promise<void> {
 
   const container = spawn(CONTAINER_RUNTIME_BIN, args, { stdio: ['ignore', 'pipe', 'pipe'] });
 
-  activeContainers.set(session.id, { process: container, containerName });
+  activeContainers.set(session.id, { kind: 'docker', process: container, containerName });
   markContainerRunning(session.id);
 
   // Log stderr
@@ -476,12 +540,17 @@ async function spawnContainer(session: Session): Promise<void> {
   });
 }
 
-/** Kill a container for a session. */
+/** Kill a container (or local process) for a session. */
 export function killContainer(sessionId: string, reason: string): void {
   const entry = activeContainers.get(sessionId);
   if (!entry) return;
 
-  log.info('Killing container', { sessionId, reason, containerName: entry.containerName });
+  log.info('Killing agent', { sessionId, reason, kind: entry.kind, name: entry.containerName });
+  if (entry.kind === 'local') {
+    // Fire-and-forget — the close handler on the child will clear activeContainers.
+    void killLocalAgent({ process: entry.process, name: entry.containerName, worktreePath: entry.worktreePath });
+    return;
+  }
   try {
     stopContainer(entry.containerName);
   } catch {
@@ -1172,6 +1241,13 @@ exec bun run /app/src/index.ts`,
 
 /** Build a per-agent-group Docker image with custom packages. */
 export async function buildAgentGroupImage(agentGroupId: string): Promise<void> {
+  if (AGENT_RUNTIME === 'local') {
+    // Local mode has no container image — custom packages must be installed
+    // on the host directly. Log and return so callers (dashboard approvals)
+    // don't error out; the package list is still persisted in container.json.
+    log.info('buildAgentGroupImage skipped in local mode', { agentGroupId });
+    return;
+  }
   const agentGroup = getAgentGroup(agentGroupId);
   if (!agentGroup) throw new Error('Agent group not found');
 
