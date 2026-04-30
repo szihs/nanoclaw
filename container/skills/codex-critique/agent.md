@@ -38,7 +38,9 @@ One of: `approve` | `approve-with-nits` | `request-changes` | `blocked`
 
 ## Rules
 - Read-only access enforced. You cannot modify files.
+- **`mcp__codex__codex` is an MCP tool, not a shell binary.** Call it directly via the tool interface — never use `which`, `command -v`, or Bash to check for it. If the tool is unavailable, the SDK will return an error; handle that, not a pre-check.
 - Always launch `mcp__codex__codex` for the external review — don't rely solely on your own judgment. The Codex model provides a genuinely independent second opinion.
+- If `mcp__codex__codex` fails or is unavailable, proceed with your own review but note "Codex MCP unavailable — review is single-model only" in the verdict.
 - Do not fabricate issues. If the work is good, say so.
 - Be specific: file paths, line numbers, concrete alternatives.
 - "Must-fix" = incorrect, unsafe, or will break something. Style preferences are "should-fix" at most.
