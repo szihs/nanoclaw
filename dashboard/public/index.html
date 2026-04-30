@@ -1048,6 +1048,7 @@
       <button class="admin-pill" data-panel="admin-channels">Channels</button>
       <button class="admin-pill" data-panel="admin-config">Config</button>
       <button class="admin-pill" data-panel="admin-infra">Infra</button>
+      <button class="admin-pill" data-panel="admin-metrics">Metrics</button>
     </div>
     <div class="admin-panels">
       <div id="admin-overview" class="admin-panel active">
@@ -1129,6 +1130,19 @@
       <div id="admin-infra" class="admin-panel">
         <div class="admin-panel-header"><h3>Infrastructure</h3><button class="admin-refresh-btn" data-load="infra">Refresh</button></div>
         <div id="admin-infra-content" class="admin-panel-body"><div class="admin-loading">Loading...</div></div>
+      </div>
+      <div id="admin-metrics" class="admin-panel">
+        <div class="admin-panel-header"><h3>Metrics</h3><button class="admin-refresh-btn" data-load="metrics">Refresh All</button></div>
+        <div id="admin-metrics-content" class="admin-panel-body">
+          <h4 style="color:#94A3B8;margin:0 0 8px">Token Usage</h4>
+          <div id="metrics-tokens-content"><p class="admin-empty">Loading...</p></div>
+          <h4 style="color:#94A3B8;margin:20px 0 8px">24h Message Activity</h4>
+          <div id="metrics-activity-content"><canvas id="metrics-activity-canvas" width="800" height="160"></canvas><div id="metrics-activity-legend"></div></div>
+          <h4 style="color:#94A3B8;margin:20px 0 8px">Users &amp; Privileges</h4>
+          <div id="metrics-users-content"><p class="admin-empty">Loading...</p></div>
+          <h4 style="color:#94A3B8;margin:20px 0 8px">Channel Status</h4>
+          <div id="metrics-channels-content"><p class="admin-empty">Loading...</p></div>
+        </div>
       </div>
     </div>
   </div>

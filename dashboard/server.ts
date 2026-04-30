@@ -4,8 +4,8 @@
  * Four-tab dashboard:
  *   Tab 1: Pixel Art Office — real-time interactive coworker visualization
  *   Tab 2: Coworkers — manage coworker agents, containers, files
- *   Tab 3: Timeline — all-time metrics, task history, analytics
- *   Tab 4: Admin — config, debug, infrastructure, logs, skills, chat
+ *   Tab 3: Timeline — event audit log, task history
+ *   Tab 4: Admin — config, debug, infrastructure, logs, skills, chat, metrics
  *
  * Reads NanoClaw state from SQLite/session DBs and forwards browser chat to the
  * NanoClaw host over a localhost-only ingress.
@@ -962,6 +962,369 @@ refreshContextWindowCache();
 const ctxTimer = setInterval(refreshContextWindowCache, 10000);
 ctxTimer.unref?.();
 
+// ---------- Per-group token aggregation (JSONL scanning) ----------
+interface GroupTokenBucket {
+  requests: number;
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheCreationTokens: number;
+  name: string;
+}
+let groupTokenCache: Record<string, GroupTokenBucket> = {};
+
+function refreshGroupTokens(): void {
+  const sessionsDir = join(getDataDir(), 'v2-sessions');
+  if (!existsSync(sessionsDir)) { groupTokenCache = {}; return; }
+
+  const nameMap = new Map<string, string>();
+  if (db) {
+    try {
+      const groups = db.prepare('SELECT id, name FROM agent_groups').all() as { id: string; name: string }[];
+      for (const g of groups) nameMap.set(g.id, g.name);
+    } catch { /* ignore */ }
+  }
+
+  const byGroup: Record<string, GroupTokenBucket> = {};
+  let agDirs: string[];
+  try { agDirs = readdirSync(sessionsDir).filter((d) => d.startsWith('ag-')); } catch { return; }
+
+  for (const agDir of agDirs) {
+    const claudeDir = join(sessionsDir, agDir, '.claude-shared', 'projects');
+    if (!existsSync(claudeDir)) continue;
+
+    const jsonlFiles: string[] = [];
+    const walkJsonl = (dir: string): void => {
+      try {
+        for (const entry of readdirSync(dir, { withFileTypes: true })) {
+          const full = join(dir, entry.name);
+          if (entry.isDirectory()) walkJsonl(full);
+          else if (entry.name.endsWith('.jsonl')) jsonlFiles.push(full);
+        }
+      } catch { /* skip */ }
+    };
+    walkJsonl(claudeDir);
+
+    for (const file of jsonlFiles) {
+      let content: string;
+      try { content = readFileSync(file, 'utf-8'); } catch { continue; }
+      for (const line of content.split('\n')) {
+        if (!line.trim()) continue;
+        try {
+          const r = JSON.parse(line);
+          if (r.type !== 'assistant' || !r.message?.usage) continue;
+          const u = r.message.usage;
+          if (!byGroup[agDir]) byGroup[agDir] = { requests: 0, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0, name: nameMap.get(agDir) || agDir };
+          byGroup[agDir].requests++;
+          byGroup[agDir].inputTokens += u.input_tokens || 0;
+          byGroup[agDir].outputTokens += u.output_tokens || 0;
+          byGroup[agDir].cacheReadTokens += u.cache_read_input_tokens || 0;
+          byGroup[agDir].cacheCreationTokens += u.cache_creation_input_tokens || 0;
+        } catch { /* skip line */ }
+      }
+    }
+  }
+  groupTokenCache = byGroup;
+}
+refreshGroupTokens();
+const groupTokenTimer = setInterval(refreshGroupTokens, 30000);
+groupTokenTimer.unref?.();
+
+// ---------- Token metrics via ccusage (container data only) ----------
+interface CcusageDayEntry {
+  date: string;
+  inputTokens: number;
+  outputTokens: number;
+  cacheCreationTokens: number;
+  cacheReadTokens: number;
+  totalTokens: number;
+  totalCost: number;
+  modelsUsed: string[];
+  modelBreakdowns: { modelName: string; inputTokens: number; outputTokens: number; cacheCreationTokens: number; cacheReadTokens: number; cost: number }[];
+}
+interface CcusageGroupData {
+  groupId: string;
+  groupName: string;
+  daily: CcusageDayEntry[];
+}
+interface CcusageCache {
+  '1d': { combined: CcusageDayEntry[]; byGroup: CcusageGroupData[] };
+  '7d': { combined: CcusageDayEntry[]; byGroup: CcusageGroupData[] };
+  '30d': { combined: CcusageDayEntry[]; byGroup: CcusageGroupData[] };
+  all: { combined: CcusageDayEntry[]; byGroup: CcusageGroupData[] };
+  lastRefresh: number;
+}
+const emptyCcusagePeriod = { combined: [] as CcusageDayEntry[], byGroup: [] as CcusageGroupData[] };
+let ccusageCache: CcusageCache = { '1d': { ...emptyCcusagePeriod }, '7d': { ...emptyCcusagePeriod }, '30d': { ...emptyCcusagePeriod }, all: { ...emptyCcusagePeriod }, lastRefresh: 0 };
+
+function ccusageSinceDate(daysAgo: number): string {
+  const d = new Date(Date.now() - daysAgo * 86400000);
+  return d.toISOString().slice(0, 10).replace(/-/g, '');
+}
+
+function runCcusage(claudeConfigDir: string, since?: string): Promise<CcusageDayEntry[]> {
+  return new Promise((resolve) => {
+    const args = ['ccusage', 'daily', '--json', '--breakdown', '--offline'];
+    if (since) args.push('--since', since);
+    exec(`npx ${args.join(' ')}`, { timeout: 30000, maxBuffer: 10 * 1024 * 1024, env: { ...process.env, CLAUDE_CONFIG_DIR: claudeConfigDir } }, (err, stdout) => {
+      if (err) { resolve([]); return; }
+      try {
+        const parsed = JSON.parse(stdout);
+        resolve(parsed.daily || []);
+      } catch { resolve([]); }
+    });
+  });
+}
+
+function mergeDailyEntries(allDays: CcusageDayEntry[][]): CcusageDayEntry[] {
+  const byDate: Record<string, CcusageDayEntry> = {};
+  for (const days of allDays) {
+    for (const d of days) {
+      if (!byDate[d.date]) {
+        byDate[d.date] = { ...d, modelBreakdowns: d.modelBreakdowns.map(mb => ({ ...mb })), modelsUsed: [...d.modelsUsed] };
+      } else {
+        const t = byDate[d.date];
+        t.inputTokens += d.inputTokens;
+        t.outputTokens += d.outputTokens;
+        t.cacheCreationTokens += d.cacheCreationTokens;
+        t.cacheReadTokens += d.cacheReadTokens;
+        t.totalTokens += d.totalTokens;
+        t.totalCost += d.totalCost;
+        for (const m of d.modelsUsed) { if (!t.modelsUsed.includes(m)) t.modelsUsed.push(m); }
+        for (const mb of d.modelBreakdowns) {
+          const existing = t.modelBreakdowns.find(e => e.modelName === mb.modelName);
+          if (existing) {
+            existing.cost += mb.cost;
+            existing.inputTokens += mb.inputTokens;
+            existing.outputTokens += mb.outputTokens;
+            existing.cacheReadTokens += mb.cacheReadTokens;
+            existing.cacheCreationTokens += mb.cacheCreationTokens;
+          } else {
+            t.modelBreakdowns.push({ ...mb });
+          }
+        }
+      }
+    }
+  }
+  return Object.values(byDate).sort((a, b) => a.date.localeCompare(b.date));
+}
+
+async function refreshCcusageCache(): Promise<void> {
+  const sessionsDir = join(getDataDir(), 'v2-sessions');
+  if (!existsSync(sessionsDir)) return;
+
+  const nameMap = new Map<string, string>();
+  if (db) {
+    try {
+      const groups = db.prepare('SELECT id, name FROM agent_groups').all() as { id: string; name: string }[];
+      for (const g of groups) nameMap.set(g.id, g.name);
+    } catch { /* ignore */ }
+  }
+
+  let agDirs: string[];
+  try { agDirs = readdirSync(sessionsDir).filter((d) => d.startsWith('ag-')); } catch { return; }
+
+  const today = ccusageSinceDate(0);
+  const week = ccusageSinceDate(7);
+  const month = ccusageSinceDate(30);
+
+  const result: CcusageCache = {
+    '1d': { combined: [], byGroup: [] },
+    '7d': { combined: [], byGroup: [] },
+    '30d': { combined: [], byGroup: [] },
+    all: { combined: [], byGroup: [] },
+    lastRefresh: Date.now(),
+  };
+
+  const allByPeriod: { '1d': CcusageDayEntry[][]; '7d': CcusageDayEntry[][]; '30d': CcusageDayEntry[][]; all: CcusageDayEntry[][] } = { '1d': [], '7d': [], '30d': [], all: [] };
+
+  for (const agDir of agDirs) {
+    const claudeShared = join(sessionsDir, agDir, '.claude-shared');
+    if (!existsSync(join(claudeShared, 'projects'))) continue;
+    const groupName = nameMap.get(agDir) || agDir;
+
+    const [d1, d7, d30, all] = await Promise.all([
+      runCcusage(claudeShared, today),
+      runCcusage(claudeShared, week),
+      runCcusage(claudeShared, month),
+      runCcusage(claudeShared),
+    ]);
+
+    allByPeriod['1d'].push(d1);
+    allByPeriod['7d'].push(d7);
+    allByPeriod['30d'].push(d30);
+    allByPeriod.all.push(all);
+
+    for (const [period, data] of [['1d', d1], ['7d', d7], ['30d', d30], ['all', all]] as const) {
+      result[period].byGroup.push({ groupId: agDir, groupName, daily: data });
+    }
+  }
+
+  result['1d'].combined = mergeDailyEntries(allByPeriod['1d']);
+  result['7d'].combined = mergeDailyEntries(allByPeriod['7d']);
+  result['30d'].combined = mergeDailyEntries(allByPeriod['30d']);
+  result.all.combined = mergeDailyEntries(allByPeriod.all);
+
+  ccusageCache = result;
+}
+setTimeout(() => { refreshCcusageCache(); }, 5000);
+const ccusageTimer = setInterval(() => { refreshCcusageCache(); }, 120000);
+ccusageTimer.unref?.();
+
+// ---------- 24h message activity cache ----------
+interface ActivityBucket {
+  hour: string;
+  inbound: number;
+  outbound: number;
+}
+let activityDataCache: ActivityBucket[] | null = null;
+
+function refreshActivityData(): void {
+  const sessionsDir = join(getDataDir(), 'v2-sessions');
+  if (!existsSync(sessionsDir)) { activityDataCache = null; return; }
+
+  const now = Date.now();
+  const buckets: Record<string, { inbound: number; outbound: number }> = {};
+  for (let i = 0; i < 24; i++) {
+    const key = new Date(now - i * 3600000).toISOString().slice(0, 13);
+    buckets[key] = { inbound: 0, outbound: 0 };
+  }
+  const cutoff = new Date(now - 86400000).toISOString();
+
+  let agDirs: string[];
+  try { agDirs = readdirSync(sessionsDir).filter((d) => d.startsWith('ag-')); } catch { return; }
+
+  for (const agDir of agDirs) {
+    const agPath = join(sessionsDir, agDir);
+    let sessDirs: string[];
+    try { sessDirs = readdirSync(agPath).filter((d) => d.startsWith('sess-')); } catch { continue; }
+    for (const sessDir of sessDirs) {
+      for (const [dbName, direction] of [['inbound.db', 'inbound'], ['outbound.db', 'outbound']] as const) {
+        const dbPath = join(agPath, sessDir, dbName);
+        if (!existsSync(dbPath)) continue;
+        let sdb: InstanceType<typeof Database> | null = null;
+        try {
+          sdb = new Database(dbPath, { readonly: true });
+          sdb.pragma('busy_timeout = 1000');
+          const table = direction === 'outbound' ? 'messages_out' : 'messages_in';
+          const rows = sdb.prepare(`SELECT timestamp FROM ${table} WHERE timestamp > ?`).all(cutoff) as { timestamp: string }[];
+          for (const row of rows) {
+            const key = row.timestamp.slice(0, 13);
+            if (buckets[key]) buckets[key][direction]++;
+          }
+        } catch { /* skip */ } finally {
+          try { sdb?.close(); } catch { /* ignore */ }
+        }
+      }
+    }
+  }
+
+  activityDataCache = Object.entries(buckets)
+    .map(([hour, counts]) => ({ hour, ...counts }))
+    .sort((a, b) => a.hour.localeCompare(b.hour));
+}
+refreshActivityData();
+const activityTimer = setInterval(refreshActivityData, 30000);
+activityTimer.unref?.();
+
+// ---------- Users data collection ----------
+interface UserData {
+  id: string;
+  kind: string;
+  display_name: string | null;
+  privilege: string;
+  roles: { role: string; agent_group_id: string | null; agent_group_name: string | null }[];
+  memberships: { agent_group_id: string; agent_group_name: string }[];
+  dmChannels: { channel_type: string }[];
+}
+
+function collectUsersData(): UserData[] {
+  if (!db) return [];
+  try {
+    const users = db.prepare('SELECT id, kind, display_name, created_at FROM users').all() as any[];
+    return users.map((u) => {
+      const roles = db!.prepare('SELECT role, agent_group_id FROM user_roles WHERE user_id = ?').all(u.id) as any[];
+      const memberships = db!.prepare(
+        `SELECT agm.agent_group_id, ag.name as agent_group_name
+         FROM agent_group_members agm
+         JOIN agent_groups ag ON ag.id = agm.agent_group_id
+         WHERE agm.user_id = ?`
+      ).all(u.id) as any[];
+      const dms = db!.prepare('SELECT channel_type FROM user_dms WHERE user_id = ?').all(u.id) as any[];
+
+      const rolesWithNames = roles.map((r: any) => {
+        let agName: string | null = null;
+        if (r.agent_group_id) {
+          const ag = db!.prepare('SELECT name FROM agent_groups WHERE id = ?').get(r.agent_group_id) as any;
+          agName = ag?.name || null;
+        }
+        return { role: r.role, agent_group_id: r.agent_group_id, agent_group_name: agName };
+      });
+
+      let privilege = 'none';
+      if (roles.some((r: any) => r.role === 'owner')) privilege = 'owner';
+      else if (roles.some((r: any) => r.role === 'admin' && !r.agent_group_id)) privilege = 'global_admin';
+      else if (roles.some((r: any) => r.role === 'admin')) privilege = 'admin';
+      else if (memberships.length > 0) privilege = 'member';
+
+      return {
+        id: u.id,
+        kind: u.kind,
+        display_name: u.display_name,
+        privilege,
+        roles: rolesWithNames,
+        memberships,
+        dmChannels: dms,
+      };
+    });
+  } catch { return []; }
+}
+
+// ---------- Channel status collection ----------
+interface ChannelStatusData {
+  channelType: string;
+  configured: boolean;
+  groupCount: number;
+  groups: { id: string; name: string | null; platform_id: string; is_group: number; agentGroups: string[] }[];
+}
+
+function collectChannelStatus(): ChannelStatusData[] {
+  if (!db) return [];
+  try {
+    const channelsDir = resolve(process.env.NANOCLAW_DASHBOARD_CHANNELS_DIR || join(getProjectRoot(), 'src', 'channels'));
+    const exclude = new Set(['index.ts', 'registry.ts', 'registry.test.ts', 'channel-registry.ts', 'channel-registry.test.ts', 'adapter.ts', 'chat-sdk-bridge.ts', 'chat-sdk-bridge.test.ts', 'ask-question.ts', 'cli.ts']);
+    const results: ChannelStatusData[] = [];
+    if (!existsSync(channelsDir)) return [];
+
+    const prefixMap: Record<string, string> = { telegram: 'tg:', whatsapp: 'wa:', discord: 'disc:', slack: 'slack:', signal: 'sig:', matrix: 'mx:', gmail: 'gmail:', dashboard: 'dashboard:' };
+
+    for (const file of readdirSync(channelsDir)) {
+      if (!file.endsWith('.ts') || exclude.has(file) || file.includes('.test.')) continue;
+      const name = file.replace('.ts', '');
+      const prefix = prefixMap[name] || `${name}:`;
+      const groups: ChannelStatusData['groups'] = [];
+      try {
+        const rows = db.prepare(
+          `SELECT mg.id, mg.platform_id, mg.name, mg.is_group, ag.name as ag_name
+           FROM messaging_groups mg
+           JOIN messaging_group_agents mga ON mga.messaging_group_id = mg.id
+           JOIN agent_groups ag ON ag.id = mga.agent_group_id
+           WHERE mg.platform_id LIKE ?`
+        ).all(`${prefix}%`) as any[];
+        const byMg = new Map<string, { id: string; name: string | null; platform_id: string; is_group: number; agentGroups: string[] }>();
+        for (const r of rows) {
+          if (!byMg.has(r.id)) byMg.set(r.id, { id: r.id, name: r.name, platform_id: r.platform_id, is_group: r.is_group, agentGroups: [] });
+          byMg.get(r.id)!.agentGroups.push(r.ag_name);
+        }
+        groups.push(...byMg.values());
+      } catch { /* ignore */ }
+      results.push({ channelType: name, configured: groups.length > 0, groupCount: groups.length, groups });
+    }
+
+    return results.sort((a, b) => a.channelType.localeCompare(b.channelType));
+  } catch { return []; }
+}
+
 // ---------- Manifest summary cache (composition breakdown) ----------
 interface ManifestSummary {
   typeName: string;
@@ -1677,6 +2040,9 @@ export function resetTransientDashboardStateForTests(): void {
   db = null;
   writeDb = null;
   hookEventsDb = null;
+  ccusageCache = { '1d': { ...emptyCcusagePeriod }, '7d': { ...emptyCcusagePeriod }, '30d': { ...emptyCcusagePeriod }, all: { ...emptyCcusagePeriod }, lastRefresh: 0 };
+  groupTokenCache = {};
+  activityDataCache = null;
 }
 
 /** Force-open the readonly DB handle for tests (avoids waiting on broadcast timer). */
@@ -3130,6 +3496,40 @@ export async function handleRequest(
     }
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify(result));
+    return;
+  }
+
+  // API: token metrics via ccusage (supports ?period=1d|7d|30d|all)
+  if (url.pathname === '/api/token-metrics') {
+    if (!requireAuth(req, res)) return;
+    const period = (url.searchParams.get('period') || 'all') as keyof typeof ccusageCache;
+    const periodData = ccusageCache[period] || ccusageCache.all || emptyCcusagePeriod;
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ daily: periodData.combined, byCoworker: periodData.byGroup, period, lastRefresh: ccusageCache.lastRefresh }));
+    return;
+  }
+
+  // API: 24h message activity
+  if (url.pathname === '/api/activity') {
+    if (!requireAuth(req, res)) return;
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify(activityDataCache || []));
+    return;
+  }
+
+  // API: users with privilege hierarchy
+  if (url.pathname === '/api/users') {
+    if (!requireAuth(req, res)) return;
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify(collectUsersData()));
+    return;
+  }
+
+  // API: channel status
+  if (url.pathname === '/api/channel-status') {
+    if (!requireAuth(req, res)) return;
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify(collectChannelStatus()));
     return;
   }
 

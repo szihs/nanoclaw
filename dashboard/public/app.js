@@ -2106,6 +2106,7 @@ document.querySelectorAll('.admin-pill').forEach((pill) => {
   });
 });
 
+
 function loadAdminPanel(name) {
   const loaders = {
     overview: loadAdminOverview,
@@ -2120,6 +2121,7 @@ function loadAdminPanel(name) {
     channels: loadAdminChannels,
     config: loadAdminConfig,
     infra: loadAdminInfra,
+    metrics: loadAllMetrics,
   };
   if (loaders[name]) loaders[name]();
 }
@@ -4622,6 +4624,278 @@ window.importMcpServers = function() {
     }).catch(e => alert('Import failed: ' + e.message));
   } catch { alert('Invalid JSON. Paste a valid mcpServers config.'); }
 };
+
+// ============================================================
+// Metrics Tab — Token Usage, Activity, Users, Channels
+// ============================================================
+
+function fmtNum(n) {
+  if (n == null) return '-';
+  if (n >= 1e9) return (n / 1e9).toFixed(1) + 'B';
+  if (n >= 1e6) return (n / 1e6).toFixed(1) + 'M';
+  if (n >= 1e3) return (n / 1e3).toFixed(1) + 'K';
+  return n.toLocaleString();
+}
+
+const metricsState = { loaded: new Set(), tokenPeriod: 'all' };
+
+// --- Token Metrics (ccusage) ---
+async function loadMetricsTokens(period) {
+  if (period) metricsState.tokenPeriod = period;
+  const p = metricsState.tokenPeriod;
+  const el = document.getElementById('metrics-tokens-content');
+  try {
+    const res = await fetch(`/api/token-metrics?period=${p}`);
+    if (!res.ok) throw new Error('fetch failed');
+    const data = await res.json();
+    metricsState.loaded.add('tokens');
+    renderMetricsTokens(el, data);
+  } catch { el.innerHTML = '<div class="admin-empty">Failed to load token metrics</div>'; }
+}
+
+function fmtUsd(n) {
+  if (n == null || n === 0) return '$0.00';
+  if (n < 0.01) return '<$0.01';
+  return '$' + n.toFixed(2);
+}
+
+function renderMetricsTokens(el, data) {
+  const days = data.daily || [];
+  const p = data.period || metricsState.tokenPeriod;
+
+  // Aggregate across all days in the period
+  let totalCost = 0, totalInput = 0, totalOutput = 0, totalCacheRead = 0, totalCacheCreation = 0, totalTokens = 0;
+  const modelAgg = {};
+  for (const day of days) {
+    totalCost += day.totalCost || 0;
+    totalInput += day.inputTokens || 0;
+    totalOutput += day.outputTokens || 0;
+    totalCacheRead += day.cacheReadTokens || 0;
+    totalCacheCreation += day.cacheCreationTokens || 0;
+    totalTokens += day.totalTokens || 0;
+    for (const mb of (day.modelBreakdowns || [])) {
+      if (!modelAgg[mb.modelName]) modelAgg[mb.modelName] = { cost: 0, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0 };
+      modelAgg[mb.modelName].cost += mb.cost || 0;
+      modelAgg[mb.modelName].inputTokens += mb.inputTokens || 0;
+      modelAgg[mb.modelName].outputTokens += mb.outputTokens || 0;
+      modelAgg[mb.modelName].cacheReadTokens += mb.cacheReadTokens || 0;
+      modelAgg[mb.modelName].cacheCreationTokens += mb.cacheCreationTokens || 0;
+    }
+  }
+  const cacheHitPct = (totalInput + totalCacheRead + totalCacheCreation) > 0
+    ? Math.round((totalCacheRead / (totalInput + totalCacheRead + totalCacheCreation)) * 100) : 0;
+
+  // Period filter buttons
+  const periods = [['1d', '24h'], ['7d', '7 days'], ['30d', '30 days'], ['all', 'All time']];
+  const filterHtml = periods.map(([val, label]) =>
+    `<button style="padding:4px 12px;border-radius:4px;border:1px solid ${p === val ? '#3B82F6' : '#334155'};background:${p === val ? '#3B82F6' : 'transparent'};color:${p === val ? '#fff' : '#94A3B8'};cursor:pointer;font-size:12px" data-metrics-period="${val}">${label}</button>`
+  ).join(' ');
+
+  let html = `<div style="display:flex;gap:6px;margin-bottom:12px">${filterHtml}</div>`;
+
+  html += `
+    <div class="admin-stat-grid">
+      <div class="admin-stat-card"><div class="num" style="color:#10B981">${fmtUsd(totalCost)}</div><div class="label">Total Cost</div></div>
+      <div class="admin-stat-card"><div class="num">${fmtNum(totalTokens)}</div><div class="label">Total Tokens</div></div>
+      <div class="admin-stat-card"><div class="num">${fmtNum(totalInput)}</div><div class="label">Input</div></div>
+      <div class="admin-stat-card"><div class="num">${fmtNum(totalOutput)}</div><div class="label">Output</div></div>
+      <div class="admin-stat-card"><div class="num">${fmtNum(totalCacheRead)}</div><div class="label">Cache Read</div></div>
+      <div class="admin-stat-card"><div class="num">${cacheHitPct}%</div><div class="label">Cache Hit Rate</div></div>
+    </div>`;
+
+  // By Model table
+  const models = Object.entries(modelAgg);
+  if (models.length > 0) {
+    html += `<h4 style="margin:16px 0 8px;color:#94A3B8">By Model</h4>
+    <table class="admin-table"><thead><tr><th>Model</th><th>Cost</th><th>Input</th><th>Output</th><th>Cache Read</th><th>Cache Create</th></tr></thead><tbody>`;
+    for (const [model, m] of models.sort((a, b) => b[1].cost - a[1].cost)) {
+      html += `<tr><td><code>${esc(model)}</code></td><td style="color:#10B981">${fmtUsd(m.cost)}</td><td>${fmtNum(m.inputTokens)}</td><td>${fmtNum(m.outputTokens)}</td><td>${fmtNum(m.cacheReadTokens)}</td><td>${fmtNum(m.cacheCreationTokens)}</td></tr>`;
+    }
+    html += '</tbody></table>';
+  }
+
+  // Daily breakdown table
+  if (days.length > 0) {
+    html += `<h4 style="margin:16px 0 8px;color:#94A3B8">Daily Breakdown</h4>
+    <table class="admin-table"><thead><tr><th>Date</th><th>Cost</th><th>Input</th><th>Output</th><th>Cache Read</th><th>Cache Create</th><th>Total</th><th>Models</th></tr></thead><tbody>`;
+    for (const day of [...days].reverse()) {
+      html += `<tr><td>${esc(day.date)}</td><td style="color:#10B981">${fmtUsd(day.totalCost)}</td><td>${fmtNum(day.inputTokens)}</td><td>${fmtNum(day.outputTokens)}</td><td>${fmtNum(day.cacheReadTokens)}</td><td>${fmtNum(day.cacheCreationTokens)}</td><td>${fmtNum(day.totalTokens)}</td><td><code style="font-size:10px">${esc((day.modelsUsed || []).join(', '))}</code></td></tr>`;
+    }
+    html += '</tbody></table>';
+  }
+
+  // By Coworker cost breakdown
+  const coworkers = data.byCoworker || [];
+  if (coworkers.length > 0) {
+    const cwSummary = coworkers.map(cw => {
+      let cost = 0, tokens = 0, input = 0, output = 0, cacheRead = 0, cacheCreate = 0;
+      for (const d of cw.daily) {
+        cost += d.totalCost || 0;
+        tokens += d.totalTokens || 0;
+        input += d.inputTokens || 0;
+        output += d.outputTokens || 0;
+        cacheRead += d.cacheReadTokens || 0;
+        cacheCreate += d.cacheCreationTokens || 0;
+      }
+      const models = [...new Set(cw.daily.flatMap(d => d.modelsUsed || []))];
+      return { name: cw.groupName, cost, tokens, input, output, cacheRead, cacheCreate, models };
+    }).sort((a, b) => b.cost - a.cost);
+
+    html += `<h4 style="margin:16px 0 8px;color:#94A3B8">By Coworker</h4>
+    <table class="admin-table"><thead><tr><th>Coworker</th><th>Cost</th><th>Tokens</th><th>Input</th><th>Output</th><th>Cache Read</th><th>Models</th></tr></thead><tbody>`;
+    for (const cw of cwSummary) {
+      html += `<tr><td>${esc(cw.name)}</td><td style="color:#10B981">${fmtUsd(cw.cost)}</td><td>${fmtNum(cw.tokens)}</td><td>${fmtNum(cw.input)}</td><td>${fmtNum(cw.output)}</td><td>${fmtNum(cw.cacheRead)}</td><td><code style="font-size:10px">${esc(cw.models.join(', '))}</code></td></tr>`;
+    }
+    html += '</tbody></table>';
+  }
+
+  if (days.length === 0 && coworkers.length === 0) html += '<div class="admin-empty">No usage data yet. Data appears after agent container sessions.</div>';
+  el.innerHTML = html;
+}
+
+// Wire period filter clicks via event delegation
+document.getElementById('admin-metrics-content')?.addEventListener('click', (e) => {
+  const btn = e.target.closest('[data-metrics-period]');
+  if (btn) loadMetricsTokens(btn.dataset.metricsPeriod);
+});
+
+// --- 24h Activity ---
+async function loadMetricsActivity() {
+  const el = document.getElementById('metrics-activity-content');
+  try {
+    const res = await fetch('/api/activity');
+    if (!res.ok) throw new Error('fetch failed');
+    const data = await res.json();
+    metricsState.loaded.add('activity');
+    renderMetricsActivity(data);
+  } catch { el.innerHTML = '<div class="admin-empty">Failed to load activity data</div>'; }
+}
+
+function renderMetricsActivity(data) {
+  const canvas = document.getElementById('metrics-activity-canvas');
+  if (!canvas?.parentElement?.clientWidth) return;
+  canvas.width = canvas.parentElement.clientWidth - 4;
+  canvas.height = 160;
+  const ctx = canvas.getContext('2d');
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+  const legend = document.getElementById('metrics-activity-legend');
+
+  if (!data || data.length === 0) {
+    ctx.fillStyle = '#64748B';
+    ctx.font = '12px "Courier New", monospace';
+    ctx.fillText('No activity data yet', 10, 80);
+    return;
+  }
+
+  const maxVal = Math.max(...data.map(d => Math.max(d.inbound, d.outbound)), 1);
+  const pairW = Math.max(8, (canvas.width - 40) / data.length - 2);
+  const halfBar = pairW / 2 - 1;
+  const chartH = canvas.height - 24;
+
+  for (let i = 0; i < data.length; i++) {
+    const x = 20 + i * (pairW + 2);
+    const inH = (data[i].inbound / maxVal) * chartH;
+    const outH = (data[i].outbound / maxVal) * chartH;
+
+    // Side-by-side: inbound (blue) left, outbound (green) right
+    ctx.fillStyle = '#3B82F680';
+    ctx.fillRect(x, chartH - inH, halfBar, inH);
+    ctx.fillStyle = '#10B98180';
+    ctx.fillRect(x + halfBar + 1, chartH - outH, halfBar, outH);
+  }
+
+  // Labels
+  ctx.fillStyle = '#64748B';
+  ctx.font = '9px "Courier New", monospace';
+  ctx.fillText('24h ago', 20, canvas.height - 2);
+  ctx.fillText('now', canvas.width - 30, canvas.height - 2);
+  ctx.fillText('max: ' + maxVal, canvas.width - 60, 10);
+
+  if (legend) {
+    const totalIn = data.reduce((s, d) => s + d.inbound, 0);
+    const totalOut = data.reduce((s, d) => s + d.outbound, 0);
+    legend.innerHTML = `<span style="color:#3B82F6;margin-right:12px">&#9632; Inbound: ${totalIn}</span><span style="color:#10B981">&#9632; Outbound: ${totalOut}</span>`;
+  }
+}
+
+// --- Users ---
+async function loadMetricsUsers() {
+  const el = document.getElementById('metrics-users-content');
+  try {
+    const res = await fetch('/api/users');
+    if (!res.ok) throw new Error('fetch failed');
+    const data = await res.json();
+    metricsState.loaded.add('users');
+    renderMetricsUsers(el, data);
+  } catch { el.innerHTML = '<div class="admin-empty">Failed to load users</div>'; }
+}
+
+function renderMetricsUsers(el, users) {
+  if (!users || users.length === 0) {
+    el.innerHTML = '<div class="admin-empty">No users configured</div>';
+    return;
+  }
+
+  const privColors = { owner: '#EF4444', global_admin: '#F59E0B', admin: '#F97316', member: '#10B981', none: '#64748B' };
+  let html = `<table class="admin-table"><thead><tr><th>Name</th><th>Kind</th><th>Privilege</th><th>Memberships</th><th>DM Channels</th></tr></thead><tbody>`;
+  for (const u of users) {
+    const badge = `<span style="color:${privColors[u.privilege] || '#64748B'};font-weight:600">${esc(u.privilege)}</span>`;
+    const mems = u.memberships.map(m => esc(m.agent_group_name)).join(', ') || '-';
+    const dms = u.dmChannels.map(d => esc(d.channel_type)).join(', ') || '-';
+    html += `<tr><td>${esc(u.display_name || u.id)}</td><td>${esc(u.kind)}</td><td>${badge}</td><td>${mems}</td><td>${dms}</td></tr>`;
+  }
+  html += '</tbody></table>';
+  el.innerHTML = html;
+}
+
+// --- Channels ---
+async function loadMetricsChannels() {
+  const el = document.getElementById('metrics-channels-content');
+  try {
+    const res = await fetch('/api/channel-status');
+    if (!res.ok) throw new Error('fetch failed');
+    const data = await res.json();
+    metricsState.loaded.add('channels');
+    renderMetricsChannels(el, data);
+  } catch { el.innerHTML = '<div class="admin-empty">Failed to load channel status</div>'; }
+}
+
+function renderMetricsChannels(el, channels) {
+  if (!channels || channels.length === 0) {
+    el.innerHTML = '<div class="admin-empty">No channels found in src/channels/</div>';
+    return;
+  }
+
+  let html = '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:12px">';
+  for (const ch of channels) {
+    const dot = ch.configured ? '<span style="color:#10B981">&#9679;</span>' : '<span style="color:#64748B">&#9679;</span>';
+    const status = ch.configured ? '<span style="color:#10B981;font-size:11px">Connected</span>' : '<span style="color:#64748B;font-size:11px">Not configured</span>';
+    let groupList = '';
+    if (ch.groups.length > 0) {
+      groupList = '<div style="margin-top:6px;font-size:11px;color:#94A3B8">' +
+        ch.groups.map(g => {
+          const label = esc(g.name || g.platform_id) + (g.is_group ? ' (group)' : '');
+          const agents = g.agentGroups ? g.agentGroups.map(a => esc(a)).join(', ') : '';
+          return agents ? `${label} → ${agents}` : label;
+        }).join('<br>') + '</div>';
+    }
+    html += `<div style="background:#1E293B;border:1px solid #334155;border-radius:8px;padding:12px">
+      <div style="display:flex;align-items:center;gap:8px">${dot}<strong style="color:#E2E8F0">${esc(ch.channelType)}</strong>${status}</div>
+      <div style="color:#94A3B8;font-size:12px;margin-top:4px">${ch.groupCount} messaging group${ch.groupCount !== 1 ? 's' : ''}</div>
+      ${groupList}
+    </div>`;
+  }
+  html += '</div>';
+  el.innerHTML = html;
+}
+
+function loadAllMetrics() {
+  loadMetricsTokens();
+  loadMetricsActivity();
+  loadMetricsUsers();
+  loadMetricsChannels();
+}
 
 // Custom CSS zoom removed — use browser zoom (Ctrl+/- or Cmd+/-) instead.
 // Clean up stale localStorage from previous custom zoom.
