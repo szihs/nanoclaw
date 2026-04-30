@@ -505,6 +505,25 @@ function buildMounts(
   const sessDir = sessionDir(agentGroup.id, session.id);
   const groupDir = path.resolve(GROUPS_DIR, agentGroup.folder);
 
+  // Convenience: drop a symlink at groups/<folder>/.workflow-state.json pointing
+  // at the per-session state file. Lets the user inspect plan/critique state from
+  // the visible group folder instead of digging into data/v2-sessions/.../sess-*/.claude/.
+  // The symlink uses an absolute host path because it's only ever read host-side
+  // (the container has the real file at /workspace/.claude/workflow-state.json).
+  try {
+    const linkPath = path.join(groupDir, '.workflow-state.json');
+    const targetPath = path.join(sessDir, '.claude', 'workflow-state.json');
+    if (fs.existsSync(linkPath) && !fs.lstatSync(linkPath).isSymbolicLink()) {
+      // Stale regular file from a prior run — replace with symlink.
+      fs.unlinkSync(linkPath);
+    }
+    if (!fs.existsSync(linkPath)) {
+      fs.symlinkSync(targetPath, linkPath);
+    }
+  } catch (err) {
+    log.debug('workflow-state symlink skipped', { folder: agentGroup.folder, err });
+  }
+
   // Session folder at /workspace (contains inbound.db, outbound.db, outbox/, .claude/)
   mounts.push({ hostPath: sessDir, containerPath: '/workspace', readonly: false });
 
@@ -611,9 +630,8 @@ function buildMounts(
 
     // Overlay hook injection: enforce plan/critique gates via runtime hooks.
     // Reads the resolved manifest to see which overlays apply to this type.
-    // Skipped entirely when disable_overlays is set on the agent group.
     const hooksDir = path.join(process.cwd(), 'container', 'hooks');
-    if (fs.existsSync(hooksDir) && !agentGroup.disable_overlays) {
+    if (fs.existsSync(hooksDir)) {
       const { overlayNames, workflows: wfManifest } = resolveTypeManifest(agentGroup);
       const hasCritique = overlayNames.includes('critique-overlay');
       // Plan gate is now part of critique-overlay (insert-before: [patch]).
@@ -657,7 +675,7 @@ function buildMounts(
         // the blocking hook for critique_required enforcement).
         if (!hasCmd('PreToolUse', 'plan-gate.sh')) {
           settings.hooks.PreToolUse.push({
-            matcher: 'Edit|Write|Bash',
+            matcher: 'Edit|Write|MultiEdit|NotebookEdit',
             hooks: [
               {
                 type: 'command',
@@ -674,11 +692,25 @@ function buildMounts(
             hooks: [{ type: 'command', command: 'bash /app/hooks/plan-tracker.sh', timeout: 5 }],
           });
         }
+        // critique-record-gate enforces the disk-write half of the
+        // critique-overlay protocol: blocks Edit/Write on source files until
+        // the agent has recorded the verdict to /workspace/agent/critiques/.
+        if (!hasCmd('PreToolUse', 'critique-record-gate.sh')) {
+          settings.hooks.PreToolUse.push({
+            matcher: 'Edit|Write|MultiEdit|NotebookEdit',
+            hooks: [{ type: 'command', command: 'bash /app/hooks/critique-record-gate.sh', timeout: 5 }],
+          });
+        }
       }
       if (hasCritique) {
-        if (!settings.hooks.SubagentStart) settings.hooks.SubagentStart = [];
-        if (!hasCmd('SubagentStart', 'critique-tracker.sh')) {
-          settings.hooks.SubagentStart.push({
+        // Track every successful mcp__codex__codex call as a critique round.
+        // PostToolUse fires reliably for tool_use; SubagentStart was unreliable
+        // (agent_type field not always populated) and obsolete now that
+        // codex-critique is invoked directly via Skill, not as an Agent subagent.
+        if (!settings.hooks.PostToolUse) settings.hooks.PostToolUse = [];
+        if (!hasCmd('PostToolUse', 'critique-tracker.sh')) {
+          settings.hooks.PostToolUse.push({
+            matcher: 'mcp__codex__codex|mcp__codex__codex-reply',
             hooks: [{ type: 'command', command: 'bash /app/hooks/critique-tracker.sh', timeout: 5 }],
           });
         }
@@ -687,7 +719,7 @@ function buildMounts(
         if (!settings.hooks.PostToolUse) settings.hooks.PostToolUse = [];
         if (!hasCmd('PostToolUse', 'edit-counter.sh')) {
           settings.hooks.PostToolUse.push({
-            matcher: 'Edit|Write|Bash',
+            matcher: 'Edit|Write|MultiEdit|NotebookEdit',
             hooks: [{ type: 'command', command: 'bash /app/hooks/edit-counter.sh', timeout: 5 }],
           });
         }
@@ -738,16 +770,14 @@ async function buildContainerArgs(
 
   // GPU passthrough: expose host GPU if available and Docker nvidia runtime is configured.
   // Check /etc/docker/daemon.json for nvidia runtime to avoid container startup failures.
+  // GPU passthrough — modern Docker handles both nvidia-runtime AND CDI under
+  // the same `--gpus all` flag, so we don't need to peek at /etc/docker/daemon.json
+  // (which is often permission-denied to non-root users and silently fails).
+  // Detect via host nvidia-smi presence or explicit ENABLE_GPU=1.
   if (process.env.ENABLE_GPU === '1' || fs.existsSync('/usr/bin/nvidia-smi')) {
-    try {
-      const daemonJson = JSON.parse(fs.readFileSync('/etc/docker/daemon.json', 'utf-8'));
-      if (daemonJson.runtimes?.nvidia) {
-        args.push('--runtime', 'nvidia');
-        args.push('-e', 'NVIDIA_VISIBLE_DEVICES=all');
-      }
-    } catch {
-      // daemon.json missing or unreadable — skip GPU passthrough
-    }
+    args.push('--gpus', 'all');
+    args.push('-e', 'NVIDIA_VISIBLE_DEVICES=all');
+    args.push('-e', 'NVIDIA_DRIVER_CAPABILITIES=compute,utility,graphics');
   }
 
   // Environment
@@ -758,15 +788,15 @@ async function buildContainerArgs(
   args.push('-e', 'SESSION_OUTBOUND_DB_PATH=/workspace/outbound.db');
   args.push('-e', 'SESSION_HEARTBEAT_PATH=/workspace/.heartbeat');
 
-  // Codex MCP support: mount host config.toml and set placeholder API key
-  const codexConfigPaths = [
-    path.join(process.env.HOME || '/home/ubuntu', '.codex', 'config.toml'),
-    path.join(process.env.HOME || '/home/ubuntu', '.config', 'codex', 'config.toml'),
-  ];
-  for (const codexConfig of codexConfigPaths) {
-    if (fs.existsSync(codexConfig)) {
-      args.push(...readonlyMountArgs(codexConfig, '/tmp/codex-config.toml'));
-      break;
+  // Intent router needs the same OVERLAY_WORKFLOWS string the SDK hook gets,
+  // so the agent-runner's poll-loop can run the router on follow-up pushes
+  // (the SDK fires UserPromptSubmit only on the initial query; mid-query
+  // query.push() does not, so the agent-runner has to invoke the hook itself).
+  {
+    const { workflows: wfList } = resolveTypeManifest(agentGroup);
+    if (wfList.length > 0) {
+      const routingTable = wfList.map((w) => `${w.name}:${w.description.slice(0, 60).replace(/[;:]/g, ' ')}`).join(';');
+      args.push('-e', `OVERLAY_WORKFLOWS=${routingTable}`);
     }
   }
 
@@ -916,9 +946,30 @@ async function buildContainerArgs(
   const imageTag = containerConfig.imageTag || CONTAINER_IMAGE;
   args.push(imageTag);
 
+  // Codex CLI needs the full [model_providers.<provider>] block in a real
+  // config.toml — `-c` overrides reliably modify existing fields but don't
+  // always *define* new TOML sections. Generate a minimal config from
+  // container env vars in the entrypoint, then exec the agent-runner.
+  // Auth still flows through OneCLI MITM via env_key=NVIDIA_API_KEY.
+  // Note: heredoc delimiter is UNquoted (TOML_EOF, not 'TOML_EOF') so bash
+  // expands the ${VAR:-default} references at container start.
   args.push(
     '-c',
-    'if [ -f /tmp/codex-config.toml ]; then mkdir -p ~/.codex && cp /tmp/codex-config.toml ~/.codex/config.toml; fi && exec bun run /app/src/index.ts',
+    `mkdir -p ~/.codex && cat > ~/.codex/config.toml <<TOML_EOF
+model_provider = "\${CODEX_MODEL_PROVIDER:-nvinference}"
+model = "\${CODEX_MODEL:-openai/openai/gpt-5.5}"
+model_reasoning_effort = "\${CODEX_REASONING_EFFORT:-xhigh}"
+
+[model_providers.\${CODEX_MODEL_PROVIDER:-nvinference}]
+name = "\${CODEX_MODEL_PROVIDER:-nvinference}"
+wire_api = "\${CODEX_WIRE_API:-responses}"
+base_url = "\${CODEX_BASE_URL:-https://inference-api.nvidia.com/v1}"
+env_key = "NVIDIA_API_KEY"
+
+[projects."/workspace/agent"]
+trust_level = "trusted"
+TOML_EOF
+exec bun run /app/src/index.ts`,
   );
 
   return args;

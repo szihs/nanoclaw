@@ -12,9 +12,19 @@ INPUT=$(cat)
 PROMPT=$(echo "$INPUT" | jq -r '.prompt // empty')
 [ -z "$PROMPT" ] && exit 0
 
-# Skip slash commands (already routed) and system messages
+# Skip slash commands (already routed) and pure-system context injections.
+# Dashboard/A2A user messages are wrapped as `<context ...><message>...</message>`,
+# so only skip when the payload has `<context>` but NO `<message>` — those are
+# system-only injections (e.g. session restore, timezone bump) with no user text.
 echo "$PROMPT" | grep -qP '^\s*/' && exit 0
-echo "$PROMPT" | grep -q '<context' && exit 0
+if echo "$PROMPT" | grep -q '<context' && ! echo "$PROMPT" | grep -q '<message'; then
+  exit 0
+fi
+
+# Strip the wrapping tags so the LLM classifies the actual user text, not the
+# envelope. Multi-line safe via Perl. Falls back to raw prompt if no <message>.
+UNWRAPPED=$(echo "$PROMPT" | perl -0777 -ne 'print $1 if /<message[^>]*>(.*?)<\/message>/s')
+[ -n "$UNWRAPPED" ] && PROMPT="$UNWRAPPED"
 
 # Available workflows are injected by container-runner.ts as an env var.
 # Format: "investigate:Investigation/triage;implement:Code change/fix;document:Doc update;review:Review"
@@ -63,12 +73,21 @@ RESPONSE=$(curl -sf --max-time 5 \
   2>/dev/null) || exit 0
 
 # Extract the text response
-TEXT=$(echo "$RESPONSE" | jq -r '.content[0].text // empty' 2>/dev/null)
+TEXT=$(echo "$RESPONSE" | jq -r '.content[0].text // empty' 2>/dev/null || true)
 [ -z "$TEXT" ] && exit 0
 
-# Parse the JSON from the response
-WORKFLOW=$(echo "$TEXT" | jq -r '.workflow // "none"' 2>/dev/null)
-REASON=$(echo "$TEXT" | jq -r '.reason // empty' 2>/dev/null)
+# Haiku sometimes wraps the JSON in ```json ... ``` markdown fences. Strip them
+# (and any leading/trailing whitespace) before parsing, so jq doesn't choke.
+TEXT=$(echo "$TEXT" | sed -E 's/^[[:space:]]*```(json)?[[:space:]]*//; s/```[[:space:]]*$//')
+
+# Parse the JSON from the response. `|| true` so set -e doesn't kill us when
+# the response wasn't valid JSON — we'll exit cleanly via the empty-check below.
+WORKFLOW=$(echo "$TEXT" | jq -r '.workflow // "none"' 2>/dev/null || true)
+REASON=$(echo "$TEXT" | jq -r '.reason // empty' 2>/dev/null || true)
+
+# Strip a leading slash if Haiku returned `/investigate` instead of `investigate`,
+# so the AUTO-ROUTE template doesn't end up with `Start with //investigate`.
+WORKFLOW="${WORKFLOW#/}"
 
 [ "$WORKFLOW" = "none" ] && exit 0
 [ -z "$WORKFLOW" ] && exit 0

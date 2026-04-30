@@ -39,7 +39,7 @@ This overlay fires at multiple points in every workflow. The **same codex-critiq
    - **The change** — which files, what per file, why this approach, how to verify.
    - **Gap check** — spec requirements NOT addressed, and why.
 
-2. Spawn codex-critique in PLAN_REVIEW mode:
+2. Invoke `/codex-critique` in PLAN_REVIEW mode:
 ```
 Stage: PLAN_REVIEW
 Spec: [paste original task text]
@@ -61,7 +61,7 @@ Questions to answer:
 
 ## DIAGNOSIS_REVIEW (after `root-cause` or `report`)
 
-Spawn codex-critique to check whether the investigation is sound before acting on it:
+Invoke `/codex-critique` to check whether the investigation is sound before acting on it:
 
 ```
 Stage: DIAGNOSIS_REVIEW
@@ -79,7 +79,7 @@ Questions to answer:
 
 ## CODE_REVIEW (after `patch`)
 
-Spawn codex-critique to verify the implementation matches both the plan and the spec:
+Invoke `/codex-critique` to verify the implementation matches both the plan and the spec:
 
 ```
 Stage: CODE_REVIEW
@@ -98,7 +98,7 @@ Questions to answer:
 
 ## OUTPUT_REVIEW (after `draft` or `write`)
 
-Spawn codex-critique to verify the deliverable answers the original request:
+Invoke `/codex-critique` to verify the deliverable answers the original request:
 
 ```
 Stage: OUTPUT_REVIEW
@@ -115,7 +115,7 @@ Questions to answer:
 
 ## 3-Round Protocol (all stages)
 
-1. Spawn codex-critique with the stage-specific context above.
+1. Invoke `/codex-critique` with the stage-specific context above.
 2. If `must-fix` items returned → fix each item → re-spawn critique (round 2).
 3. Round 2 still has `must-fix` → fix → re-spawn (round 3).
 4. Round 3 still has `must-fix` → **STOP**. Report unresolved items and ask the user.
@@ -124,17 +124,54 @@ Questions to answer:
 
 **Invariant:** Never proceed past any gate with unresolved `must-fix` items after 3 rounds. Escalate to the user.
 
-## Record verdicts
+## Record verdicts (REQUIRED — do both, in this order)
 
-After each critique round, write the full verdict to `/workspace/agent/critiques/{{target_slug}}-round-N.md`. Keep an index at `/workspace/agent/critiques/index.md`.
+After EVERY critique round, do these two steps **in this order, no exceptions**. The runtime ENFORCES this: a `critique-record-gate` PreToolUse hook will deny any further `Edit`/`Write` on source files until step 1 lands a verdict file at `/workspace/agent/critiques/<slug>-round-N.md`. Skipping the steps does not save you time — it blocks you.
 
-## Visibility
+### Step 1 — write the verdict to disk (REQUIRED FIRST)
 
-At each gate, send a status message via `mcp__nanoclaw__send_message`:
+```bash
+mkdir -p /workspace/agent/critiques
+```
 
-- **Entering:** `"🔴 [STAGE] gate — spawning codex-critique. [1-line summary]."`
-- **Approved:** `"✅ [STAGE] round N/3 — approved. Verdict: /workspace/agent/critiques/[slug]-round-N.md."`
-- **Must-fix:** `"🟡 [STAGE] round N/3 — M must-fix items. Fixing and re-spawning."`
-- **Escalating:** `"🚨 [STAGE] — 3 rounds exhausted. Escalating to user."`
+Then `Write` (the SDK Write tool) the full reviewer output to:
 
-The reviewer reads source files directly — never let the parent agent be the sole narrator.
+```
+/workspace/agent/critiques/<slug>-round-N.md
+```
+
+Where `<slug>` matches the plan slug, and `N` is the round number from `workflow-state.json` (`.critique_rounds`). The file MUST contain:
+
+- Verdict label (one of: `approve` | `approve-with-nits` | `request-changes` | `blocked`)
+- Every `must-fix` item with `<file:line>` + rationale + recommended fix
+- Every `should-fix` item
+- Every note
+- The codex `threadId` (for round 2/3 reply linkage)
+
+Also append one line to `/workspace/agent/critiques/index.md`:
+
+```
+[STAGE] <slug> round N — <verdict> — M must-fix
+```
+
+### Step 2 — broadcast the status (REQUIRED SECOND)
+
+Use ONE of these templates exactly. Substitute only the bracketed placeholders. **Do NOT paraphrase, summarize differently, or use a different emoji.**
+
+| Event | Template (paste verbatim, fill `[…]` only) |
+|---|---|
+| Entering | `🔴 [STAGE] gate — invoking /codex-critique. [1-line summary of artifact under review].` |
+| Approved | `✅ [STAGE] round N/3 — approved. Verdict: [approve\|approve-with-nits]. Notes: [≤2 short lines, must-fix items=0]. Full: /workspace/agent/critiques/[slug]-round-N.md.` |
+| Must-fix | `🟡 [STAGE] round N/3 — M must-fix items:\n- <file>:<line> — <issue>\n- <file>:<line> — <issue>\n…\nFixing and re-invoking. Full: /workspace/agent/critiques/[slug]-round-N.md.` |
+| Escalating | `🚨 [STAGE] — 3 rounds exhausted. Unresolved must-fix:\n- <file>:<line> — <issue>\n…\nEscalating to user. Full: /workspace/agent/critiques/[slug]-round-N.md.` |
+
+`[STAGE]` is one of `PLAN_REVIEW` / `DIAGNOSIS_REVIEW` / `CODE_REVIEW` / `OUTPUT_REVIEW`.
+
+**Examples of what the runtime will REJECT** (don't do these):
+
+- ⚡ instead of 🔴/🟡/✅/🚨 — wrong emoji.
+- "Critique gate hit (3 edits)" without `[STAGE] round N/3` — missing identifiers.
+- Prose summary of must-fix instead of bulleted `<file:line> — <issue>` lines.
+- Sending the broadcast WITHOUT first writing the disk file.
+
+The reviewer reads source files directly — never let the parent agent be the sole narrator. Both the disk write and the broadcast are mandatory: the disk write is the durable record, the broadcast is real-time visibility.

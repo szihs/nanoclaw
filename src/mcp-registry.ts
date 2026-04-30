@@ -9,13 +9,9 @@
  */
 import { ChildProcess, spawn } from 'child_process';
 import fs from 'fs';
-import os from 'os';
 import path from 'path';
 
-import { OneCLI } from '@onecli-sh/sdk';
-
 import { log } from './log.js';
-import { ONECLI_URL } from './config.js';
 import { readEnvFile } from './env.js';
 import { clearDiscoveredTools, discoverTools } from './mcp-auth-proxy.js';
 
@@ -46,54 +42,6 @@ interface RunningServer {
   alive: boolean;
 }
 
-// ── OneCLI proxy for host-side MCP servers ─────────────────────────────────
-
-let _onecliProxyEnvCache: Record<string, string> | null = null;
-
-/**
- * Build env vars that route HTTP traffic through the OneCLI gateway.
- * Returns HTTPS_PROXY, CA cert path, etc. — or null if OneCLI isn't configured.
- * MCP servers inherit these so their outbound API calls get credential injection.
- */
-async function getOneCLIProxyEnv(): Promise<Record<string, string> | null> {
-  if (_onecliProxyEnvCache) return _onecliProxyEnvCache;
-  if (!ONECLI_URL) return null;
-
-  try {
-    const onecli = new OneCLI({ url: ONECLI_URL });
-    const config = await onecli.getContainerConfig();
-
-    // Write combined CA bundle (system + OneCLI MITM CA) so Python httpx trusts the proxy.
-    const combinedCaPath = path.join(os.tmpdir(), 'nanoclaw-onecli-mcp-ca.pem');
-    let systemCa = '';
-    const systemCaPath = '/etc/ssl/certs/ca-certificates.crt';
-    if (fs.existsSync(systemCaPath)) {
-      systemCa = fs.readFileSync(systemCaPath, 'utf-8');
-    }
-    fs.writeFileSync(combinedCaPath, systemCa + '\n' + config.caCertificate, { mode: 0o644 });
-
-    // Rewrite host.docker.internal → 127.0.0.1 since MCP servers run on the
-    // host, not inside containers.
-    const rewriteProxy = (url: string) => url.replace(/host\.docker\.internal/g, '127.0.0.1');
-
-    _onecliProxyEnvCache = {
-      HTTPS_PROXY: rewriteProxy(config.env.HTTPS_PROXY || ''),
-      HTTP_PROXY: rewriteProxy(config.env.HTTP_PROXY || ''),
-      https_proxy: rewriteProxy(config.env.https_proxy || ''),
-      http_proxy: rewriteProxy(config.env.http_proxy || ''),
-      SSL_CERT_FILE: combinedCaPath,
-      REQUESTS_CA_BUNDLE: combinedCaPath,
-      NODE_EXTRA_CA_CERTS: combinedCaPath,
-    };
-
-    log.info('OneCLI proxy env prepared for MCP servers', { caPath: combinedCaPath });
-    return _onecliProxyEnvCache;
-  } catch (err) {
-    log.warn('Failed to get OneCLI proxy config for MCP servers', { err });
-    return null;
-  }
-}
-
 // ── Registry ────────────────────────────────────────────────────────────────
 
 const servers = new Map<string, RunningServer>();
@@ -101,7 +49,8 @@ let nextInternalPort = 0;
 
 /**
  * Auto-detect stdio MCP servers from container/mcp-servers/ directory.
- * Each subdirectory with a pyproject.toml is a candidate.
+ * Convention:
+ *   - Python: subdirectory with pyproject.toml → `uv run <name>-server`
  */
 function detectStdioServers(): McpServerDef[] {
   const mcpDir = path.join(process.cwd(), 'container', 'mcp-servers');
@@ -111,9 +60,12 @@ function detectStdioServers(): McpServerDef[] {
   for (const entry of fs.readdirSync(mcpDir, { withFileTypes: true })) {
     if (!entry.isDirectory()) continue;
     const serverDir = path.join(mcpDir, entry.name);
-    if (!fs.existsSync(path.join(serverDir, 'pyproject.toml'))) continue;
-
     const name = entry.name;
+
+    const hasPyproject = fs.existsSync(path.join(serverDir, 'pyproject.toml'));
+    if (!hasPyproject) continue;
+
+    const command = `uv run --directory ${serverDir} ${name}-server`;
 
     // Per-server env vars: read from .env-vars file in the server directory.
     const envVarsFile = path.join(serverDir, '.env-vars');
@@ -129,7 +81,7 @@ function detectStdioServers(): McpServerDef[] {
     defs.push({
       name,
       type: 'stdio',
-      command: `uv run --directory ${serverDir} ${name}-server`,
+      command,
       workDir: serverDir,
       envVars,
       auth: envVars.length > 0 ? 'shared-token' : 'none',
@@ -174,41 +126,24 @@ export async function startMcpServers(baseInternalPort: number): Promise<{
     return { stop: () => {}, getUpstreamPort: () => null };
   }
 
-  // If OneCLI is configured, get proxy config so MCP servers that are missing
-  // .env tokens can route through OneCLI for credential injection instead.
-  const onecliProxyEnv = await getOneCLIProxyEnv();
-
   const supergwPath = path.join(process.cwd(), 'node_modules', '.bin', 'supergateway');
 
   for (const def of defs) {
     if (def.type === 'stdio') {
       const port = nextInternalPort++;
 
-      // Read tokens from .env — some may be config (channel IDs, paths),
-      // others may be secrets that have been moved to OneCLI.
+      // Read tokens from .env
       const tokens = def.envVars ? readEnvFile(def.envVars) : {};
-      const hasSomeTokens = Object.keys(tokens).length > 0;
-
-      if (!hasSomeTokens && def.auth === 'shared-token') {
-        if (onecliProxyEnv) {
-          // Tokens removed from .env — set placeholders so the MCP server
-          // initializes, and route requests through OneCLI proxy for real
-          // credential injection.
-          for (const varName of def.envVars || []) {
-            if (!tokens[varName]) tokens[varName] = 'onecli-placeholder';
-          }
-          log.info('MCP server using OneCLI proxy for credentials', { server: def.name });
-        } else {
-          log.info('No tokens configured, skipping MCP server', { server: def.name });
-          continue;
-        }
+      if (Object.keys(tokens).length === 0 && def.auth === 'shared-token') {
+        log.info('No tokens configured, skipping MCP server', { server: def.name });
+        continue;
       }
 
       const proc = spawn(
         supergwPath,
         ['--stdio', def.command!, '--outputTransport', 'streamableHttp', '--port', String(port), '--host', '127.0.0.1'],
         {
-          env: { ...(process.env as Record<string, string>), ...tokens, ...onecliProxyEnv },
+          env: { ...(process.env as Record<string, string>), ...tokens },
           stdio: ['ignore', 'pipe', 'pipe'],
         },
       );
@@ -343,21 +278,14 @@ export async function restartServer(name: string): Promise<void> {
 
   const supergwPath = path.join(process.cwd(), 'node_modules', '.bin', 'supergateway');
 
-  const proxyEnv = await getOneCLIProxyEnv();
-
   let proc: ReturnType<typeof spawn>;
   if (def.type === 'stdio') {
     const tokens = def.envVars ? readEnvFile(def.envVars) : {};
-    if (proxyEnv) {
-      for (const varName of def.envVars || []) {
-        if (!tokens[varName]) tokens[varName] = 'onecli-placeholder';
-      }
-    }
     proc = spawn(
       supergwPath,
       ['--stdio', def.command!, '--outputTransport', 'streamableHttp', '--port', String(port), '--host', '127.0.0.1'],
       {
-        env: { ...(process.env as Record<string, string>), ...tokens, ...proxyEnv },
+        env: { ...(process.env as Record<string, string>), ...tokens },
         stdio: ['ignore', 'pipe', 'pipe'],
       },
     );

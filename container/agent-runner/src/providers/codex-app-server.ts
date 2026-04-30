@@ -425,7 +425,20 @@ export function writeCodexMcpConfigToml(servers: Record<string, CodexMcpServer>)
 export function createCodexConfigOverrides(): string[] {
   const overrides = ['features.use_linux_sandbox_bwrap=false'];
   if (process.env.CODEX_MODEL) overrides.push(`model=${process.env.CODEX_MODEL}`);
-  if (process.env.CODEX_MODEL_PROVIDER) overrides.push(`model_provider=${process.env.CODEX_MODEL_PROVIDER}`);
+  if (process.env.CODEX_MODEL_PROVIDER) {
+    const p = process.env.CODEX_MODEL_PROVIDER;
+    overrides.push(`model_provider=${p}`);
+    // Emit the [model_providers.<p>] block fields too. Without this, codex
+    // would only know the provider's *name*, not how to reach it. The values
+    // come from container env vars (set on the host's docker-run -e flags),
+    // so no host ~/.codex/config.toml is needed — the entire codex routing
+    // configuration is derivable from .env.
+    overrides.push(`model_providers.${p}.name="${p}"`);
+    overrides.push(`model_providers.${p}.env_key="NVIDIA_API_KEY"`);
+    if (process.env.CODEX_BASE_URL) overrides.push(`model_providers.${p}.base_url="${process.env.CODEX_BASE_URL}"`);
+    if (process.env.CODEX_WIRE_API) overrides.push(`model_providers.${p}.wire_api="${process.env.CODEX_WIRE_API}"`);
+    else overrides.push(`model_providers.${p}.wire_api="responses"`);
+  }
   if (process.env.CODEX_REASONING_EFFORT) overrides.push(`model_reasoning_effort=${process.env.CODEX_REASONING_EFFORT}`);
   return overrides;
 }

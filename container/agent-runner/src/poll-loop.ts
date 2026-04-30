@@ -8,6 +8,7 @@ import {
   setContinuation,
 } from './db/session-state.js';
 import { formatMessages, extractRouting, categorizeMessage, isClearCommand, stripInternalTags, type RoutingContext } from './formatter.js';
+import { classifyAndPrepend } from './intent-router-bridge.js';
 import type { AgentProvider, AgentQuery, ProviderEvent } from './providers/types.js';
 
 const POLL_INTERVAL_MS = 1000;
@@ -262,7 +263,7 @@ async function processQuery(
   // Stream liveness is decided host-side via the heartbeat file + processing
   // claim age (see src/host-sweep.ts); if something is truly stuck, the host
   // will kill the container and messages get reset to pending.
-  const pollHandle = setInterval(() => {
+  const pollHandle = setInterval(async () => {
     if (done) return;
 
     // Skip system messages (MCP tool responses) and /clear (needs fresh query).
@@ -282,8 +283,13 @@ async function processQuery(
       markProcessing(newIds);
 
       const prompt = formatMessages(newMessages);
+      // The SDK fires UserPromptSubmit (and the intent-router hook) only on
+      // the initial query prompt. Mid-query pushes bypass the hook, so run
+      // the router ourselves here so workflow classification is applied to
+      // every user message — not just the first.
+      const routedPrompt = await classifyAndPrepend(prompt);
       log(`Pushing ${newMessages.length} follow-up message(s) into active query`);
-      query.push(prompt);
+      query.push(routedPrompt);
 
       markCompleted(newIds);
       lastEventTime = Date.now(); // new input counts as activity

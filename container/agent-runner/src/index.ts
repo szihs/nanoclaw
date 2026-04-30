@@ -31,6 +31,7 @@ import { buildSystemPromptAddendum } from './destinations.js';
 // Providers barrel — each enabled provider self-registers on import.
 // Provider skills append imports to providers/index.ts.
 import './providers/index.js';
+import { createCodexConfigOverrides } from './providers/codex-app-server.js';
 import { createProvider, type ProviderName } from './providers/factory.js';
 import { parseAllowedMcpTools } from './providers/claude.js';
 import { runPollLoop } from './poll-loop.js';
@@ -96,7 +97,16 @@ async function main(): Promise<void> {
   const __dirname = path.dirname(fileURLToPath(import.meta.url));
   const mcpServerPath = path.join(__dirname, 'mcp-tools', 'index.ts');
 
-  // Build MCP servers config: nanoclaw built-in + any additional from host
+  // Build MCP servers config: nanoclaw built-in + codex stdio child + any
+  // additional from host. The codex entry runs the local codex CLI as an
+  // MCP child process so it can read /workspace/agent files directly when
+  // it reviews. Routing/auth come from `-c` overrides built from container
+  // env vars — no ~/.codex/config.toml file is needed.
+  const codexArgs: string[] = [];
+  for (const override of createCodexConfigOverrides()) {
+    codexArgs.push('-c', override);
+  }
+  codexArgs.push('mcp-server');
   const mcpServers: Record<string, { command: string; args: string[]; env: Record<string, string> }> = {
     nanoclaw: {
       command: 'bun',
@@ -109,7 +119,7 @@ async function main(): Promise<void> {
     },
     codex: {
       command: 'codex',
-      args: ['-m', process.env.CODEX_MODEL || 'openai/openai/gpt-5.5', '-c', `model_reasoning_effort=${process.env.CODEX_REASONING_EFFORT || 'xhigh'}`, 'mcp-server'],
+      args: codexArgs,
       env: {},
     },
   };
@@ -142,6 +152,10 @@ async function main(): Promise<void> {
     }
 
     for (const serverName of neededServers) {
+      // Don't overwrite a server that's already wired (e.g. the hardcoded
+      // codex stdio entry above). Auto-discovery only fills in proxy-routed
+      // servers we haven't already provisioned explicitly.
+      if (mcpServers[serverName]) continue;
       const baseUrl = process.env.MCP_PROXY_URL!.replace(/\/$/, '');
       const serverUrl = `${baseUrl}/mcp/${serverName}`;
       const serverConfig: Record<string, unknown> = {
