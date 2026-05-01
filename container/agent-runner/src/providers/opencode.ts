@@ -69,7 +69,8 @@ function readClaudeMdForPrompt(): string | undefined {
   // manager body plus any project fragments. No separate "global" body
   // needs to be appended; the shared bucket at /workspace/shared/ is for
   // cross-group facts (learnings), not prompt content.
-  const groupPath = '/workspace/agent/CLAUDE.md';
+  const workspaceAgent = process.env.WORKSPACE_AGENT || '/workspace/agent';
+  const groupPath = `${workspaceAgent}/CLAUDE.md`;
   if (fs.existsSync(groupPath)) {
     return fs.readFileSync(groupPath, 'utf-8');
   }

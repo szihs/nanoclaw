@@ -226,16 +226,21 @@ export function killCodexAppServer(server: AppServer): void {
 // so we replicate the same enforcement by intercepting approval requests
 // (≈ PreToolUse) and completion notifications (≈ PostToolUse).
 
-const STATE_PATH = '/workspace/.claude/workflow-state.json';
+// Path roots, env-addressable for AGENT_RUNTIME=local. Defaults match the
+// Docker mount layout (/workspace is the session dir, /workspace/agent is
+// the group dir) so container mode is unaffected.
+const WORKSPACE_AGENT = process.env.WORKSPACE_AGENT || '/workspace/agent';
+const WORKSPACE_SESSION = process.env.WORKSPACE_SESSION || '/workspace';
+const STATE_PATH = path.join(WORKSPACE_SESSION, '.claude', 'workflow-state.json');
 const PLAN_EDIT_LIMIT = 15;
 const CRITIQUE_EDIT_LIMIT = 3;
 
 const BOOKKEEPING_PATTERNS = [
-  '/workspace/agent/plans/',
-  '/workspace/agent/reports/',
-  '/workspace/agent/critiques/',
-  '/workspace/agent/memory/',
-  '/workspace/agent/conversations/',
+  `${WORKSPACE_AGENT}/plans/`,
+  `${WORKSPACE_AGENT}/reports/`,
+  `${WORKSPACE_AGENT}/critiques/`,
+  `${WORKSPACE_AGENT}/memory/`,
+  `${WORKSPACE_AGENT}/conversations/`,
   'CLAUDE.local.md',
   '.claude/',
 ];
@@ -571,7 +576,7 @@ export function writeCodexMcpConfigToml(
 
   // Trust the agent workspace and any additional directories (cloned repos).
   // Dedupe: only append if not already present in the preserved config.
-  const trustPaths = ['/workspace/agent', ...(additionalDirectories ?? [])];
+  const trustPaths = [WORKSPACE_AGENT, ...(additionalDirectories ?? [])];
   for (const trustPath of trustPaths) {
     const tomlKey = `[projects."${trustPath}"]`;
     if (existingNonMcp.includes(tomlKey)) continue;

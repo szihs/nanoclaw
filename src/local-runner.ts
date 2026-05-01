@@ -3,10 +3,11 @@
  *
  * Spawns the in-container agent-runner (container/agent-runner/src/index.ts)
  * directly on the host via `bun`, with env vars replacing Docker volume mounts.
- * The agent-runner already reads SESSION_*_DB_PATH from env; this path feeds it
- * WORKSPACE_* env vars so it doesn't touch hardcoded /workspace/* paths.
+ * The agent-runner reads SESSION_*_DB_PATH, WORKSPACE_AGENT, WORKSPACE_OUTBOX
+ * from env so hardcoded `/workspace/*` defaults don't leak onto the host.
  *
- * No container isolation — agents run with host permissions. This mode is the
+ * No container isolation — agents share the host filesystem and any per-group
+ * state (groups/<folder>/) across concurrent sessions. This mode is the
  * `remove-docker` skill's payload; Docker remains the default for production.
  */
 import { ChildProcess, spawn } from 'child_process';
@@ -28,7 +29,6 @@ import { log } from './log.js';
 import type { ProviderContainerContribution } from './providers/provider-container-registry.js';
 import { heartbeatPath, inboundDbPath, outboundDbPath, sessionDir } from './session-manager.js';
 import type { AgentGroup, Session } from './types.js';
-import { getOrCreateWorktree } from './worktree.js';
 
 /** Entry point the `bun` spawn targets. */
 const AGENT_RUNNER_ENTRY = path.join(process.cwd(), 'container', 'agent-runner', 'src', 'index.ts');
@@ -46,7 +46,6 @@ export interface LocalAgentContext {
 export interface LocalAgentHandle {
   process: ChildProcess;
   name: string;
-  worktreePath: string;
 }
 
 function gatherAdminUserIds(agentGroup: AgentGroup): string[] {
@@ -68,12 +67,16 @@ function gatherAdminUserIds(agentGroup: AgentGroup): string[] {
   return [...ids];
 }
 
-function buildLocalAgentEnv(ctx: LocalAgentContext, worktreePath: string): NodeJS.ProcessEnv {
+/**
+ * Build the child-process env map. Mirrors what Docker's buildContainerArgs
+ * sets via `-e`, adapted to host paths. Caller provides groupDir + sessDir so
+ * this function is trivially testable.
+ */
+export function buildLocalAgentEnv(
+  ctx: LocalAgentContext,
+  paths: { groupDir: string; sessDir: string; globalDir: string | null; outboxDir: string },
+): NodeJS.ProcessEnv {
   const { session, agentGroup, provider, contribution, proxyToken, allowedTools, mcpServers } = ctx;
-
-  const sessDir = sessionDir(agentGroup.id, session.id);
-  const groupDir = path.resolve(GROUPS_DIR, agentGroup.folder);
-  const globalDir = path.join(GROUPS_DIR, 'global');
 
   // Start from the host env so proxy / CA cert / bun tooling all work as on
   // the host. Override with agent-specific vars below.
@@ -86,12 +89,22 @@ function buildLocalAgentEnv(ctx: LocalAgentContext, worktreePath: string): NodeJ
     SESSION_OUTBOUND_DB_PATH: outboundDbPath(agentGroup.id, session.id),
     SESSION_HEARTBEAT_PATH: heartbeatPath(agentGroup.id, session.id),
     // Workspace root paths — the env-var fallbacks inside agent-runner pick these up.
-    WORKSPACE_SESSION: sessDir,
-    WORKSPACE_AGENT: groupDir,
-    WORKSPACE_GLOBAL: fs.existsSync(globalDir) ? globalDir : '',
-    WORKSPACE_WORKTREE: worktreePath,
+    WORKSPACE_SESSION: paths.sessDir,
+    WORKSPACE_AGENT: paths.groupDir,
+    WORKSPACE_GLOBAL: paths.globalDir ?? '',
+    WORKSPACE_OUTBOX: paths.outboxDir,
+    // Additional host-mounted dirs. Docker points /workspace/extra at a
+    // validated additionalMounts set; local mode has no such plumbing, so
+    // point at an empty dir (a sibling of the session dir) to make the
+    // agent-runner's extra-dir scan a safe no-op.
+    WORKSPACE_EXTRA: path.join(paths.sessDir, '.extra-empty'),
     HOME: path.join(DATA_DIR, 'v2-sessions', agentGroup.id, '.claude-shared'),
   };
+
+  // Ensure the empty extra dir exists so existsSync() returns true but
+  // readdirSync() returns []. Also ensure outbox exists for the runner.
+  fs.mkdirSync(env.WORKSPACE_EXTRA as string, { recursive: true });
+  fs.mkdirSync(paths.outboxDir, { recursive: true });
 
   // Same env vars the Docker path forwards (see container-runner.ts).
   for (const key of [
@@ -139,8 +152,15 @@ function buildLocalAgentEnv(ctx: LocalAgentContext, worktreePath: string): NodeJ
     env.NANOCLAW_ADMIN_USER_IDS = adminIds.join(',');
   }
 
-  // Bypass proxy for host-local traffic so MCP + dashboard hook calls are direct.
-  env.NO_PROXY = `${AGENT_HOST_GATEWAY},localhost,127.0.0.1`;
+  // Append local-required bypass entries to inherited NO_PROXY rather than
+  // overwriting — preserves any corporate/internal hosts already bypassed
+  // on the host (e.g. *.internal.corp).
+  const localBypass = [AGENT_HOST_GATEWAY, 'localhost', '127.0.0.1'];
+  const existing = (process.env.NO_PROXY || process.env.no_proxy || '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
+  env.NO_PROXY = [...new Set([...localBypass, ...existing])].join(',');
   env.no_proxy = env.NO_PROXY;
 
   if (Object.keys(mcpServers).length > 0) {
@@ -157,11 +177,6 @@ function buildLocalAgentEnv(ctx: LocalAgentContext, worktreePath: string): NodeJ
     env.DASHBOARD_URL = `http://${AGENT_HOST_GATEWAY}:${DASHBOARD_PORT}`;
   }
 
-  // Dashboard chat ingress (host-only bridge) — the per-group settings.json
-  // hook commands the Docker path writes already bake the URL in. Local mode
-  // inherits the same settings.json (via HOME=.claude-shared), so the same
-  // hook commands run here — they reach the host directly since HOME binds
-  // to the real on-disk settings dir.
   const containerConfig = readContainerConfig(agentGroup.folder);
   if (containerConfig.imageTag) {
     // Surface this as a hint only; local mode does not build images.
@@ -175,20 +190,25 @@ function buildLocalAgentEnv(ctx: LocalAgentContext, worktreePath: string): NodeJ
 }
 
 /**
- * Spawn the agent-runner as a local `bun` process in a worktree.
- * Resolves with a handle once spawn completes; rejects if `bun` cannot be
+ * Spawn the agent-runner as a local `bun` process with the group dir as cwd.
+ * Resolves with a handle once spawn completes; rejects if `bun` can't be
  * started. Bun is required because the agent-runner imports `bun:sqlite`.
  */
 export function spawnLocalAgent(ctx: LocalAgentContext): Promise<LocalAgentHandle> {
   const { session, agentGroup } = ctx;
 
-  const worktreePath = getOrCreateWorktree(agentGroup.folder, process.cwd());
-  const env = buildLocalAgentEnv(ctx, worktreePath);
+  const sessDir = sessionDir(agentGroup.id, session.id);
+  const groupDir = path.resolve(GROUPS_DIR, agentGroup.folder);
+  const globalDirRaw = path.join(GROUPS_DIR, 'global');
+  const globalDir = fs.existsSync(globalDirRaw) ? globalDirRaw : null;
+  const outboxDir = path.join(sessDir, 'outbox');
+
+  const env = buildLocalAgentEnv(ctx, { groupDir, sessDir, globalDir, outboxDir });
   const name = `${agentGroup.folder}-${Date.now()}`;
 
   return new Promise((resolve, reject) => {
     const proc = spawn('bun', ['run', AGENT_RUNNER_ENTRY], {
-      cwd: worktreePath,
+      cwd: groupDir,
       env,
       stdio: ['ignore', 'pipe', 'pipe'],
     });
@@ -198,10 +218,10 @@ export function spawnLocalAgent(ctx: LocalAgentContext): Promise<LocalAgentHandl
         sessionId: session.id,
         agentGroup: agentGroup.name,
         name,
-        worktreePath,
+        cwd: groupDir,
         pid: proc.pid,
       });
-      resolve({ process: proc, name, worktreePath });
+      resolve({ process: proc, name });
     });
 
     proc.once('error', (err) => {

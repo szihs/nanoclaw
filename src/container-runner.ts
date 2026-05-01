@@ -150,11 +150,11 @@ function detectGpuMode(): GpuMode {
  * Active agent processes tracked by session ID. The same map serves both
  * runtimes; `kind` disambiguates the termination path (docker stop vs
  * SIGTERM). For Docker, `process` is the `docker run` child; for local,
- * it is the `bun` child and `worktreePath` points at the checkout.
+ * it is the `bun` child.
  */
 type ActiveEntry =
   | { kind: 'docker'; process: ChildProcess; containerName: string }
-  | { kind: 'local'; process: ChildProcess; containerName: string; worktreePath: string };
+  | { kind: 'local'; process: ChildProcess; containerName: string };
 const activeContainers = new Map<string, ActiveEntry>();
 
 /** SHA-256 hash of CLAUDE.md at spawn time, keyed by session ID. */
@@ -458,7 +458,6 @@ async function spawnContainer(session: Session): Promise<void> {
       kind: 'local',
       process: handle.process,
       containerName: handle.name,
-      worktreePath: handle.worktreePath,
     });
     markContainerRunning(session.id);
     handle.process.stderr?.on('data', (data) => {
@@ -477,8 +476,10 @@ async function spawnContainer(session: Session): Promise<void> {
     });
     handle.process.on('error', (err) => {
       activeContainers.delete(session.id);
+      spawnedClaudeMdHash.delete(session.id);
       markContainerStopped(session.id);
       stopTypingRefresh(session.id);
+      revokeContainerToken(proxyToken);
       log.error('Local agent spawn error', { sessionId: session.id, err });
     });
     return;
@@ -548,7 +549,7 @@ export function killContainer(sessionId: string, reason: string): void {
   log.info('Killing agent', { sessionId, reason, kind: entry.kind, name: entry.containerName });
   if (entry.kind === 'local') {
     // Fire-and-forget — the close handler on the child will clear activeContainers.
-    void killLocalAgent({ process: entry.process, name: entry.containerName, worktreePath: entry.worktreePath });
+    void killLocalAgent({ process: entry.process, name: entry.containerName });
     return;
   }
   try {
@@ -726,9 +727,13 @@ function buildMounts(
   const claudeDir = path.join(DATA_DIR, 'v2-sessions', agentGroup.id, '.claude-shared');
   const settingsFile = path.join(claudeDir, 'settings.json');
 
-  // Dashboard hook injection (port comes from config/.env)
+  // Dashboard hook injection (port comes from config/.env).
+  // Skipped in AGENT_RUNTIME=local because the hook commands baked into
+  // settings.json reference `/app/hooks/*.sh` and `host.docker.internal`,
+  // which are Docker-specific — they'd silently fail under local mode.
+  // Local agents run without overlay hook enforcement (documented limitation).
   const dashboardPort = DASHBOARD_PORT ? String(DASHBOARD_PORT) : '';
-  if (dashboardPort) {
+  if (dashboardPort && AGENT_RUNTIME !== 'local') {
     const settings = JSON.parse(fs.readFileSync(settingsFile, 'utf-8'));
     const hookUrl = `http://host.docker.internal:${dashboardPort}/api/hook-event`;
     if (!settings.hooks) settings.hooks = {};

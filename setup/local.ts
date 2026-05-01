@@ -1,17 +1,19 @@
 /**
- * Step: local — prereq checks for AGENT_RUNTIME=local.
+ * Step: local — prereq checks + dep install for AGENT_RUNTIME=local.
  *
  * Validates that the host can spawn the agent-runner directly:
  *   - Node.js >= 20 on PATH
- *   - git on PATH
- *   - bun on PATH (agent-runner uses `bun:sqlite`)
+ *   - git on PATH (not strictly required at runtime, but setup tools use it)
+ *   - bun on PATH (agent-runner imports `bun:sqlite`)
  *   - claude CLI on PATH (or via CLAUDE_CODE_EXECPATH)
- *   - the current project root is a git repository with at least one commit
+ *   - `container/agent-runner/` dependencies installed (runs `pnpm install`
+ *     if `node_modules/@anthropic-ai/claude-agent-sdk` is missing)
  *
  * Emits a NANOCLAW_SETUP: LOCAL status block and exits 1 on any failure.
  */
 import { execFileSync, spawnSync } from 'child_process';
 import fs from 'fs';
+import path from 'path';
 
 import { log } from '../src/log.js';
 import { emitStatus } from './status.js';
@@ -52,14 +54,30 @@ function checkClaudeCli(): string {
   return checkCmd('claude', '--version');
 }
 
-function checkGitRepo(): string {
-  const root = process.cwd();
-  try {
-    const out = execFileSync('git', ['-C', root, 'rev-parse', 'HEAD'], { stdio: 'pipe', encoding: 'utf-8' }).trim();
-    return `HEAD=${out.slice(0, 8)}`;
-  } catch {
-    throw new Error(`${root} is not a git repository with at least one commit`);
+/**
+ * Agent-runner has its own package.json (bun:sqlite + provider SDKs) that
+ * isn't installed by the root `pnpm install`. In Docker mode the image bakes
+ * them; in local mode we spawn against the source tree, so the deps must
+ * live on disk.
+ */
+function ensureAgentRunnerDeps(): string {
+  const runnerDir = path.join(process.cwd(), 'container', 'agent-runner');
+  const probe = path.join(runnerDir, 'node_modules', '@anthropic-ai', 'claude-agent-sdk');
+  if (fs.existsSync(probe)) {
+    return `already installed (${probe})`;
   }
+  log.info('[setup:local] installing agent-runner deps…', { dir: runnerDir });
+  try {
+    execFileSync('pnpm', ['install'], { cwd: runnerDir, stdio: 'inherit' });
+  } catch (err) {
+    throw new Error(
+      `pnpm install failed in ${runnerDir}: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+  if (!fs.existsSync(probe)) {
+    throw new Error(`pnpm install completed but ${probe} is still missing`);
+  }
+  return `installed (${probe})`;
 }
 
 export async function run(_args: string[]): Promise<void> {
@@ -68,7 +86,7 @@ export async function run(_args: string[]): Promise<void> {
     runCheck('git', () => checkCmd('git')),
     runCheck('bun', () => checkCmd('bun')),
     runCheck('claude CLI', checkClaudeCli),
-    runCheck('project root is a git repo', checkGitRepo),
+    runCheck('agent-runner deps', ensureAgentRunnerDeps),
   ];
 
   const failed = checks.filter((c) => !c.ok);

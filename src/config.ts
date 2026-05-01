@@ -58,11 +58,6 @@ export const AGENT_HOST_GATEWAY =
   envConfig.AGENT_HOST_GATEWAY ||
   (AGENT_RUNTIME === 'local' ? '127.0.0.1' : 'host.docker.internal');
 
-// Root for per-session git worktrees when running with AGENT_RUNTIME=local.
-// Each agent group gets an isolated working tree here so local agent processes
-// don't trample each other's indices.
-export const WORKTREES_DIR = path.resolve(PROJECT_ROOT, 'data', 'worktrees');
-
 // Per-checkout image tag so two installs on the same host don't share
 // `nanoclaw-agent:latest` and clobber each other on rebuild.
 export const CONTAINER_IMAGE_BASE = process.env.CONTAINER_IMAGE_BASE || getContainerImageBase(PROJECT_ROOT);
