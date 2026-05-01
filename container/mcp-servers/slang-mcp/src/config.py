@@ -100,8 +100,17 @@ def setup_environment():
     dotenv.load_dotenv(dotenv_path=Path(__file__).parent.parent / ".env", override=True)
     # Global debug flag
     DEBUG = os.environ.get("DEBUG", "False").lower() == "true"
-    # Get GitHub access token
-    github_token = os.environ.get("GITHUB_ACCESS_TOKEN")
+    # Get GitHub access token.
+    # Preference order:
+    #   1. ONECLI_URL set → OneCLI proxy injects Authorization; use placeholder token.
+    #   2. GH_TOKEN — rotating GitHub App installation token (managed externally).
+    #   3. GITHUB_ACCESS_TOKEN — legacy static PAT (backwards compat).
+    onecli_url = os.environ.get("ONECLI_URL")
+    github_token = (
+        os.environ.get("GH_TOKEN")
+        or os.environ.get("GITHUB_ACCESS_TOKEN")
+        or ("onecli-managed" if onecli_url else None)
+    )
     if github_token:
         _GITHUB_CONFIG = GitHubConfig(
             access_token=SecretStr(github_token),
@@ -109,7 +118,7 @@ def setup_environment():
         )
         logger.info("GitHub configuration loaded successfully")
     else:
-        logger.warning("GITHUB_ACCESS_TOKEN is not set in environment variables")
+        logger.warning("GH_TOKEN / ONECLI_URL is not set in environment variables")
 
     # Get GitLab access token
     gitlab_token = os.environ.get("GITLAB_ACCESS_TOKEN")
@@ -196,6 +205,8 @@ async def _get_github_client() -> httpx.AsyncClient:
     global _github_http_client
     if _github_http_client is None or _github_http_client.is_closed:
         ssl_verify = get_ssl_verify_config()
+        # trust_env=True (default) picks up https_proxy / SSL_CERT_FILE set by the
+        # host MCP registry when running behind OneCLI.
         _github_http_client = httpx.AsyncClient(
             verify=ssl_verify, timeout=_DEFAULT_TIMEOUT
         )
