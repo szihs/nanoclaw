@@ -320,7 +320,7 @@ export function attachCodexAutoApproval(server: AppServer, hookConfig?: HookConf
             log(`[hooks] Plan gate: blocking edit to ${filePath} — no plan written`);
             sendCodexResponse(server, req.id, {
               decision: 'reject',
-              reason: 'Write a plan to /workspace/agent/reports/ before editing source files.',
+              reason: `Write a plan to ${WORKSPACE_AGENT}/reports/ before editing source files.`,
             });
             return;
           }
@@ -328,18 +328,18 @@ export function attachCodexAutoApproval(server: AppServer, hookConfig?: HookConf
             log(`[hooks] Plan gate: blocking edit to ${filePath} — plan stale (${state.edits_since_plan} edits)`);
             sendCodexResponse(server, req.id, {
               decision: 'reject',
-              reason: `Plan is stale (${state.edits_since_plan} edits since last plan). Write an updated plan to /workspace/agent/reports/ before continuing.`,
+              reason: `Plan is stale (${state.edits_since_plan} edits since last plan). Write an updated plan to ${WORKSPACE_AGENT}/reports/ before continuing.`,
             });
             return;
           }
 
           // Critique-record gate: block if critique round unrecorded
           if (hasCritique && state.critique_rounds > state.critique_recorded_for_round) {
-            if (!filePath.includes('/workspace/agent/critiques/')) {
+            if (!filePath.includes(`${WORKSPACE_AGENT}/critiques/`)) {
               log(`[hooks] Critique-record gate: blocking edit — verdict not written for round ${state.critique_rounds}`);
               sendCodexResponse(server, req.id, {
                 decision: 'reject',
-                reason: `Write the critique verdict to /workspace/agent/critiques/ before editing other files (round ${state.critique_rounds} unrecorded).`,
+                reason: `Write the critique verdict to ${WORKSPACE_AGENT}/critiques/ before editing other files (round ${state.critique_rounds} unrecorded).`,
               });
               return;
             }
@@ -397,7 +397,10 @@ export function attachCodexAutoApproval(server: AppServer, hookConfig?: HookConf
         const filePath = item.path || '';
 
         // Plan tracker: writing to reports/ (new canonical) or plans/ (legacy) sets plan_written
-        if (filePath.includes('/workspace/agent/reports/') || filePath.includes('/workspace/agent/plans/')) {
+        if (
+          filePath.includes(`${WORKSPACE_AGENT}/reports/`) ||
+          filePath.includes(`${WORKSPACE_AGENT}/plans/`)
+        ) {
           state.plan_written = true;
           state.plan_stale = false;
           state.edits_since_plan = 0;
@@ -407,7 +410,7 @@ export function attachCodexAutoApproval(server: AppServer, hookConfig?: HookConf
         }
 
         // Critique tracker: writing to critiques/ bumps recorded round
-        if (filePath.includes('/workspace/agent/critiques/')) {
+        if (filePath.includes(`${WORKSPACE_AGENT}/critiques/`)) {
           state.critique_recorded_for_round = state.critique_rounds;
           log(`[hooks] Critique recorded for round ${state.critique_rounds}`);
           writeState(state);

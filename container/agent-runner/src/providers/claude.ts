@@ -243,7 +243,8 @@ function createPreCompactHook(assistantName?: string): HookCallback {
         ? summary.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 50)
         : `conversation-${new Date().getHours().toString().padStart(2, '0')}${new Date().getMinutes().toString().padStart(2, '0')}`;
 
-      const conversationsDir = '/workspace/agent/conversations';
+      const workspaceAgent = process.env.WORKSPACE_AGENT || '/workspace/agent';
+      const conversationsDir = path.join(workspaceAgent, 'conversations');
       fs.mkdirSync(conversationsDir, { recursive: true });
       const filename = `${new Date().toISOString().split('T')[0]}-${name}.md`;
       fs.writeFileSync(path.join(conversationsDir, filename), formatTranscriptMarkdown(messages, summary, assistantName));

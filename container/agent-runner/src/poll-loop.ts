@@ -277,13 +277,18 @@ function resolveSkillBody(command: string): string | null {
   const skillName = command.replace(/^\//, '').split(/\s/)[0];
   if (!skillName) return null;
 
+  const workspaceAgent = process.env.WORKSPACE_AGENT || '/workspace/agent';
   const candidates = [
     path.join('/home/node/.claude/skills', skillName, 'SKILL.md'),
-    // Additional dirs: cloned repos may put skills under the agent workspace
-    ...fs.readdirSync('/workspace/agent').flatMap((dir) => {
-      const p = path.join('/workspace/agent', dir, '.claude', 'skills', skillName, 'SKILL.md');
-      return fs.existsSync(p) ? [p] : [];
-    }),
+    // Additional dirs: cloned repos may put skills under the agent workspace.
+    // existsSync guard keeps the poll loop alive if the dir is missing — e.g.
+    // in local mode during a broken setup — instead of throwing on readdirSync.
+    ...(fs.existsSync(workspaceAgent)
+      ? fs.readdirSync(workspaceAgent).flatMap((dir) => {
+          const p = path.join(workspaceAgent, dir, '.claude', 'skills', skillName, 'SKILL.md');
+          return fs.existsSync(p) ? [p] : [];
+        })
+      : []),
   ];
 
   for (const candidate of candidates) {
