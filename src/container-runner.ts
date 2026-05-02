@@ -973,7 +973,8 @@ async function buildContainerArgs(
   // expands the ${VAR:-default} references at container start.
   args.push(
     '-c',
-    `mkdir -p ~/.codex && cat > ~/.codex/config.toml <<TOML_EOF
+    `git config --global "url.https://x-access-token:placeholder@github.com/.insteadOf" "https://github.com/" 2>/dev/null || true
+mkdir -p ~/.codex && cat > ~/.codex/config.toml <<TOML_EOF
 model_provider = "\${CODEX_MODEL_PROVIDER:-nvinference}"
 model = "\${CODEX_MODEL:-openai/openai/gpt-5.5}"
 model_reasoning_effort = "\${CODEX_REASONING_EFFORT:-xhigh}"
