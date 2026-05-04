@@ -18,6 +18,9 @@ const envConfig = readEnvFile([
   'MCP_PROXY_PORT',
   'CONTAINER_IMAGE',
   'CONTAINER_PREFIX',
+  'GITHUB_WEBHOOK_SECRET',
+  'GITHUB_WEBHOOK_PORT',
+  'GITHUB_WEBHOOK_BOT_MENTION',
 ]);
 
 export const ASSISTANT_NAME = process.env.ASSISTANT_NAME || envConfig.ASSISTANT_NAME || 'Andy';
@@ -86,6 +89,15 @@ export const DASHBOARD_INGRESS_PORT = parseInt(
   10,
 );
 export const DASHBOARD_INGRESS_HOST = '127.0.0.1';
+
+// GitHub webhook receiver (separate port, publicly exposed)
+export const GITHUB_WEBHOOK_SECRET = process.env.GITHUB_WEBHOOK_SECRET || envConfig.GITHUB_WEBHOOK_SECRET || '';
+export const GITHUB_WEBHOOK_PORT = parseInt(
+  process.env.GITHUB_WEBHOOK_PORT || envConfig.GITHUB_WEBHOOK_PORT || '3841',
+  10,
+);
+export const GITHUB_WEBHOOK_BOT_MENTION =
+  process.env.GITHUB_WEBHOOK_BOT_MENTION || envConfig.GITHUB_WEBHOOK_BOT_MENTION || '@nv-slang-bot';
 
 // Timezone for scheduled tasks, message formatting, etc.
 // Validates each candidate is a real IANA identifier before accepting.
