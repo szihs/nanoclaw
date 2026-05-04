@@ -1076,6 +1076,55 @@ function runCcusage(claudeConfigDir: string, since?: string): Promise<CcusageDay
   });
 }
 
+/** Normalise a @ccusage/codex daily entry to the shared CcusageDayEntry shape. */
+function normalizeCodexEntry(raw: Record<string, unknown>): CcusageDayEntry {
+  // Codex dates come as "Apr 06, 2026"; convert to ISO "2026-04-06" so they merge with Claude entries.
+  const date = new Date(raw.date as string).toISOString().slice(0, 10);
+  const totalCost = (raw.costUSD as number) || 0;
+  const totalTokens = (raw.totalTokens as number) || 0;
+  const models = (raw.models || {}) as Record<string, Record<string, unknown>>;
+  const modelNames = Object.keys(models);
+  const modelBreakdowns = modelNames.map((modelName) => {
+    const m = models[modelName];
+    const modelTokens = (m.totalTokens as number) || 0;
+    // Allocate cost proportionally by tokens; exact when there's one model.
+    const cost = totalTokens > 0 ? (modelTokens / totalTokens) * totalCost : 0;
+    return {
+      modelName,
+      inputTokens: (m.inputTokens as number) || 0,
+      outputTokens: (m.outputTokens as number) || 0,
+      cacheCreationTokens: 0,
+      cacheReadTokens: (m.cachedInputTokens as number) || 0,
+      cost,
+    };
+  });
+  return {
+    date,
+    inputTokens: (raw.inputTokens as number) || 0,
+    outputTokens: (raw.outputTokens as number) || 0,
+    cacheCreationTokens: 0,
+    cacheReadTokens: (raw.cachedInputTokens as number) || 0,
+    totalTokens,
+    totalCost,
+    modelsUsed: modelNames,
+    modelBreakdowns,
+  };
+}
+
+function runCodexCcusage(since?: string): Promise<CcusageDayEntry[]> {
+  return new Promise((resolve) => {
+    const args = ['@ccusage/codex', 'daily', '--json', '--offline'];
+    if (since) args.push('--since', since);
+    exec(`npx ${args.join(' ')}`, { timeout: 30000, maxBuffer: 10 * 1024 * 1024 }, (err, stdout) => {
+      if (err) { resolve([]); return; }
+      try {
+        const parsed = JSON.parse(stdout);
+        resolve((parsed.daily || []).map(normalizeCodexEntry));
+      } catch { resolve([]); }
+    });
+  });
+}
+
 function mergeDailyEntries(allDays: CcusageDayEntry[][]): CcusageDayEntry[] {
   const byDate: Record<string, CcusageDayEntry> = {};
   for (const days of allDays) {
@@ -1157,6 +1206,23 @@ async function refreshCcusageCache(): Promise<void> {
 
     for (const [period, data] of [['1d', d1], ['7d', d7], ['30d', d30], ['all', all]] as const) {
       result[period].byGroup.push({ groupId: agDir, groupName, daily: data });
+    }
+  }
+
+  // Codex (OpenAI) usage is process-wide, not per-agent-group — run once and add to combined.
+  const [cx1, cx7, cx30, cxAll] = await Promise.all([
+    runCodexCcusage(today),
+    runCodexCcusage(week),
+    runCodexCcusage(month),
+    runCodexCcusage(),
+  ]);
+  if (cxAll.length > 0) {
+    allByPeriod['1d'].push(cx1);
+    allByPeriod['7d'].push(cx7);
+    allByPeriod['30d'].push(cx30);
+    allByPeriod.all.push(cxAll);
+    for (const [period, data] of [['1d', cx1], ['7d', cx7], ['30d', cx30], ['all', cxAll]] as const) {
+      result[period].byGroup.push({ groupId: 'codex', groupName: 'Codex (OpenAI)', daily: data });
     }
   }
 
