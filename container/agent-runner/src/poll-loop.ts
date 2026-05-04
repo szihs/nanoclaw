@@ -159,6 +159,17 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
       continue;
     }
 
+    // Scheduled tasks with new_session:true run in a fresh context so
+    // heartbeat/cron history doesn't accumulate across runs. Only applies
+    // when the entire batch is tasks (no chat messages mixed in) — mixed
+    // batches default to the stored continuation so chat history is preserved.
+    const isNewSessionBatch =
+      keep.every((m) => m.kind === 'task') &&
+      keep.some((m) => {
+        try { return Boolean((JSON.parse(m.content) as Record<string, unknown>).new_session); }
+        catch { return false; }
+      });
+
     // Format messages: passthrough commands get raw text (only if the
     // provider natively handles slash commands), others get XML.
     let prompt = formatMessagesWithCommands(keep, config.provider.supportsNativeSlashCommands);
@@ -172,10 +183,11 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
     }
 
     log(`Processing ${keep.length} message(s), kinds: ${[...new Set(keep.map((m) => m.kind))].join(',')}`);
+    if (isNewSessionBatch) log('new_session flag set — running task in fresh context');
 
     const query = config.provider.query({
       prompt,
-      continuation,
+      continuation: isNewSessionBatch ? undefined : continuation,
       cwd: config.cwd,
       systemContext: config.systemContext,
     });
@@ -184,8 +196,9 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
     const skippedSet = new Set(skipped);
     const processingIds = ids.filter((id) => !commandIds.includes(id) && !skippedSet.has(id));
     try {
-      const result = await processQuery(query, routing, processingIds, config.providerName);
-      if (result.continuation && result.continuation !== continuation) {
+      const result = await processQuery(query, routing, processingIds, config.providerName, isNewSessionBatch);
+      // Don't overwrite the stored chat continuation with a task's ephemeral session.
+      if (!isNewSessionBatch && result.continuation && result.continuation !== continuation) {
         continuation = result.continuation;
         setContinuation(config.providerName, continuation);
       }
@@ -313,6 +326,7 @@ async function processQuery(
   routing: RoutingContext,
   initialBatchIds: string[],
   providerName: string,
+  skipPersistContinuation = false,
 ): Promise<QueryResult> {
   let queryContinuation: string | undefined;
   let done = false;
@@ -377,7 +391,7 @@ async function processQuery(
         // container died between `init` and `result`, the SDK session was
         // effectively orphaned and the next message started a blank
         // Claude session with no prior context.
-        setContinuation(providerName, event.continuation);
+        if (!skipPersistContinuation) setContinuation(providerName, event.continuation);
       } else if (event.type === 'result') {
         // A result — with or without text — means the turn is done. Mark
         // the initial batch completed now so the host sweep doesn't see
