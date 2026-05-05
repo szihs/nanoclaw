@@ -1521,41 +1521,53 @@ function getCoworkerTypes(): Record<string, any> {
 // only needs the extends chain for requires.coworkerTypes walks.
 function readLegoCoworkerTypes(): Record<string, { extends?: string | string[]; description?: string; project?: string; flat?: boolean; skills?: string[] }> {
   const registry: Record<string, { extends?: string | string[]; description?: string; project?: string; flat?: boolean; skills?: string[] }> = {};
-  const skillsDir = getSkillsDir();
-  let dirents: string[];
-  try {
-    dirents = readdirSync(skillsDir);
-  } catch {
-    return registry;
-  }
-  dirents.sort();
+  // Post-refactor, project/spine types (base-common, nanoclaw-*, slang-*,
+  // slangpy-*) live under container/spines/*/coworker-types.yaml.
+  // Capability-skill addons (dashboard-base, nanoclaw-base) still ship
+  // coworker-types.yaml under container/skills/ to contribute `context`
+  // fragments to main/global. Scan both roots — spines first so authoritative
+  // type definitions register before skill-layer addons extend them. This
+  // mirrors TYPE_SOURCE_DIRS in src/claude-composer/registry.ts.
+  const roots = [
+    join(getProjectRoot(), 'container', 'spines'),
+    getSkillsDir(),
+  ];
   let yamlLoad: (input: string) => any;
   try {
     yamlLoad = createRequire(import.meta.url)('js-yaml').load;
   } catch {
     return registry;
   }
-  for (const entry of dirents) {
-    const filePath = join(skillsDir, entry, 'coworker-types.yaml');
-    if (!existsSync(filePath)) continue;
+  for (const rootDir of roots) {
+    let dirents: string[];
     try {
-      const doc = yamlLoad(readFileSync(filePath, 'utf-8'));
-      if (!doc || typeof doc !== 'object') continue;
-      for (const [name, rawEntry] of Object.entries(doc) as [string, any][]) {
-        if (!rawEntry || typeof rawEntry !== 'object') continue;
-        const existing = registry[name];
-        const existingSkills = existing?.skills || [];
-        const newSkills = Array.isArray(rawEntry.skills) ? rawEntry.skills : [];
-        registry[name] = {
-          extends: rawEntry.extends ?? existing?.extends,
-          description: rawEntry.description ?? existing?.description,
-          project: rawEntry.project ?? existing?.project,
-          flat: rawEntry.flat ?? existing?.flat,
-          skills: [...new Set([...existingSkills, ...newSkills])],
-        };
-      }
+      dirents = readdirSync(rootDir);
     } catch {
-      /* skip malformed file */
+      continue;
+    }
+    dirents.sort();
+    for (const entry of dirents) {
+      const filePath = join(rootDir, entry, 'coworker-types.yaml');
+      if (!existsSync(filePath)) continue;
+      try {
+        const doc = yamlLoad(readFileSync(filePath, 'utf-8'));
+        if (!doc || typeof doc !== 'object') continue;
+        for (const [name, rawEntry] of Object.entries(doc) as [string, any][]) {
+          if (!rawEntry || typeof rawEntry !== 'object') continue;
+          const existing = registry[name];
+          const existingSkills = existing?.skills || [];
+          const newSkills = Array.isArray(rawEntry.skills) ? rawEntry.skills : [];
+          registry[name] = {
+            extends: rawEntry.extends ?? existing?.extends,
+            description: rawEntry.description ?? existing?.description,
+            project: rawEntry.project ?? existing?.project,
+            flat: rawEntry.flat ?? existing?.flat,
+            skills: [...new Set([...existingSkills, ...newSkills])],
+          };
+        }
+      } catch {
+        /* skip malformed file */
+      }
     }
   }
   return registry;
@@ -5575,14 +5587,38 @@ export async function handleRequest(
     const deleteData = url.searchParams.has('deleteData');
     // Stop any running container for this group, then clean up
     const folderHyphenated = folder.replace(/_/g, '-');
-    const doCleanup = () => {
+    const doCleanup = async () => {
+      // Collect messaging_group ids this agent owned (non-dashboard channels
+      // like telegram/slack/github keep their own messaging_groups rows —
+      // we need to drop those too if no other agent references them).
+      const ownedMgIds = wdb
+        .prepare('SELECT DISTINCT messaging_group_id FROM messaging_group_agents WHERE agent_group_id = ?')
+        .all(agId) as { messaging_group_id: string }[];
+
       // v2 cascade: delete children before parents
       wdb.prepare('DELETE FROM messaging_group_agents WHERE agent_group_id = ?').run(agId);
+      // Outbound destinations owned BY this agent.
       wdb.prepare('DELETE FROM agent_destinations WHERE agent_group_id = ?').run(agId);
+      // Bidirectional: destinations from OTHER agents pointing AT this one.
+      // Without this, parent agents keep stale `target_id` pointers.
+      wdb
+        .prepare("DELETE FROM agent_destinations WHERE target_type = 'agent' AND target_id = ?")
+        .run(agId);
       wdb.prepare('DELETE FROM sessions WHERE agent_group_id = ?').run(agId);
+      // Drop the dashboard messaging group for this agent.
       wdb
         .prepare("DELETE FROM messaging_groups WHERE channel_type = 'dashboard' AND platform_id = ?")
         .run(`dashboard:${folder}`);
+      // Drop non-dashboard messaging_groups that are now orphaned (no agent
+      // references them after the cascade above).
+      for (const { messaging_group_id } of ownedMgIds) {
+        const stillUsed = wdb
+          .prepare('SELECT 1 FROM messaging_group_agents WHERE messaging_group_id = ? LIMIT 1')
+          .get(messaging_group_id);
+        if (!stillUsed) {
+          wdb.prepare('DELETE FROM messaging_groups WHERE id = ?').run(messaging_group_id);
+        }
+      }
       wdb.prepare('DELETE FROM agent_groups WHERE id = ?').run(agId);
       // Clean session files
       const sessionDir = join(getDataDir(), 'v2-sessions', agId);
@@ -5591,7 +5627,8 @@ export async function handleRequest(
       } catch {
         /* ok */
       }
-      // Only delete group folder/artifacts when explicitly requested
+      // Only delete group folder/artifacts when explicitly requested. Default
+      // preserves work-in-progress artifacts (plans, reports, critiques).
       if (deleteData) {
         const groupDir = join(getGroupsDir(), folder);
         try {
@@ -5600,16 +5637,64 @@ export async function handleRequest(
           /* best-effort cleanup */
         }
       }
+
+      // Deregister the agent from OneCLI (port 10256). OneCLI tracks agents
+      // by `identifier` which NanoClaw sets to the agent_group id on
+      // ensureAgent (container-runner.ts). If OneCLI is unreachable or the
+      // agent isn't there, swallow the error — the DB cleanup still succeeds
+      // and OneCLI accumulating stale entries is non-fatal (already common
+      // today). Log the outcome for observability.
+      let onecliRemoved: 'ok' | 'not-found' | 'skipped' | 'error' = 'skipped';
+      try {
+        const listRes = await fetch('http://localhost:10256/api/agents', {
+          signal: AbortSignal.timeout(2000),
+        });
+        if (listRes.ok) {
+          const list = (await listRes.json()) as { id: string; identifier: string | null }[];
+          const match = list.find((a) => a.identifier === agId);
+          if (match) {
+            const delRes = await fetch(`http://localhost:10256/api/agents/${match.id}`, {
+              method: 'DELETE',
+              signal: AbortSignal.timeout(2000),
+            });
+            onecliRemoved = delRes.ok ? 'ok' : 'error';
+          } else {
+            onecliRemoved = 'not-found';
+          }
+        }
+      } catch {
+        /* OneCLI unreachable — non-fatal */
+      }
+
       res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ ok: true, dataDeleted: deleteData }));
+      res.end(
+        JSON.stringify({
+          ok: true,
+          dataDeleted: deleteData,
+          cleaned: {
+            destinationsRemovedIncludingReverse: true,
+            orphanMessagingGroupsRemoved: ownedMgIds.length,
+            sessionDirRemoved: true,
+            onecli: onecliRemoved,
+          },
+        }),
+      );
     };
     exec(`docker ps --filter name=nanoclaw-${folderHyphenated}- --format '{{.Names}}'`, (_err, stdout) => {
       const containers = (stdout || '').trim().split('\n').filter(Boolean);
       if (containers.length === 0) {
-        doCleanup();
+        doCleanup().catch((err) => {
+          res.writeHead(500, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'cleanup failed', detail: String(err) }));
+        });
         return;
       }
-      exec(`docker stop ${containers.join(' ')}`, () => doCleanup());
+      exec(`docker stop ${containers.join(' ')}`, () => {
+        doCleanup().catch((err) => {
+          res.writeHead(500, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'cleanup failed', detail: String(err) }));
+        });
+      });
     });
     return;
   }
