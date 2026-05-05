@@ -1,6 +1,15 @@
 # Coworker Architecture
 
-NanoClaw spawns one container per coworker. The container's always-in-context `CLAUDE.md` — the **spine** — is composed from: **spine fragments**, **skills**, **workflows**, **overlays**, and **traits + bindings**. Procedural bodies load on demand via slash commands.
+NanoClaw spawns one container per coworker. The container's always-in-context `CLAUDE.md` — the **spine** — is composed from: **spine fragments**, **skills**, **workflows**, **overlays**, and **traits + bindings**.
+
+Workflow step bodies and overlay gate protocols are **embedded into CLAUDE.md at compose time** — not loaded as slash commands at runtime. Capability skills remain runtime slash commands; their bodies load on demand when invoked.
+
+| Root | Contents | Filename | Runtime-loaded? |
+|------|----------|----------|-----------------|
+| `container/spines/<name>/` | Identity, invariants, context, project `coworker-types.yaml` | — | no (compose-time) |
+| `container/workflows/<name>/` | Workflow step sequences (full body embedded) | `WORKFLOW.md` | no (compose-time) |
+| `container/overlays/<name>/` | Cross-workflow gates (full body inlined at anchor) | `OVERLAY.md` | no (compose-time) |
+| `container/skills/<name>/` | Capability skills the agent invokes as `/slash` | `SKILL.md` | yes |
 
 ## Layers
 
@@ -139,18 +148,18 @@ Every coworker instance has `groups/<folder>/.instructions.md`. The composed `CL
 ### Bring up a new project
 
 1. **Author skills** — one per concrete tool (`<project>-github`, `<project>-build`, `<project>-code-reader`, `<project>-code-writer`)
-2. **Author spine** — `container/skills/spine-<project>/` with identity, invariants, context, `coworker-types.yaml`
+2. **Author spine** — `container/spines/<project>/` with identity, invariants, context, `coworker-types.yaml`
 3. **Declare types** — permission-level types (reader/writer) that extend `<project>-common`
 4. **Validate** — `npm run validate:templates`
 
 Example:
 
 ```yaml
-# container/skills/spine-graphics/coworker-types.yaml
+# container/spines/graphics/coworker-types.yaml
 graphics-common:
   project: graphics
   extends: base-common
-  identity: container/skills/spine-graphics/identity/engine.md
+  identity: container/spines/graphics/identity/engine.md
   skills: [graphics-gerrit, graphics-bazel, graphics-explore, graphics-jira, deep-research]
   workflows: [investigate, review]
   bindings:
@@ -210,8 +219,8 @@ main:
 
 | Path | Role |
 |---|---|
-| `container/skills/spine-base/` | Universal invariants + context + `base-common` type |
-| `container/skills/spine-<project>/` | Project identity + invariants + context + types |
+| `container/spines/base/` | Universal invariants + context + `base-common` type |
+| `container/spines/<project>/` | Project identity + invariants + context + types |
 | `container/skills/<name>-workflow/` | Workflow SKILL.md (base or project) |
 | `container/skills/<name>-overlay/` | Overlay SKILL.md |
 | `container/skills/<name>/` | Skill SKILL.md |

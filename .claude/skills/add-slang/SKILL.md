@@ -46,7 +46,7 @@ This merges in:
 - `container/skills/slang-build/` — clone, build, navigate Slang (SKILL.md, build.md, structure.md, gotchas.md)
 - `container/skills/slang-explore/` — compiler pipeline tracing, backend architecture
 - `container/skills/slang-maintain-release-report/` — MCP-based daily reports, release notes, SPIR-V/GitLab updates
-- `container/skills/spine-slang/` — lego-spine addon: declares `slang-*` coworker types
+- `container/spines/slang/` — lego-spine addon: declares `slang-*` coworker types
 - `container/skills/slang-templates/` — role template files (building blocks for coworker types)
 
 If the merge reports conflicts, resolve them by reading the conflicted files and understanding the intent of both sides.
@@ -55,7 +55,7 @@ If the merge reports conflicts, resolve them by reading the conflicted files and
 
 No direct edits to `groups/main/CLAUDE.md` or `groups/global/CLAUDE.md` are needed — both regenerate from the lego spine.
 
-The composer scans every `container/skills/*/coworker-types.yaml`. This skill's `container/skills/spine-slang/coworker-types.yaml` declares the `slang-*` typed coworkers. To refresh the checked-in prompts:
+The composer scans every `container/skills/*/coworker-types.yaml`. This skill's `container/spines/slang/coworker-types.yaml` declares the `slang-*` typed coworkers. To refresh the checked-in prompts:
 
 ```bash
 npm run rebuild:claude
@@ -111,11 +111,11 @@ ls container/skills/slang-templates/templates/*.yaml
 
 ### Check coworker types
 
-Slang types are declared in `container/skills/spine-slang/coworker-types.yaml` and merged with the base registry at compose time. List the Slang entries:
+Slang types are declared in `container/spines/slang/coworker-types.yaml` and merged with the base registry at compose time. List the Slang entries:
 
 ```bash
-ls container/skills/spine-slang/coworker-types.yaml && \
-  cat container/skills/spine-slang/coworker-types.yaml
+ls container/spines/slang/coworker-types.yaml && \
+  cat container/spines/slang/coworker-types.yaml
 ```
 
 ### Test coworker types
@@ -123,7 +123,7 @@ ls container/skills/spine-slang/coworker-types.yaml && \
 Print `type: description` for every Slang type:
 
 ```bash
-node -e "const y=require('js-yaml');const fs=require('fs');const t=y.load(fs.readFileSync('container/skills/spine-slang/coworker-types.yaml','utf-8'));Object.entries(t).filter(([k])=>k!=='main'&&k!=='global').forEach(([k,v])=>console.log(k+': '+(v.description||'(no description)')))"
+node -e "const y=require('js-yaml');const fs=require('fs');const t=y.load(fs.readFileSync('container/spines/slang/coworker-types.yaml','utf-8'));Object.entries(t).filter(([k])=>k!=='main'&&k!=='global').forEach(([k,v])=>console.log(k+': '+(v.description||'(no description)')))"
 ```
 
 ## Phase 4: Configuration
@@ -156,8 +156,8 @@ Do not assume the current Slang role set is fixed.
 
 Use these project-relative sources of truth instead:
 
-- `container/skills/spine-slang/coworker-types.yaml` — Slang type registry (names, descriptions, `extends` chain, workflows, skills, overlays, trait bindings)
-- `container/skills/spine-base/coworker-types.yaml` — universal `base-common` ancestor
+- `container/spines/slang/coworker-types.yaml` — Slang type registry (names, descriptions, `extends` chain, workflows, skills, overlays, trait bindings)
+- `container/spines/base/coworker-types.yaml` — universal `base-common` ancestor
 - `container/skills/slang-templates/templates/` — reusable building blocks referenced by the Slang types
 
 If new roles or building blocks are added later, they should be discovered from those paths rather than hardcoded in this skill.

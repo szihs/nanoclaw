@@ -1,6 +1,8 @@
-// Render a resolved CoworkerManifest as CLAUDE.md — the thin always-in-context
-// spine for typed coworkers. Workflow and skill bodies load on demand via the
-// Claude Code SKILL.md slash-command mechanism.
+// Render a resolved CoworkerManifest as CLAUDE.md — the always-in-context
+// spine for typed coworkers. Workflows and overlays are embedded verbatim at
+// compose time (their full bodies are baked into CLAUDE.md); capability
+// skills still load on demand via Claude Code's SKILL.md slash-command
+// mechanism.
 
 import { readCoworkerTypes, readSkillCatalog } from './registry.js';
 import { resolveCoworkerManifest } from './resolve.js';
@@ -11,6 +13,38 @@ function indentBlock(text: string, spaces: number): string {
     .split('\n')
     .map((line) => (line.length === 0 ? '' : pad + line))
     .join('\n');
+}
+
+// Strip a leading source-ordered bullet prefix like `1. `, `2) `, etc.
+function stripLeadingNumber(line: string): string {
+  return line.replace(/^\s*\d+[.)]\s+/, '');
+}
+
+// Strip inline `{#step-id}` anchors — the rendered CLAUDE.md gives each step a
+// human-readable number, the anchor id is only needed at parse time.
+function stripStepAnchors(text: string): string {
+  return text.replace(/\s*\{#[a-z0-9-]+\}/g, '');
+}
+
+// Render a single workflow step as a sub-section under the workflow heading.
+// The body may span multiple lines (nested bullets, code blocks, prose).
+function renderStepBlock(n: number, stepId: string, rawBody: string): string {
+  const cleaned = stripStepAnchors(rawBody).trim();
+  const lines = cleaned.split('\n');
+  if (lines.length === 0) return `#### ${n}. ${stepId}`;
+  const first = stripLeadingNumber(lines[0]).trim();
+  const rest = lines.slice(1).join('\n').trimEnd();
+  const header = `#### ${n}. ${first}`;
+  return rest ? `${header}\n\n${rest}` : header;
+}
+
+// Render a gate overlay as an inlined sub-block under the workflow. The full
+// overlay body (including its <IMPORTANT>...</IMPORTANT> + stage protocols) is
+// emitted verbatim — no runtime loading needed.
+function renderGateBlock(overlayName: string, body: string, position: 'BEFORE' | 'AFTER', stepId: string): string {
+  const label = `${overlayName.toUpperCase().replaceAll('-', ' ')} GATE`;
+  const where = position === 'BEFORE' ? `before \`${stepId}\`` : `after \`${stepId}\``;
+  return `#### ⟐ ${label} (${where})\n\n${body.trim()}`;
 }
 
 // Category order drives the section layout. "other" is the sink for traits
@@ -154,13 +188,10 @@ export function renderCoworkerSpine(
     );
   }
 
-  // --- Workflows: loop-unrolled with inline gates ---
+  // --- Workflows: full body embedded with inline overlay gates ---
   if (manifest.workflows.length > 0) {
     parts.push('## Workflows');
     const wfBlocks: string[] = [];
-
-    // Collect overlay protocol bodies (render once at the end).
-    const overlayBodies = new Map<string, string>();
 
     for (const w of manifest.workflows) {
       const wfCustomizations = manifest.customizations.filter((c) => c.workflow === w.name);
@@ -173,90 +204,60 @@ export function renderCoworkerSpine(
       let block = `### /${w.name}\n\n${w.description}${uses}${extendsNote}`;
 
       if (w.steps.length > 0) {
-        // Build unrolled step list with inline gates.
+        // Override lookup by stepId (no more regex on summary).
         const overrideMap = new Map<string, string>();
         for (const o of overrides) {
-          const stepMatch = o.summary.match(/step `([^`]+)`/);
-          if (stepMatch) overrideMap.set(stepMatch[1], o.detail?.trim() || '');
+          if (o.stepId) overrideMap.set(o.stepId, (o.detail || '').trim());
         }
 
-        // Map overlay anchors: stepId → gates to insert after/before.
+        // Overlay anchor maps: stepId → array of full overlay bodies to inline
+        // before/after that step.
         const stepSet = new Set(w.steps);
-        const gatesAfter = new Map<string, string[]>();
-        const gatesBefore = new Map<string, string[]>();
+        const gatesAfter = new Map<string, { overlayName: string; body: string }[]>();
+        const gatesBefore = new Map<string, { overlayName: string; body: string }[]>();
         for (const ov of overlays) {
-          if (ov.anchorSteps) {
-            for (const anchor of ov.anchorSteps) {
-              if (!stepSet.has(anchor.step)) {
-                continue;
-              }
-              const gateName = (ov.overlayName || 'overlay').toUpperCase().replaceAll('-', ' ');
-              const directive =
-                anchor.position === 'before'
-                  ? 'STOP — write a plan + spawn PLAN_REVIEW critique before coding'
-                  : 'STOP — spawn codex-critique for stage-aware review';
-              const label = `── ${gateName} GATE (mandatory) ── ${directive}`;
-              if (anchor.position === 'after') {
-                const arr = gatesAfter.get(anchor.step) || [];
-                arr.push(label);
-                gatesAfter.set(anchor.step, arr);
-              } else {
-                const arr = gatesBefore.get(anchor.step) || [];
-                arr.push(label);
-                gatesBefore.set(anchor.step, arr);
-              }
-            }
+          if (!ov.anchorSteps || !ov.overlayName || !ov.detail) continue;
+          for (const anchor of ov.anchorSteps) {
+            if (!stepSet.has(anchor.step)) continue;
+            const entry = { overlayName: ov.overlayName, body: ov.detail.trim() };
+            const map = anchor.position === 'after' ? gatesAfter : gatesBefore;
+            const arr = map.get(anchor.step) || [];
+            arr.push(entry);
+            map.set(anchor.step, arr);
           }
-          if (ov.overlayName && ov.detail) overlayBodies.set(ov.overlayName, ov.detail.trim());
         }
 
-        const stepLines: string[] = [];
+        // Render each step as a numbered markdown section. Gate overlays are
+        // emitted as inline sub-blocks (full body) before/after the anchored
+        // step. Numbering is per-step (not gate-counted) since gates aren't
+        // steps — they are mandatory sub-protocols attached to steps.
+        const chunks: string[] = [];
         let n = 1;
-        for (const step of w.steps) {
-          // Insert gates BEFORE this step.
-          for (const gate of gatesBefore.get(step) || []) {
-            stepLines.push(`  ${n}. ${gate}`);
-            n++;
+        for (const stepId of w.steps) {
+          // Emit BEFORE-gates for this step.
+          for (const gate of gatesBefore.get(stepId) || []) {
+            chunks.push(renderGateBlock(gate.overlayName, gate.body, 'BEFORE', stepId));
           }
 
-          // The step itself, with override if present.
-          const override = overrideMap.get(step);
-          const suffix = override ? ` — ${override}` : '';
-          stepLines.push(`  ${n}. ${step}${suffix}`);
+          // The step itself.
+          const overrideBody = overrideMap.get(stepId);
+          const rawBody = overrideBody || w.stepBodies[stepId] || stepId;
+          chunks.push(renderStepBlock(n, stepId, rawBody));
           n++;
 
-          // Insert gates AFTER this step.
-          for (const gate of gatesAfter.get(step) || []) {
-            stepLines.push(`  ${n}. ${gate}`);
-            n++;
+          // Emit AFTER-gates for this step.
+          for (const gate of gatesAfter.get(stepId) || []) {
+            chunks.push(renderGateBlock(gate.overlayName, gate.body, 'AFTER', stepId));
           }
         }
 
-        block += '\n\n' + stepLines.join('\n');
+        block += '\n\n' + chunks.join('\n\n');
       }
 
       wfBlocks.push(block);
     }
 
     parts.push(wfBlocks.join('\n\n'));
-
-    // Render overlay gate reference (compact — hooks enforce the gates,
-    // this just tells the agent what to do at each gate).
-    if (overlayBodies.size > 0) {
-      const GATE_SUMMARIES: Record<string, string> = {
-        'critique-overlay':
-          '**Stage-aware critique gates:** Same `codex-critique` agent, different role per stage. ' +
-          'PLAN_REVIEW (before patch): write plan + critique spec↔plan. ' +
-          'DIAGNOSIS_REVIEW (after root-cause/report): critique spec↔findings. ' +
-          'CODE_REVIEW (after patch): critique spec↔plan↔code. ' +
-          'OUTPUT_REVIEW (after draft/write): critique spec↔deliverable. ' +
-          '3-round protocol: fix must-fix items and re-spawn, escalate after 3 rounds.',
-      };
-      const lines = [...overlayBodies.keys()]
-        .sort()
-        .map((name) => GATE_SUMMARIES[name] || `**${name}:** see \`/${name}\` skill for details.`);
-      parts.push('## Gates\n\n' + lines.join('\n\n'));
-    }
   }
 
   // --- Skills ---
@@ -271,8 +272,8 @@ export function renderCoworkerSpine(
     );
   }
 
-  if (manifest.workflows.length > 0 || manifest.skills.length > 0) {
-    parts.push('_Invoke a workflow or skill with its slash command. Bodies load on demand._');
+  if (manifest.skills.length > 0) {
+    parts.push('_Invoke a skill with its slash command. Skill bodies load on demand._');
   }
 
   if (extraInstructions?.trim()) {

@@ -73,20 +73,30 @@ let registryCache: {
 } | null = null;
 
 function registryFingerprint(): number {
-  const skillsDir = path.join(process.cwd(), 'container', 'skills');
+  const root = process.cwd();
+  // Mirror discovery roots in src/claude-composer/registry.ts. Any change to a
+  // spine, workflow, overlay, or capability skill file invalidates the cache.
+  const roots: { dir: string; files: string[] }[] = [
+    { dir: path.join(root, 'container', 'skills'), files: ['coworker-types.yaml', 'SKILL.md'] },
+    { dir: path.join(root, 'container', 'workflows'), files: ['WORKFLOW.md'] },
+    { dir: path.join(root, 'container', 'overlays'), files: ['OVERLAY.md'] },
+    { dir: path.join(root, 'container', 'spines'), files: ['coworker-types.yaml'] },
+  ];
   let maxMtime = 0;
-  try {
-    for (const dir of fs.readdirSync(skillsDir)) {
-      for (const file of ['coworker-types.yaml', 'SKILL.md']) {
-        try {
-          maxMtime = Math.max(maxMtime, fs.statSync(path.join(skillsDir, dir, file)).mtimeMs);
-        } catch {
-          /* file does not exist */
+  for (const { dir, files } of roots) {
+    try {
+      for (const entry of fs.readdirSync(dir)) {
+        for (const file of files) {
+          try {
+            maxMtime = Math.max(maxMtime, fs.statSync(path.join(dir, entry, file)).mtimeMs);
+          } catch {
+            /* file does not exist */
+          }
         }
       }
+    } catch {
+      /* root dir does not exist */
     }
-  } catch {
-    /* skills dir does not exist */
   }
   return maxMtime;
 }
@@ -147,8 +157,8 @@ const wakePromises = new Map<string, Promise<void>>();
 
 /**
  * Compose CLAUDE.md from the lego coworker model: spine fragments + skills +
- * workflows + overlays + trait bindings, all discovered under
- * `container/skills/*`. See docs/lego-coworker-workflows.md.
+ * workflows + overlays + trait bindings, discovered under
+ * `container/{spines,skills,workflows,overlays}/`. See docs/lego-coworker-workflows.md.
  *
  * Runs for ALL non-admin coworkers on every container wake. CLAUDE.md is
  * system-owned (regenerated from the manifest + .instructions.md on every

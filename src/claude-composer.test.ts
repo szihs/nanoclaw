@@ -238,7 +238,7 @@ base-common:
       const types = readCoworkerTypes(root);
       const catalog = readSkillCatalog(root);
       expect(() => resolveCoworkerManifest(types, 'base-common', catalog, root)).toThrow(
-        /references unknown skill\/workflow: does-not-exist/,
+        /references unknown skill\/workflow\/overlay: does-not-exist/,
       );
     });
 
@@ -377,7 +377,7 @@ slang-triage:
       expect(out).toContain('## Skills Available');
       expect(out).toContain('- `/base-nanoclaw` — Host tools.');
       expect(out).toContain('- `/slang-github` — Fetch Slang issues.');
-      expect(out).toContain('Bodies load on demand.');
+      expect(out).toContain('Skill bodies load on demand.');
 
       // The 6-section headings must NOT appear — this is the spine model.
       expect(out).not.toContain('## Capabilities');
@@ -477,7 +477,7 @@ global:
       expect(out).not.toContain('## Identity');
       expect(out).not.toContain('## Invariants');
       expect(out).not.toContain('## Workflows');
-      expect(out).not.toContain('Bodies load on demand.');
+      expect(out).not.toContain('Skill bodies load on demand.');
     });
   });
 
@@ -702,8 +702,10 @@ render-check:
       const out = composeCoworkerSpine({ projectRoot: root, coworkerType: 'render-check' });
 
       expect(out).not.toContain('## Trait Bindings');
-      expect(out).toContain('## Gates');
-      expect(out).toContain('CRIT OVERLAY GATE (mandatory)');
+      // Overlay bodies are inlined at their anchor points (not in a trailing
+      // "## Gates" section); the block header is "⟐ NAME GATE (before/after <stepId>)".
+      expect(out).not.toContain('## Gates');
+      expect(out).toContain('CRIT OVERLAY GATE (after `patch`)');
     });
 
     it('warns when overlay anchors match zero steps in the target workflow', () => {

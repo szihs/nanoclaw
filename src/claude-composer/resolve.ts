@@ -165,8 +165,9 @@ export function resolveCoworkerManifest(
   }
   if (unknownRefs.length > 0) {
     throw new Error(
-      `Coworker type "${typeName}" references unknown skill/workflow: ${[...new Set(unknownRefs)].join(', ')}. ` +
-        `Each reference must match a container/skills/<dir>/SKILL.md with \`name: <ref>\` in its frontmatter.`,
+      `Coworker type "${typeName}" references unknown skill/workflow/overlay: ${[...new Set(unknownRefs)].join(', ')}. ` +
+        `Each reference must match a SKILL.md (container/skills/), WORKFLOW.md (container/workflows/), ` +
+        `or OVERLAY.md (container/overlays/) with \`name: <ref>\` in its frontmatter.`,
     );
   }
 
@@ -185,10 +186,13 @@ export function resolveCoworkerManifest(
     const meta = catalog[name];
     if (meta.type === 'workflow') {
       const uses = [...meta.uses.skills, ...meta.uses.workflows];
-      // Inherit steps from parent workflow if this child has none.
+      // Inherit steps + step bodies from parent workflow if this child has none.
       let steps = meta.steps;
+      let stepBodies = meta.stepBodies;
       if (steps.length === 0 && meta.extendsWorkflow && catalog[meta.extendsWorkflow]) {
-        steps = catalog[meta.extendsWorkflow].steps;
+        const parent = catalog[meta.extendsWorkflow];
+        steps = parent.steps;
+        stepBodies = { ...parent.stepBodies };
       }
       workflowEntries.push({
         name: meta.name,
@@ -196,6 +200,7 @@ export function resolveCoworkerManifest(
         uses,
         requires: meta.requires,
         steps,
+        stepBodies,
       });
       workflowSet.add(meta.name);
     } else if (meta.type === 'capability') {
@@ -306,6 +311,7 @@ export function resolveCoworkerManifest(
       customizations.push({
         workflow: wf.name,
         kind: 'override',
+        stepId,
         summary: `In \`/${wf.name}\`, step \`${stepId}\` is overridden.`,
         detail: body.trim(),
       });
@@ -316,7 +322,7 @@ export function resolveCoworkerManifest(
     const overlayMeta = catalog[overlayName];
     if (!overlayMeta || overlayMeta.type !== 'overlay' || !overlayMeta.overlay) {
       throw new Error(
-        `Coworker type "${typeName}" references overlay "${overlayName}" but it is not a \`type: overlay\` SKILL.md.`,
+        `Coworker type "${typeName}" references overlay "${overlayName}" but no container/overlays/<dir>/OVERLAY.md declares it.`,
       );
     }
     const overlay = overlayMeta.overlay;

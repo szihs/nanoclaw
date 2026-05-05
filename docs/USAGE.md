@@ -97,7 +97,7 @@ What it generates:
 
 ### Two-step flow
 
-1. **`/onboard-project <repo>`** — analyzes the codebase (clones it, reads existing AI config files, CI workflows, build scripts) and generates the full skeleton in `container/skills/spine-{project}/`. Reuses existing base skills (`deep-research`, `codex-critique`, `investigate`, `implement`, `review`, `document`) — no duplication.
+1. **`/onboard-project <repo>`** — analyzes the codebase (clones it, reads existing AI config files, CI workflows, build scripts) and generates the full skeleton in `container/spines/{project}/`. Reuses existing base skills (`deep-research`, `codex-critique`, `investigate`, `implement`, `review`, `document`) — no duplication.
 2. **`/onboard-coworker`** — selects a bundle or type from the registry and creates a running coworker instance.
 
 After running `/onboard-project`, the new types (`{project}-reader`, `{project}-writer`) are immediately available in the lego registry for coworker creation.
