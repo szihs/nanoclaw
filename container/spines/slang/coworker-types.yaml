@@ -2,11 +2,11 @@ slang-common:
   description: "Slang compiler spine — identity, ABI invariants, repo layout."
   project: slang
   extends: base-common
-  identity: container/skills/spine-slang/identity/compiler-engineer.md
+  identity: container/spines/slang/identity/compiler-engineer.md
   invariants:
-    - container/skills/spine-slang/invariants/abi-stability.md
+    - container/spines/slang/invariants/abi-stability.md
   context:
-    - container/skills/spine-slang/context/layout.md
+    - container/spines/slang/context/layout.md
   skills:
     - slang-build
     - slang-code-reader
