@@ -2259,19 +2259,6 @@ function requireAuth(req: import('http').IncomingMessage, res: import('http').Se
   return false;
 }
 
-/** Strict auth — always requires DASHBOARD_SECRET, even when unset.
- *  Used for dangerous operations (exec, config writes) that should
- *  never be open by default regardless of bind address. */
-function requireStrictAuth(req: import('http').IncomingMessage, res: import('http').ServerResponse): boolean {
-  const secret = getDashboardSecret();
-  if (!secret) {
-    res.writeHead(403, { 'Content-Type': 'application/json' });
-    res.end('{"error":"DASHBOARD_SECRET must be set to use this endpoint"}');
-    return false;
-  }
-  return requireAuth(req, res);
-}
-
 const MAX_BODY_SIZE = 1024 * 1024; // 1 MB
 const MAX_ARCHIVE_SIZE = 500 * 1024 * 1024; // 500 MB
 const MAX_ARCHIVE_ENTRIES = 50_000;
@@ -4261,9 +4248,13 @@ export async function handleRequest(
     return;
   }
 
-  // API: execute command in container
+  // API: execute command in container.
+  // Guarded by requireAuth (not strict): open on localhost when no
+  // DASHBOARD_SECRET is set, secret-gated otherwise. Mirrors every other
+  // dashboard endpoint — operator picks the posture via the env var rather
+  // than having exec permanently blocked behind a mandatory secret.
   if (req.method === 'POST' && /^\/api\/coworkers\/[^/]+\/exec$/.test(url.pathname)) {
-    if (!requireStrictAuth(req, res)) return;
+    if (!requireAuth(req, res)) return;
     const folder = safeDecode(url.pathname.replace('/api/coworkers/', '').replace('/exec', ''));
     if (!folder) {
       res.writeHead(400);
