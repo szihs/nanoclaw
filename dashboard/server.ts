@@ -3247,9 +3247,13 @@ export async function handleRequest(
           const { composeCoworkerSpine } = await import('../src/claude-composer.js');
           const rdb = db;
           let coworkerType: string | null = null;
+          let disableOverlays = false;
           if (rdb) {
-            const row = rdb.prepare('SELECT coworker_type FROM agent_groups WHERE folder = ?').get(folder) as any;
+            const row = rdb
+              .prepare('SELECT coworker_type, disable_overlays FROM agent_groups WHERE folder = ?')
+              .get(folder) as any;
             coworkerType = row?.coworker_type || null;
+            disableOverlays = row?.disable_overlays === 1;
           }
           let extraInstructions: string | null = null;
           try {
@@ -3258,7 +3262,7 @@ export async function handleRequest(
             /* none */
           }
           if (coworkerType) {
-            content = composeCoworkerSpine({ coworkerType, extraInstructions });
+            content = composeCoworkerSpine({ coworkerType, extraInstructions, disableOverlays });
           } else {
             content = readFileSync(join(groupDir, 'CLAUDE.md'), 'utf-8');
           }
@@ -4276,9 +4280,13 @@ export async function handleRequest(
           try {
             const { composeCoworkerSpine } = await import('../src/claude-composer.js');
             let coworkerType: string | null = null;
+            let disableOverlays = false;
             try {
-              const row = db.prepare('SELECT coworker_type FROM agent_groups WHERE folder = ?').get(g.folder) as any;
+              const row = db
+                .prepare('SELECT coworker_type, disable_overlays FROM agent_groups WHERE folder = ?')
+                .get(g.folder) as any;
               coworkerType = row?.coworker_type || null;
+              disableOverlays = row?.disable_overlays === 1;
             } catch {
               /* ignore */
             }
@@ -4289,7 +4297,7 @@ export async function handleRequest(
               } catch {
                 /* none */
               }
-              g.memory = composeCoworkerSpine({ coworkerType, extraInstructions });
+              g.memory = composeCoworkerSpine({ coworkerType, extraInstructions, disableOverlays });
             } else {
               g.memory = readFileSync(join(getGroupsDir(), g.folder, 'CLAUDE.md'), 'utf-8');
             }
