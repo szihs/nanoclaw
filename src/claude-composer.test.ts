@@ -377,7 +377,7 @@ slang-triage:
       expect(out).toContain('## Skills Available');
       expect(out).toContain('- `/base-nanoclaw` — Host tools.');
       expect(out).toContain('- `/slang-github` — Fetch Slang issues.');
-      expect(out).toContain('Skill bodies load on demand.');
+      expect(out).not.toContain('Skill bodies load on demand.');  // footer dropped — invocation.md covers this
 
       // The 6-section headings must NOT appear — this is the spine model.
       expect(out).not.toContain('## Capabilities');
