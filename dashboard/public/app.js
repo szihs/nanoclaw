@@ -3571,8 +3571,17 @@ async function showCreateModal() {
 
   const overlay = document.createElement('div');
   overlay.className = 'cw-modal-overlay';
-  const typeCheckboxes = Object.entries(cwState.types || {}).map(
-    ([k, v]) => `<label class="cw-type-checkbox"><input type="checkbox" value="${esc(k)}"><span>${esc(k)}</span><span style="color:var(--text-muted)">— ${esc(v.description || '')}</span></label>`
+  // Filter: hide abstract bases and flat upstream-parity types (main/global
+  // are reserved and already provisioned; base-common / *-common are abstract
+  // parents, never a direct coworker type).
+  const selectableTypes = Object.entries(cwState.types || {}).filter(
+    ([k, v]) => !v.flat && !k.endsWith('-common') && k !== 'base-common'
+  );
+  // Single-select: coworker types use single inheritance (one `extends`
+  // parent); exposing multi-select produced invalid compositions like
+  // slang-reader + slang-writer. Radio enforces exactly-one pick.
+  const typeCheckboxes = selectableTypes.map(
+    ([k, v]) => `<label class="cw-type-checkbox"><input type="radio" name="cw-new-type" value="${esc(k)}"><span>${esc(k)}</span><span style="color:var(--text-muted)">— ${esc(v.description || '')}</span></label>`
   ).join('');
   const instructionOptions = instructionTemplates.map(
     (t) => `<option value="${esc(t.name)}">${esc(t.name)}</option>`
@@ -3583,7 +3592,7 @@ async function showCreateModal() {
     <input id="cw-new-name" placeholder="e.g. Slang CUDA">
     <label>Folder</label>
     <input id="cw-new-folder" placeholder="e.g. slang-cuda">
-    <label>Type (select one or more templates)</label>
+    <label>Type (select one — single inheritance)</label>
     <div id="cw-new-types" style="max-height:200px;overflow-y:auto;overflow-x:hidden;border:1px solid var(--border);border-radius:4px;padding:8px;font-size:11px">${typeCheckboxes}</div>
     <label>Instruction style (optional)</label>
     <select id="cw-new-instruction-style" style="width:100%;padding:6px;border:1px solid var(--border);border-radius:4px;background:var(--bg);color:var(--text)">
@@ -3619,12 +3628,12 @@ async function showCreateModal() {
     folderInput.value = slug;
     triggerInput.value = '@' + nameInput.value.replace(/\s+/g, '');
   });
-  // Auto-fill from first checked type
+  // Auto-fill from the selected type (radio group — exactly one can be picked).
   overlay.querySelector('#cw-new-types').addEventListener('change', (e) => {
-    if (e.target.type !== 'checkbox') return;
-    const checked = Array.from(overlay.querySelectorAll('#cw-new-types input:checked')).map(c => c.value);
-    if (checked.length > 0 && !nameInput.value) {
-      const t = checked[0];
+    if (e.target.type !== 'radio') return;
+    const picked = overlay.querySelector('#cw-new-types input:checked');
+    if (picked && !nameInput.value) {
+      const t = picked.value;
       const typeName = t.split('-').map((w) => w[0].toUpperCase() + w.slice(1)).join(' ');
       nameInput.value = typeName;
       folderInput.value = t;
