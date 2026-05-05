@@ -41,7 +41,7 @@ This merges in:
 
 The base `groups/main/CLAUDE.md` and `groups/global/CLAUDE.md` stay on `v2_main` — they are regenerated from the lego spine, not hand-edited. No direct edits to `groups/main/CLAUDE.md` or `groups/global/CLAUDE.md` are needed.
 
-This skill installs `container/skills/dashboard-base/`. The composer scans every `container/skills/*/coworker-types.yaml` and merges duplicate type entries, so `dashboard-base` appends its formatting block to the `main` and `global` flat types without touching `nanoclaw-base`. To reflect it in the checked-in prompts:
+This skill installs `container/skills/dashboard-base/`. The composer scans every `container/{spines,skills}/*/coworker-types.yaml` and merges duplicate type entries, so `dashboard-base` appends its formatting block to the `main` and `global` flat types without touching `nanoclaw-base`. To reflect it in the checked-in prompts:
 
 ```bash
 npm run rebuild:claude

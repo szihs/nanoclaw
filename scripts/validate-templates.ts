@@ -58,7 +58,7 @@ function main(): number {
 
   const typeNames = Object.keys(types).sort();
   if (typeNames.length === 0) {
-    console.error('No coworker types found under container/skills/*/coworker-types.yaml');
+    console.error('No coworker types found under container/{spines,skills}/*/coworker-types.yaml');
     return 1;
   }
 
