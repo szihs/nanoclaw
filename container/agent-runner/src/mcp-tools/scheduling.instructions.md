@@ -30,25 +30,34 @@ bash -c 'node --input-type=module -e "
 
 If a task requires your judgment every time (daily briefings, reminders, reports), skip the script — just use a regular prompt. Do not attempt to do things like sentiment analysis or advanced nlp in scripts.
 
-### `new_session: true` for stateless recurring tasks
+### `new_session` — fresh-session-per-fire is the default
 
-For recurring heartbeat / cron tasks where each fire does NOT need to reference prior fires' conversation history, pass `new_session: true` when scheduling:
+Scheduled tasks default to running each fire in a fresh Claude session. You don't need to set anything for the common case:
 
 ```json
-{ "prompt": "...", "processAfter": "...", "recurrence": "*/5 * * * *", "new_session": true }
+{ "prompt": "...", "processAfter": "...", "recurrence": "*/5 * * * *" }
 ```
 
-Each fire then runs in a fresh Claude session against the cached system prompt — prior fires' conversation isn't resumed. Use when:
+Each fire starts without resuming prior fires' conversation — the cached system prompt is still reused, so cost stays flat instead of growing with every fire. This prevents the cost-growth-and-compaction-churn behavior that accumulating continuations produce for heartbeat / cron tasks.
 
-- The task is a periodic check (heartbeat, CI babysitter, queue sweep) whose state lives in files on disk (`memory/`, shared learnings) rather than conversation memory.
-- You don't want the recurring-task conversation to grow indefinitely (with frequent compactions driving repeated cache-creation cost).
+### Opt out with `new_session: false`
 
-Do NOT use when:
+Only the rare multi-fire workflow that genuinely relies on in-conversation memory across fires should opt out:
 
-- The task genuinely benefits from remembering what it did in prior fires via in-conversation memory (rare — usually file-based state is cleaner anyway).
-- The task is one-shot (non-recurring) — the flag is only meaningful for recurring tasks.
+```json
+{ "prompt": "...", "processAfter": "...", "recurrence": "0 */6 * * *", "new_session": false }
+```
 
-Toggle on an existing recurring task via `update_task({ taskId, new_session: true })`.
+Reasons to opt out:
+
+- The task builds up chat-style state that later fires read back from conversation history (rather than from files on disk).
+- The agent needs to see past tool-call results from earlier fires to decide what to do next.
+
+If the state can live in files (`memory/`, shared learnings, `/workspace/agent/*.md`), keep the default — it's cheaper and more robust.
+
+### Toggling on an existing task
+
+Use `update_task({ taskId, new_session: false })` to opt out of an already-scheduled recurring task, or `new_session: true` to explicitly persist the default.
 
 ### Frequent task guidance
 
