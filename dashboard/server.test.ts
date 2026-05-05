@@ -1594,15 +1594,27 @@ describe('/api/credentials/submit and /api/credentials/reject', () => {
     expect(data.error).toMatch(/credentialId/);
   });
 
-  it('credential submit uses requireAuth (not requireStrictAuth)', async () => {
-    // No DASHBOARD_SECRET set → requireAuth returns true, requireStrictAuth would return 403
-    // So if we get past auth (status != 403), we're using requireAuth
+  it('credential submit does not demand DASHBOARD_SECRET', async () => {
+    // No DASHBOARD_SECRET set → requireAuth returns true. A 403 here would
+    // mean some stricter gate is in place; that's no longer the intended
+    // posture for any dashboard endpoint.
     const res = await fetch(`${baseUrl}/api/credentials/submit`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ credentialId: 'cred-1', value: 'secret-val' }),
     });
-    // Should NOT be 403 — that would mean requireStrictAuth is blocking
+    expect(res.status).not.toBe(403);
+  });
+
+  it('container exec endpoint does not demand DASHBOARD_SECRET', async () => {
+    // Previously this endpoint was behind a strict-auth gate that returned
+    // 403 whenever DASHBOARD_SECRET was unset. Now it matches every other
+    // endpoint: open on localhost when no secret is configured.
+    const res = await fetch(`${baseUrl}/api/coworkers/any-folder/exec`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ command: 'true' }),
+    });
     expect(res.status).not.toBe(403);
   });
 });
