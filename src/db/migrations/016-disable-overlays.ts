@@ -5,7 +5,9 @@ export const migration016: Migration = {
   name: 'disable-overlays',
   up(db) {
     const hasCol = (
-      db.prepare("SELECT count(*) as c FROM pragma_table_info('agent_groups') WHERE name = 'disable_overlays'").get() as {
+      db
+        .prepare("SELECT count(*) as c FROM pragma_table_info('agent_groups') WHERE name = 'disable_overlays'")
+        .get() as {
         c: number;
       }
     ).c;

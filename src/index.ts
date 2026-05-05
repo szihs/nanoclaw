@@ -27,6 +27,7 @@ import { log } from './log.js';
 import { startMcpServers, getRunningServerNames, getServerUpstreamPort } from './mcp-registry.js';
 import { startMcpAuthProxy, setUpstreamPortResolver, discoverTools } from './mcp-auth-proxy.js';
 import { startDashboardIngress } from './dashboard-ingress.js';
+import { startGitHubWebhookServer, type GitHubWebhookServerHandle } from './github-webhook-server.js';
 
 // Response + shutdown registries live in response-registry.ts to break the
 // circular import cycle: src/index.ts imports src/modules/index.js for side
@@ -91,6 +92,7 @@ export interface ConversationConfig {
 let mcpStackHandle: { stop: () => void } | null = null;
 let mcpProxyHandle: { stop: () => void } | null = null;
 let dashboardIngressHandle: { stop: () => Promise<void> } | null = null;
+let githubWebhookHandle: GitHubWebhookServerHandle | null = null;
 
 async function main(): Promise<void> {
   // Singleton guard: prevent duplicate orchestrators on the same data directory
@@ -262,6 +264,9 @@ async function main(): Promise<void> {
     },
   });
 
+  // 3c. GitHub webhook server (publicly exposed, HMAC-validated)
+  githubWebhookHandle = startGitHubWebhookServer();
+
   // 4. Delivery adapter bridge — dispatches to channel adapters
   const deliveryAdapter = {
     async deliver(
@@ -356,6 +361,7 @@ async function shutdown(signal: string): Promise<void> {
   mcpProxyHandle?.stop();
   mcpStackHandle?.stop();
   await dashboardIngressHandle?.stop();
+  await githubWebhookHandle?.stop();
   try {
     await teardownChannelAdapters();
   } finally {

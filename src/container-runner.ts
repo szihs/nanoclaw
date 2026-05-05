@@ -916,8 +916,12 @@ async function buildContainerArgs(
     const sharedCombinedPath = path.join('/tmp', 'onecli-combined-ca.pem');
     let savedCa: Buffer | null = null;
     let savedCombined: Buffer | null = null;
-    try { savedCa = fs.readFileSync(sharedCaPath); } catch {}
-    try { savedCombined = fs.readFileSync(sharedCombinedPath); } catch {}
+    try {
+      savedCa = fs.readFileSync(sharedCaPath);
+    } catch {}
+    try {
+      savedCombined = fs.readFileSync(sharedCombinedPath);
+    } catch {}
 
     const onecliApplied = await onecli.applyContainerConfig(args, { addHostMapping: false, agent: agentIdentifier });
     if (onecliApplied) {
