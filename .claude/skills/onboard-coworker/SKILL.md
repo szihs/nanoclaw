@@ -19,7 +19,10 @@ Scans pre-packaged YAML bundles in `coworkers/` and the lego coworker-type regis
 |------|---------|
 | `coworkers/*.yaml` | Pre-packaged coworker bundles (version 3 exports — name, trigger, instructions, memory snapshot) |
 | `container/{spines,skills}/*/coworker-types.yaml` | Lego coworker-type registry — each skill ships its own types; duplicate type names merge across skills |
-| `container/skills/*/SKILL.md` | Container skills (capability / workflow / overlay bodies) loaded inside the agent |
+| `container/skills/*/SKILL.md` | Capability skills — runtime slash commands loaded inside the agent on demand |
+| `container/workflows/*/WORKFLOW.md` | Workflow procedures — embedded into the composed CLAUDE.md at compose time (not runtime slash commands) |
+| `container/overlays/*/OVERLAY.md` | Overlay protocols — inlined into workflow bodies at anchor steps at compose time |
+| `container/spines/*/` | Spine fragments (identity/invariants/context/coworker-types.yaml) — composed at the top of CLAUDE.md |
 | `groups/templates/instructions/` | Reusable instruction overlays (`thorough-analyst`, `terse-reporter`, `code-reviewer`, `ci-focused`) |
 | `docs/lego-coworker-workflows.md` | Full schema for the lego model (types, spine fragments, workflows, skills, overlays, traits, bindings) |
 
@@ -119,7 +122,7 @@ The type's bindings, workflows, skills, invariants, context fragments, and MCP a
 
 ### 2b — Define a new reusable coworker type
 
-If the user wants the new role to be reusable (available for future `onboard-coworker` runs), add a new entry to an existing lego skill's registry — typically `container/skills/<project>-spine/coworker-types.yaml`. If there's no project spine yet, create a new `container/skills/<project>-spine/` directory with its own `coworker-types.yaml`.
+If the user wants the new role to be reusable (available for future `onboard-coworker` runs), add a new entry to the project's spine registry at `container/spines/<project>/coworker-types.yaml`. If there's no project spine yet, create a new `container/spines/<project>/` directory with its own `coworker-types.yaml` + optional `identity/`, `invariants/`, `context/` subdirs.
 
 A minimal entry:
 
@@ -139,9 +142,11 @@ A minimal entry:
 
 Key rules (full schema in `docs/lego-coworker-workflows.md`):
 
-- `extends` — parent type name. Invariants, context, workflows, skills, overlays append + dedup; identity and bindings leaf-wins.
-- `identity` / `invariants` / `context` — paths to markdown files under `container/skills/`. These render into the always-in-context spine.
-- `workflows` / `skills` / `overlays` — names matching `SKILL.md` `name:` frontmatter under `container/skills/*/`. Workflow bodies are embedded at compose time; capability skills load on demand when invoked via slash command.
+- `extends` — **single** parent type name. Single inheritance only: a type has exactly one parent (that parent may have its own parent, forming a chain). Invariants, context, workflows, skills, overlays append + dedup; identity and bindings leaf-wins. Do not list multiple parents.
+- `identity` / `invariants` / `context` — paths to markdown files under `container/spines/<project>/`. These render into the always-in-context spine.
+- `workflows` — names matching `WORKFLOW.md` `name:` frontmatter under `container/workflows/*/`. Bodies are embedded into CLAUDE.md at compose time (NOT runtime slash commands).
+- `skills` — names matching `SKILL.md` `name:` frontmatter under `container/skills/*/`. Runtime slash commands; bodies load on demand.
+- `overlays` — names matching `OVERLAY.md` `name:` frontmatter under `container/overlays/*/`. Inlined at workflow step anchors at compose time.
 - `bindings` — map abstract trait names (`repo.pr`, `code.edit`, `test.run`, …) to concrete skill names. The composer uses these to derive the agent's MCP tool allowlist from each bound skill's `allowed-tools`.
 - `flat: true` — special mode for base agents like `main` / `global` that render verbatim without structural headings. Leave unset for typed coworkers.
 
