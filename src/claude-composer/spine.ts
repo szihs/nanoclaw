@@ -6,6 +6,7 @@
 
 import { readCoworkerTypes, readSkillCatalog } from './registry.js';
 import { resolveCoworkerManifest } from './resolve.js';
+import type { CoworkerManifest, SkillMeta } from './types.js';
 
 function indentBlock(text: string, spaces: number): string {
   const pad = ' '.repeat(spaces);
@@ -26,25 +27,112 @@ function stripStepAnchors(text: string): string {
   return text.replace(/\s*\{#[a-z0-9-]+\}/g, '');
 }
 
-// Render a single workflow step as a sub-section under the workflow heading.
-// The body may span multiple lines (nested bullets, code blocks, prose).
-function renderStepBlock(n: number, stepId: string, rawBody: string): string {
-  const cleaned = stripStepAnchors(rawBody).trim();
-  const lines = cleaned.split('\n');
-  if (lines.length === 0) return `#### ${n}. ${stepId}`;
-  const first = stripLeadingNumber(lines[0]).trim();
-  const rest = lines.slice(1).join('\n').trimEnd();
-  const header = `#### ${n}. ${first}`;
-  return rest ? `${header}\n\n${rest}` : header;
+// Humanize a step id into a title: "root-cause" → "Root cause".
+function humanizeStepId(id: string): string {
+  if (!id) return '';
+  return id.replace(/[-_]+/g, ' ').replace(/^(\w)/, (m) => m.toUpperCase());
 }
 
-// Render a gate overlay as an inlined sub-block under the workflow. The full
-// overlay body (including its <IMPORTANT>...</IMPORTANT> + stage protocols) is
-// emitted verbatim — no runtime loading needed.
+// Extract the title for a step from its source body: the first `**Bolded**`
+// segment wins; otherwise fall back to humanized stepId. Used so the rendered
+// heading stays stable even when a body has been overridden or inherited.
+function extractStepTitle(body: string | undefined, stepId: string): string {
+  if (!body) return humanizeStepId(stepId);
+  const bolded = body.match(/\*\*([^*\n]+)\*\*/);
+  if (bolded) return bolded[1].trim();
+  return humanizeStepId(stepId);
+}
+
+// Render a single workflow step as a sub-section under the workflow heading.
+// Heading is stable: `#### N. <Step Title>`. The rawBody becomes the prose
+// body below the heading; if the body's first line was a bullet like
+// "1. **Name** — body" we strip the redundant title prefix so the body reads
+// as pure prose.
+function renderStepBlock(n: number, stepId: string, rawBody: string, title: string): string {
+  const header = `#### ${n}. ${title}`;
+  const cleaned = stripStepAnchors(rawBody).trim();
+  if (!cleaned) return header;
+  const lines = cleaned.split('\n');
+  // Drop a leading "N. **Title** — " prefix if present; otherwise keep the
+  // body verbatim.
+  const first = lines[0];
+  const prefixMatch = first.match(/^\s*\d+[.)]\s+(\*\*[^*\n]+\*\*\s*(?:\{#[^}]+\})?\s*[—-]?\s*)?(.*)$/);
+  let body: string;
+  if (prefixMatch) {
+    const remainder = prefixMatch[2].trim();
+    body = [remainder, ...lines.slice(1)].join('\n').trimEnd();
+  } else {
+    body = cleaned;
+  }
+  return body ? `${header}\n\n${body}` : header;
+}
+
+// Render a gate overlay as an inlined sub-block under the workflow. Overlay
+// body markdown headings are demoted so they live below the gate's `####`
+// header: `## Foo` becomes `##### Foo`. Prevents overlay sub-headings from
+// breaking the outer `## Workflows` section boundary.
 function renderGateBlock(overlayName: string, body: string, position: 'BEFORE' | 'AFTER', stepId: string): string {
   const label = `${overlayName.toUpperCase().replaceAll('-', ' ')} GATE`;
   const where = position === 'BEFORE' ? `before \`${stepId}\`` : `after \`${stepId}\``;
-  return `#### ⟐ ${label} (${where})\n\n${body.trim()}`;
+  const demoted = demoteHeadings(body.trim(), 3);
+  return `#### ⟐ ${label} (${where})\n\n${demoted}`;
+}
+
+// Demote ATX markdown headings by `levels`, capped at h6. Ignores code fences.
+function demoteHeadings(md: string, levels: number): string {
+  const lines = md.split('\n');
+  let inCodeFence = false;
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (/^\s*```/.test(line)) {
+      inCodeFence = !inCodeFence;
+      continue;
+    }
+    if (inCodeFence) continue;
+    const m = line.match(/^(#{1,6}) (.*)$/);
+    if (!m) continue;
+    const newLevel = Math.min(6, m[1].length + levels);
+    lines[i] = '#'.repeat(newLevel) + ' ' + m[2];
+  }
+  return lines.join('\n');
+}
+
+// Rewrite backtick-wrapped `/name` references embedded inside workflow /
+// overlay bodies so the agent doesn't confuse workflow names (embedded
+// procedures) with skill names (runtime slash commands) or overlay names
+// (Task-tool subagents, not slash commands).
+//
+//   `/alpha` where alpha is a workflow   → "the **alpha** workflow section below"
+//   `/beta`  where beta is a capability skill → left as `` `/beta` `` (slash command)
+//   `/gamma` where gamma is an overlay   → "the **gamma** subagent (spawn via Task tool)"
+//   `/delta` unknown                     → left as `` `/delta` `` (caller must fix source)
+//
+// Restricted to backticked refs to avoid mangling file paths like
+// `/workspace/agent/...` or bash snippets like `mkdir -p /tmp/x`. Skips
+// fenced code blocks entirely.
+function rewriteSlashRefs(
+  md: string,
+  workflowNames: Set<string>,
+  capabilitySkillNames: Set<string>,
+  overlayNames: Set<string>,
+): string {
+  const lines = md.split('\n');
+  let inCodeFence = false;
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (/^\s*```/.test(line)) {
+      inCodeFence = !inCodeFence;
+      continue;
+    }
+    if (inCodeFence) continue;
+    lines[i] = line.replace(/`\/([a-z][a-z0-9-]*)`/g, (m, name) => {
+      if (workflowNames.has(name)) return `the **${name}** workflow section below`;
+      if (overlayNames.has(name)) return `the **${name}** subagent (spawn via the Task tool)`;
+      if (capabilitySkillNames.has(name)) return m; // real slash command
+      return m; // unknown — leave literal for upstream fix
+    });
+  }
+  return lines.join('\n');
 }
 
 // Category order drives the section layout. "other" is the sink for traits
@@ -78,7 +166,7 @@ const DOMAIN_TO_CATEGORY: Record<string, Category> = {
 
 // Pick the dominant category for an entry by counting how many of its traits
 // fall into each bucket. Ties resolve via CATEGORY_ORDER (earlier wins), so
-// a workflow that pulls from [repo.read, ci.inspect] is classified CI only if
+// an entry that pulls from [repo.read, ci.inspect] is classified CI only if
 // CI trait count strictly exceeds Repo — otherwise Repo wins by order.
 function categorize(traits: readonly string[]): Category {
   if (traits.length === 0) return 'other';
@@ -160,7 +248,18 @@ export function renderCoworkerSpine(
     parts.push(manifest.context.join('\n\n'));
   }
 
-  // --- Task routing guide ---
+  // Build name lookups for slash-rewrite. Three distinct resolutions:
+  //   workflows           → embedded procedures, rewrite to section refs
+  //   capability skills   → runtime slash commands, leave literal
+  //   overlays (agent.md) → Task-tool subagents, rewrite accordingly
+  const workflowNames = new Set(manifest.workflows.map((w) => w.name));
+  const capabilitySkillNames = new Set(manifest.skills.map((s) => s.name));
+  const overlayNames = new Set<string>();
+  for (const meta of Object.values(catalog) as SkillMeta[]) {
+    if (meta.type === 'overlay') overlayNames.add(meta.name);
+  }
+
+  // --- Task routing guide (every workflow, no category dedup) ---
   if (manifest.workflows.length > 0) {
     const TRIGGER_MAP: Record<Category, string> = {
       repo: 'Investigation / triage / "what\'s going on?"',
@@ -173,17 +272,15 @@ export function renderCoworkerSpine(
       other: 'General task',
     };
     const routeLines: string[] = [];
-    const seen = new Set<string>();
     for (const w of manifest.workflows) {
       const cat = categorize(w.requires);
-      if (seen.has(cat)) continue;
-      seen.add(cat);
-      routeLines.push(`- ${TRIGGER_MAP[cat]} → \`/${w.name}\``);
+      routeLines.push(`- ${TRIGGER_MAP[cat]} → \`/${w.name}\` workflow`);
     }
     parts.push('## How to Work');
     parts.push(
       routeLines.join('\n') +
         '\n\nAlways start with a workflow. Never jump straight to code.' +
+        '\nWorkflow bodies are embedded below — follow the steps inline. Workflows are not slash commands.' +
         '\nYour role-specific standing orders: [Additional Instructions](#additional-instructions)',
     );
   }
@@ -192,6 +289,10 @@ export function renderCoworkerSpine(
   if (manifest.workflows.length > 0) {
     parts.push('## Workflows');
     const wfBlocks: string[] = [];
+
+    // Dedup overlay full bodies across anchor sites. First anchor per overlay
+    // emits the full body; subsequent anchors get a short pointer.
+    const emittedOverlay = new Map<string, { workflowName: string; stepId: string }>();
 
     for (const w of manifest.workflows) {
       const wfCustomizations = manifest.customizations.filter((c) => c.workflow === w.name);
@@ -204,14 +305,13 @@ export function renderCoworkerSpine(
       let block = `### /${w.name}\n\n${w.description}${uses}${extendsNote}`;
 
       if (w.steps.length > 0) {
-        // Override lookup by stepId (no more regex on summary).
+        // Override lookup by stepId.
         const overrideMap = new Map<string, string>();
         for (const o of overrides) {
           if (o.stepId) overrideMap.set(o.stepId, (o.detail || '').trim());
         }
 
-        // Overlay anchor maps: stepId → array of full overlay bodies to inline
-        // before/after that step.
+        // Overlay anchor maps: stepId → full bodies to emit before/after.
         const stepSet = new Set(w.steps);
         const gatesAfter = new Map<string, { overlayName: string; body: string }[]>();
         const gatesBefore = new Map<string, { overlayName: string; body: string }[]>();
@@ -227,27 +327,31 @@ export function renderCoworkerSpine(
           }
         }
 
-        // Render each step as a numbered markdown section. Gate overlays are
-        // emitted as inline sub-blocks (full body) before/after the anchored
-        // step. Numbering is per-step (not gate-counted) since gates aren't
-        // steps — they are mandatory sub-protocols attached to steps.
         const chunks: string[] = [];
         let n = 1;
         for (const stepId of w.steps) {
-          // Emit BEFORE-gates for this step.
+          // BEFORE gates.
           for (const gate of gatesBefore.get(stepId) || []) {
-            chunks.push(renderGateBlock(gate.overlayName, gate.body, 'BEFORE', stepId));
+            chunks.push(
+              emitGate(emittedOverlay, gate.overlayName, gate.body, 'BEFORE', stepId, w.name),
+            );
           }
 
-          // The step itself.
+          // The step itself. Title is derived from parent body (or override)
+          // so the heading stays stable even when override text would have
+          // produced an unwieldy heading.
+          const parentBody = w.stepBodies[stepId];
           const overrideBody = overrideMap.get(stepId);
-          const rawBody = overrideBody || w.stepBodies[stepId] || stepId;
-          chunks.push(renderStepBlock(n, stepId, rawBody));
+          const title = extractStepTitle(parentBody, stepId);
+          const rawBody = overrideBody || parentBody || stepId;
+          chunks.push(renderStepBlock(n, stepId, rawBody, title));
           n++;
 
-          // Emit AFTER-gates for this step.
+          // AFTER gates.
           for (const gate of gatesAfter.get(stepId) || []) {
-            chunks.push(renderGateBlock(gate.overlayName, gate.body, 'AFTER', stepId));
+            chunks.push(
+              emitGate(emittedOverlay, gate.overlayName, gate.body, 'AFTER', stepId, w.name),
+            );
           }
         }
 
@@ -257,7 +361,11 @@ export function renderCoworkerSpine(
       wfBlocks.push(block);
     }
 
-    parts.push(wfBlocks.join('\n\n'));
+    // Run the slash-rewrite once over the entire workflow block so that
+    // backticked `/workflow` refs become section refs and `/overlay` refs
+    // become Task-tool subagent pointers. Capability skill refs stay literal.
+    const wfJoined = wfBlocks.join('\n\n');
+    parts.push(rewriteSlashRefs(wfJoined, workflowNames, capabilitySkillNames, overlayNames));
   }
 
   // --- Skills ---
@@ -282,4 +390,29 @@ export function renderCoworkerSpine(
   }
 
   return parts.join('\n\n').trimEnd() + '\n';
+}
+
+// Dedup overlay body emissions across anchor sites. First anchor: full body.
+// Subsequent anchors: short pointer to the first emission.
+function emitGate(
+  seen: Map<string, { workflowName: string; stepId: string }>,
+  overlayName: string,
+  body: string,
+  position: 'BEFORE' | 'AFTER',
+  stepId: string,
+  workflowName: string,
+): string {
+  if (!seen.has(overlayName)) {
+    seen.set(overlayName, { workflowName, stepId });
+    return renderGateBlock(overlayName, body, position, stepId);
+  }
+  const first = seen.get(overlayName)!;
+  const label = `${overlayName.toUpperCase().replaceAll('-', ' ')} GATE`;
+  const where = position === 'BEFORE' ? `before \`${stepId}\`` : `after \`${stepId}\``;
+  return (
+    `#### ⟐ ${label} (${where})\n\n` +
+    `Follow the **${label}** protocol documented under the **${first.workflowName}** ` +
+    `workflow (step \`${first.stepId}\`). Every stage's procedure applies — match ` +
+    `the stage to the anchor type (before/after which step triggered this gate).`
+  );
 }
