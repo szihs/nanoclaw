@@ -421,6 +421,66 @@ describe('R12: backticked slash refs in bodies are rewritten by kind', () => {
   });
 });
 
+describe('R13: unresolved template placeholders rewritten to angle-bracket form', () => {
+  it('replaces {{target}} / {{report.path}} / {{target_slug}} with <name> form inside workflow bodies', () => {
+    const root = makeTempProject();
+    writeSpineBase(root);
+    writeWorkflow(
+      root,
+      'research',
+      [
+        '# Research',
+        '',
+        '## Steps',
+        '',
+        '1. **Ingest** {#ingest} — read {{target}} and open {{report.path}} (slug {{target_slug}}).',
+      ].join('\n'),
+    );
+    writeProjectType(
+      root,
+      'probe:\n  extends: base-common\n  description: "Probe."\n  workflows: [research]\n',
+    );
+    const spine = composeCoworkerSpine({ projectRoot: root, coworkerType: 'probe' });
+    expect(spine).toContain('<target>');
+    expect(spine).toContain('<report.path>');
+    expect(spine).toContain('<target_slug>');
+    // Original handlebar tokens must not survive in the workflow body.
+    const workflowsStart = spine.indexOf('## Workflows');
+    const workflowsSection = workflowsStart === -1 ? '' : spine.slice(workflowsStart);
+    expect(workflowsSection).not.toMatch(/\{\{\s*target\s*\}\}/);
+    expect(workflowsSection).not.toMatch(/\{\{\s*report\.path\s*\}\}/);
+    expect(workflowsSection).not.toMatch(/\{\{\s*target_slug\s*\}\}/);
+  });
+});
+
+describe('R14: placeholders inside fenced code blocks are left untouched', () => {
+  it('leaves {{NOT_A_TEMPLATE}} inside ``` fences as-is', () => {
+    const root = makeTempProject();
+    writeSpineBase(root);
+    writeWorkflow(
+      root,
+      'flow',
+      [
+        '# F',
+        '',
+        '## Steps',
+        '',
+        '1. **Do** {#do} — here is a literal example:',
+        '```text',
+        'echo "{{NOT_A_TEMPLATE}}"',
+        '```',
+      ].join('\n'),
+    );
+    writeProjectType(
+      root,
+      'probe:\n  extends: base-common\n  description: "Probe."\n  workflows: [flow]\n',
+    );
+    const spine = composeCoworkerSpine({ projectRoot: root, coworkerType: 'probe' });
+    expect(spine).toContain('{{NOT_A_TEMPLATE}}');
+    expect(spine).not.toContain('<NOT_A_TEMPLATE>');
+  });
+});
+
 // --- Repo-state invariants (run against real repo) ---
 
 const REPO_ROOT = process.cwd();
