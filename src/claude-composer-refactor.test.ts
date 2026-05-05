@@ -444,7 +444,6 @@ describe('R13: unresolved template placeholders rewritten to angle-bracket form'
     expect(spine).toContain('<target>');
     expect(spine).toContain('<report.path>');
     expect(spine).toContain('<target_slug>');
-    // Original handlebar tokens must not survive in the workflow body.
     const workflowsStart = spine.indexOf('## Workflows');
     const workflowsSection = workflowsStart === -1 ? '' : spine.slice(workflowsStart);
     expect(workflowsSection).not.toMatch(/\{\{\s*target\s*\}\}/);
@@ -478,6 +477,95 @@ describe('R14: placeholders inside fenced code blocks are left untouched', () =>
     const spine = composeCoworkerSpine({ projectRoot: root, coworkerType: 'probe' });
     expect(spine).toContain('{{NOT_A_TEMPLATE}}');
     expect(spine).not.toContain('<NOT_A_TEMPLATE>');
+  });
+});
+
+describe('R15: unbackticked /workflow refs in prose are rewritten to section pointer', () => {
+  it('rewrites `Use /alpha workflow` (no backticks) when alpha is a workflow', () => {
+    const root = makeTempProject();
+    writeSpineBase(root);
+    writeWorkflow(
+      root,
+      'entry',
+      [
+        '# Entry',
+        '',
+        '## Steps',
+        '',
+        '1. **Do** {#do} — Use /alpha workflow for navigation, then continue.',
+      ].join('\n'),
+    );
+    writeWorkflow(root, 'alpha', '# Alpha\n\n## Steps\n\n1. **A** {#a} — x.');
+    writeProjectType(
+      root,
+      'probe:\n  extends: base-common\n  description: "Probe."\n  workflows: [entry, alpha]\n',
+    );
+    const spine = composeCoworkerSpine({ projectRoot: root, coworkerType: 'probe' });
+    expect(spine).toContain('Use the **alpha** workflow section below');
+    expect(spine).not.toMatch(/\sUse \/alpha workflow/);
+  });
+});
+
+describe('R16: unbackticked /skill refs (capability skills) are left literal', () => {
+  it('does not rewrite /gamma-skill when gamma-skill is a capability skill', () => {
+    const root = makeTempProject();
+    writeSpineBase(root);
+    writeWorkflow(
+      root,
+      'entry',
+      [
+        '# Entry',
+        '',
+        '## Steps',
+        '',
+        '1. **Do** {#do} — Run /gamma-skill to handle the probe.',
+      ].join('\n'),
+    );
+    writeCapabilitySkill(root, 'gamma-skill', 'Do gamma.');
+    writeProjectType(
+      root,
+      [
+        'probe:',
+        '  extends: base-common',
+        '  description: "Probe."',
+        '  workflows: [entry]',
+        '  skills: [gamma-skill]',
+        '  bindings:',
+        '    probe: gamma-skill',
+        '',
+      ].join('\n'),
+    );
+    const spine = composeCoworkerSpine({ projectRoot: root, coworkerType: 'probe' });
+    expect(spine).toContain('/gamma-skill');
+    expect(spine).not.toContain('the **gamma-skill** workflow section below');
+    expect(spine).not.toContain('the **gamma-skill** subagent');
+  });
+});
+
+describe('R17: path-like /foo/bar refs in prose are untouched', () => {
+  it('leaves `/workspace/agent/plans/` intact even when a workflow named `agent` exists', () => {
+    const root = makeTempProject();
+    writeSpineBase(root);
+    writeWorkflow(
+      root,
+      'flow',
+      [
+        '# F',
+        '',
+        '## Steps',
+        '',
+        '1. **Do** {#do} — outputs land in /workspace/agent/plans/ before exit.',
+      ].join('\n'),
+    );
+    writeWorkflow(root, 'agent', '# Agent\n\n## Steps\n\n1. **A** {#a} — x.');
+    writeProjectType(
+      root,
+      'probe:\n  extends: base-common\n  description: "Probe."\n  workflows: [flow, agent]\n',
+    );
+    const spine = composeCoworkerSpine({ projectRoot: root, coworkerType: 'probe' });
+    expect(spine).toContain('/workspace/agent/plans/');
+    expect(spine).not.toContain('/workspacethe **agent** workflow section below');
+    expect(spine).not.toContain('workspacethe **agent**');
   });
 });
 
