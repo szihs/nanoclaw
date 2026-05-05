@@ -2,11 +2,11 @@ slangpy-common:
   description: "SlangPy spine -- identity, API invariants, repo layout."
   project: slangpy
   extends: base-common
-  identity: container/skills/spine-slangpy/identity/engineer.md
+  identity: container/spines/slangpy/identity/engineer.md
   invariants:
-    - container/skills/spine-slangpy/invariants/public-api.md
+    - container/spines/slangpy/invariants/public-api.md
   context:
-    - container/skills/spine-slangpy/context/layout.md
+    - container/spines/slangpy/context/layout.md
   skills:
     - slangpy-build
     - slangpy-code-reader
