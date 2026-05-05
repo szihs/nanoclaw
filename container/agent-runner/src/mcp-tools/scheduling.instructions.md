@@ -30,6 +30,26 @@ bash -c 'node --input-type=module -e "
 
 If a task requires your judgment every time (daily briefings, reminders, reports), skip the script — just use a regular prompt. Do not attempt to do things like sentiment analysis or advanced nlp in scripts.
 
+### `new_session: true` for stateless recurring tasks
+
+For recurring heartbeat / cron tasks where each fire does NOT need to reference prior fires' conversation history, pass `new_session: true` when scheduling:
+
+```json
+{ "prompt": "...", "processAfter": "...", "recurrence": "*/5 * * * *", "new_session": true }
+```
+
+Each fire then runs in a fresh Claude session against the cached system prompt — prior fires' conversation isn't resumed. Use when:
+
+- The task is a periodic check (heartbeat, CI babysitter, queue sweep) whose state lives in files on disk (`memory/`, shared learnings) rather than conversation memory.
+- You don't want the recurring-task conversation to grow indefinitely (with frequent compactions driving repeated cache-creation cost).
+
+Do NOT use when:
+
+- The task genuinely benefits from remembering what it did in prior fires via in-conversation memory (rare — usually file-based state is cleaner anyway).
+- The task is one-shot (non-recurring) — the flag is only meaningful for recurring tasks.
+
+Toggle on an existing recurring task via `update_task({ taskId, new_session: true })`.
+
 ### Frequent task guidance
 
 If a user wants a task to run more than a few times a day and a script can't be used:

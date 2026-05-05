@@ -26,6 +26,13 @@ export async function handleScheduleTask(
   const script = content.script as string | null;
   const processAfter = content.processAfter as string;
   const recurrence = (content.recurrence as string) || null;
+  // `new_session: true` tells the poll-loop (see PR #58) to run this task
+  // fire in a fresh Claude session instead of resuming the stored
+  // continuation. Without this flag, recurring heartbeats accumulate
+  // every fire's context into one conversation until the provider
+  // compaction limit is hit — driving up cache-creation + cache-read
+  // token cost and latency indefinitely.
+  const newSession = content.new_session === true;
 
   insertTask(inDb, {
     id: taskId,
@@ -34,9 +41,11 @@ export async function handleScheduleTask(
     platformId: (content.platformId as string) ?? null,
     channelType: (content.channelType as string) ?? null,
     threadId: (content.threadId as string) ?? null,
-    content: JSON.stringify({ prompt, script }),
+    // Only write the flag when true — keeps stored content minimal and
+    // avoids false-positive matches on any non-boolean upstream value.
+    content: JSON.stringify(newSession ? { prompt, script, new_session: true } : { prompt, script }),
   });
-  log.info('Scheduled task created', { taskId, processAfter, recurrence });
+  log.info('Scheduled task created', { taskId, processAfter, recurrence, newSession });
 }
 
 export async function handleCancelTask(
@@ -83,6 +92,9 @@ export async function handleUpdateTask(
   }
   if (content.script === null || typeof content.script === 'string') {
     update.script = content.script as string | null;
+  }
+  if (content.new_session === true || content.new_session === false) {
+    update.newSession = content.new_session;
   }
   const touched = updateTask(inDb, taskId, update);
   log.info('Task updated', { taskId, touched, fields: Object.keys(update) });
