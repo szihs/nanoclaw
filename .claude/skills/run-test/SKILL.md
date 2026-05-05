@@ -117,7 +117,7 @@ The R-tests live in `src/claude-composer-refactor.test.ts` (run as part of Phase
 |---|---|
 | M01 | Agent calls `mcp__nanoclaw__send_message` → destination `outbound.db` has the row |
 | M02 | Agent calls `mcp__nanoclaw__schedule_task` → row in `scheduled_tasks` table |
-| M03 | Agent calls `mcp__nanoclaw__append_learning` → `/workspace/group/learnings.md` appended |
+| M03 | Agent calls `mcp__nanoclaw__append_learning` → `/workspace/agent/learnings.md` appended |
 | M04 | Disallowed MCP tool (in `disallowedMcpTools`) → invocation error |
 | M05 | Kill MCP server with `docker kill $(docker ps -q -f name=slang-mcp)` → next tool call succeeds after restart |
 | M06 | `curl -k --cacert $CA https://api.github.com/meta` from within container via OneCLI proxy → HTTP 200 |
