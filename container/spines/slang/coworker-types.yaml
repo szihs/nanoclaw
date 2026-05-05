@@ -11,6 +11,7 @@ slang-common:
     - slang-build
     - slang-code-reader
     - slang-github
+    - slang-maintain-release-report
     - deep-research
   workflows: []
   overlays:
