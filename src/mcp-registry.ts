@@ -15,7 +15,7 @@ import path from 'path';
 import { OneCLI } from '@onecli-sh/sdk';
 
 import { log } from './log.js';
-import { ONECLI_URL } from './config.js';
+import { CONTAINER_PREFIX, ONECLI_URL } from './config.js';
 import { readEnvFile } from './env.js';
 import { clearDiscoveredTools, discoverTools } from './mcp-auth-proxy.js';
 
@@ -58,7 +58,13 @@ async function getOneCLIProxyEnv(): Promise<Record<string, string> | null> {
     const onecli = new OneCLI({ url: ONECLI_URL });
     const config = await onecli.getContainerConfig();
 
-    const combinedCaPath = path.join(os.tmpdir(), 'nanoclaw-onecli-mcp-ca.pem');
+    // Scope the file name by CONTAINER_PREFIX (`nc-prod`, `nc-lego`, `nc-dev`,
+    // etc.) so multiple nanoclaw installs sharing this host don't clobber each
+    // other's OneCLI CA bundle. Each install's OneCLI mints its own MITM CA;
+    // trusting the bundle written by the most-recently-restarted install
+    // produces "self-signed certificate in certificate chain" errors for every
+    // other install's MCP servers on the host.
+    const combinedCaPath = path.join(os.tmpdir(), `nanoclaw-${CONTAINER_PREFIX}-onecli-mcp-ca.pem`);
     let systemCa = '';
     const systemCaPath = '/etc/ssl/certs/ca-certificates.crt';
     if (fs.existsSync(systemCaPath)) {
