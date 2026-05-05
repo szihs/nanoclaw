@@ -1110,7 +1110,17 @@ function runCcusage(claudeConfigDir: string, since?: string): Promise<CcusageDay
   });
 }
 
-/** Normalise a @ccusage/codex daily entry to the shared CcusageDayEntry shape. */
+/**
+ * Normalise a @ccusage/codex daily entry to the shared CcusageDayEntry shape.
+ *
+ * Invariant: @ccusage/codex reports `inputTokens` *inclusive* of
+ * `cachedInputTokens` (mirrors the raw OpenAI `input_tokens` field, which
+ * includes cached). The Anthropic-side `ccusage` feed is non-cached. To keep
+ * the two comparable in the Metrics UI — and avoid visually double-counting
+ * cached tokens across the INPUT and CACHE READ columns — subtract the
+ * cached subset before surfacing `inputTokens`. Pricing is unaffected:
+ * @ccusage/codex computes `costUSD` internally with the correct split.
+ */
 function normalizeCodexEntry(raw: Record<string, unknown>): CcusageDayEntry {
   // Codex dates come as "Apr 06, 2026"; convert to ISO "2026-04-06" so they merge with Claude entries.
   const date = new Date(raw.date as string).toISOString().slice(0, 10);
@@ -1123,21 +1133,25 @@ function normalizeCodexEntry(raw: Record<string, unknown>): CcusageDayEntry {
     const modelTokens = (m.totalTokens as number) || 0;
     // Allocate cost proportionally by tokens; exact when there's one model.
     const cost = totalTokens > 0 ? (modelTokens / totalTokens) * totalCost : 0;
+    const mCacheRead = (m.cachedInputTokens as number) || 0;
+    const mRawInput = (m.inputTokens as number) || 0;
     return {
       modelName,
-      inputTokens: (m.inputTokens as number) || 0,
+      inputTokens: Math.max(0, mRawInput - mCacheRead),
       outputTokens: (m.outputTokens as number) || 0,
       cacheCreationTokens: 0,
-      cacheReadTokens: (m.cachedInputTokens as number) || 0,
+      cacheReadTokens: mCacheRead,
       cost,
     };
   });
+  const cacheRead = (raw.cachedInputTokens as number) || 0;
+  const rawInput = (raw.inputTokens as number) || 0;
   return {
     date,
-    inputTokens: (raw.inputTokens as number) || 0,
+    inputTokens: Math.max(0, rawInput - cacheRead),
     outputTokens: (raw.outputTokens as number) || 0,
     cacheCreationTokens: 0,
-    cacheReadTokens: (raw.cachedInputTokens as number) || 0,
+    cacheReadTokens: cacheRead,
     totalTokens,
     totalCost,
     modelsUsed: modelNames,
