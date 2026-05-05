@@ -128,25 +128,49 @@ function rewritePlaceholders(md: string): string {
   return lines.join('\n');
 }
 
-// Rewrite backtick-wrapped `/name` references embedded inside workflow /
-// overlay bodies so the agent doesn't confuse workflow names (embedded
-// procedures) with skill names (runtime slash commands) or overlay names
-// (Task-tool subagents, not slash commands).
+// Rewrite `/name` references embedded inside workflow / overlay bodies so
+// the agent doesn't confuse workflow names (embedded procedures) with skill
+// names (runtime slash commands) or overlay names (Task-tool subagents, not
+// slash commands). Handles both backticked (`` `/alpha` ``) and unbackticked
+// (`Use /alpha for navigation`) source prose.
 //
-//   `/alpha` where alpha is a workflow   → "the **alpha** workflow section below"
-//   `/beta`  where beta is a capability skill → left as `` `/beta` `` (slash command)
-//   `/gamma` where gamma is an overlay   → "the **gamma** subagent (spawn via Task tool)"
-//   `/delta` unknown                     → left as `` `/delta` `` (caller must fix source)
+//   /alpha where alpha is a workflow         → "the **alpha** workflow section below"
+//   /beta  where beta  is a capability skill → left literal (real slash command)
+//   /gamma where gamma is an overlay         → "the **gamma** subagent (spawn via the Task tool)"
+//   /delta unknown                           → left literal, warn once at compose time
 //
-// Restricted to backticked refs to avoid mangling file paths like
-// `/workspace/agent/...` or bash snippets like `mkdir -p /tmp/x`. Skips
-// fenced code blocks entirely.
+// The unbackticked pass must not mangle filesystem paths (`/workspace/...`),
+// bash snippets (`mkdir -p /tmp/x`), or URL paths. Two guards:
+//   (1) the preceding char must be start-of-string, whitespace, or `(`.
+//   (2) the following char must be a sentence delimiter (whitespace,
+//       `.,;:!?)`) or end-of-string.
+// That excludes `/a/b/c` because `/b` and `/c` are preceded by a letter,
+// not whitespace. Skips fenced code blocks entirely.
 function rewriteSlashRefs(
   md: string,
   workflowNames: Set<string>,
   capabilitySkillNames: Set<string>,
   overlayNames: Set<string>,
 ): string {
+  const warned = new Set<string>();
+
+  // Resolve a slash ref to its rewritten form, or return null if it should
+  // be left literal (skill, unknown, or not rewritable). Logs one warning
+  // per unknown name.
+  const resolve = (name: string): string | null => {
+    if (workflowNames.has(name)) return `the **${name}** workflow section below`;
+    if (overlayNames.has(name)) return `the **${name}** subagent (spawn via the Task tool)`;
+    if (capabilitySkillNames.has(name)) return null; // real slash command
+    if (!warned.has(name)) {
+      warned.add(name);
+      // eslint-disable-next-line no-console
+      console.warn(
+        `[composer] Unknown slash ref /${name} in workflow body — leaving literal. Fix the source WORKFLOW.md/OVERLAY.md.`,
+      );
+    }
+    return null;
+  };
+
   const lines = md.split('\n');
   let inCodeFence = false;
   for (let i = 0; i < lines.length; i++) {
@@ -156,12 +180,33 @@ function rewriteSlashRefs(
       continue;
     }
     if (inCodeFence) continue;
-    lines[i] = line.replace(/`\/([a-z][a-z0-9-]*)`/g, (m, name) => {
-      if (workflowNames.has(name)) return `the **${name}** workflow section below`;
-      if (overlayNames.has(name)) return `the **${name}** subagent (spawn via the Task tool)`;
-      if (capabilitySkillNames.has(name)) return m; // real slash command
-      return m; // unknown — leave literal for upstream fix
+
+    // Pass 1: backticked `/name` refs.
+    let rewritten = line.replace(/`\/([a-z][a-z0-9-]*)`/g, (m, name) => {
+      const replacement = resolve(name);
+      return replacement ?? m;
     });
+
+    // Pass 2: unbackticked /name refs at safe boundaries. We preserve the
+    // captured leading char so file paths like `/workspace/agent/foo` do
+    // NOT match on the inner `/agent` or `/foo` (the `/a` of `/agent` has
+    // a letter before it, not whitespace).
+    //
+    // Skip markdown ATX headings entirely — the composer itself emits
+    // workflow headings as `### /name` and those must stay as-is for the
+    // reader to recognize the section.
+    if (!/^\s*#{1,6}\s/.test(rewritten)) {
+      rewritten = rewritten.replace(
+        /(^|[\s(])\/([a-z][a-z0-9-]*)(?=[\s.,;:!?)]|$)/g,
+        (m, prefix, name) => {
+          const replacement = resolve(name);
+          if (replacement === null) return m;
+          return `${prefix}${replacement}`;
+        },
+      );
+    }
+
+    lines[i] = rewritten;
   }
   return lines.join('\n');
 }
