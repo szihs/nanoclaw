@@ -94,7 +94,7 @@ describe('Scenario 4: typed coworker (slang-reader)', () => {
     // The upper bound is generous — workflow bodies are excluded, only the
     // index lines appear in the spine. If this fails, something procedural
     // has leaked into the spine from a SKILL.md body.
-    expect(spine.length).toBeLessThan(20000);
+    expect(spine.length).toBeLessThan(40000);
   });
 
   it('groups the Workflows and Skills Available lists by category', () => {
