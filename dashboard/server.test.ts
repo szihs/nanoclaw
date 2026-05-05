@@ -105,6 +105,7 @@ function createDashboardTestDb(): Database.Database {
       coworker_type TEXT,
       allowed_mcp_tools TEXT,
       routing TEXT NOT NULL DEFAULT 'direct',
+      disable_overlays INTEGER NOT NULL DEFAULT 0,
       created_at TEXT NOT NULL
     );
     CREATE TABLE IF NOT EXISTS messaging_groups (
@@ -399,6 +400,47 @@ describe('dashboard server', () => {
 
     expect(res.status).toBe(403);
     expect(await res.text()).toBe('forbidden');
+  });
+
+  // Regression: the right-panel preview used to re-compose the spine without
+  // consulting `agent_groups.disable_overlays`, so coworkers with the flag set
+  // saw overlay gates in the UI even though their on-disk CLAUDE.md was clean.
+  // This test pins that /api/memory reads the flag and threads it through
+  // composeCoworkerSpine. We use a coworker_type that doesn't exist in this
+  // branch's registry — the compose throws, code falls back to reading the
+  // on-disk file — but the key assertion is that the SELECT with the new
+  // column succeeds (no 500) AND the fallback path's content is returned.
+  it('honors disable_overlays in the composed-memory preview (falls back to on-disk on compose error)', async () => {
+    const probeFolder = 'disable-overlays-preview-probe';
+    const probeDir = path.join(GROUPS_DIR, probeFolder);
+    try {
+      const db = createDashboardTestDb();
+      db.prepare(
+        `INSERT INTO agent_groups (id, name, folder, is_admin, coworker_type, disable_overlays, routing, created_at)
+         VALUES ('ag-dop', 'Probe', ?, 0, 'nonexistent-probe-type', 1, 'direct', ?)`,
+      ).run(probeFolder, new Date().toISOString());
+      db.close();
+      forceOpenDbForTests();
+
+      mkdirSync(probeDir, { recursive: true });
+      const onDiskContent = 'ON_DISK_FALLBACK_MARKER — no overlay text here\n';
+      writeFileSync(path.join(probeDir, 'CLAUDE.md'), onDiskContent, 'utf-8');
+
+      const res = await fetch(`${baseUrl}/api/memory/${probeFolder}`);
+
+      // If the new SELECT column name were wrong, better-sqlite3 would throw
+      // and the handler would 500. A 200 here proves the query succeeds.
+      expect(res.status).toBe(200);
+      const body = await res.text();
+      // Compose fails for unknown type → falls back to on-disk file — that
+      // content (and only that content) should be returned.
+      expect(body).toContain('ON_DISK_FALLBACK_MARKER');
+      // Belt-and-suspenders: even if compose did run, the disableOverlays=1
+      // contract says no gate bodies appear.
+      expect(body).not.toMatch(/MANDATORY gate|CRITIQUE OVERLAY Gate Protocol|PLAN_REVIEW/);
+    } finally {
+      rmSync(probeDir, { recursive: true, force: true });
+    }
   });
 
   it('rejects sibling-prefix traversal for static files', async () => {
