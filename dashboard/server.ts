@@ -3515,10 +3515,22 @@ export async function handleRequest(
     const SYSTEM_ID_PREFIXES = ['claudemd-refresh-', 'a2a-'];
     const isSystemId = (id: unknown) =>
       typeof id === 'string' && SYSTEM_ID_PREFIXES.some((p) => id.startsWith(p));
+    // Index all agent_groups by id so we can recognise when an a2a-* message is
+    // a legit inter-coworker send (platform_id matches a real agent_group.id)
+    // versus plumbing noise (e.g. session-boot pings that have no corresponding
+    // sender coworker). The legit ones are tagged with sender/recipient kind
+    // and surface in the channel view with a distinct bubble style.
+    const coworkerNameById = new Map<string, string>();
     let messages: any[] = [];
     const hasMore = false;
     if (db) {
       try {
+        try {
+          const allAg = db.prepare('SELECT id, folder, name FROM agent_groups').all() as Array<{ id: string; folder: string; name: string | null }>;
+          for (const row of allAg) {
+            coworkerNameById.set(row.id, row.name || row.folder);
+          }
+        } catch { /* table may not exist in degraded test fixtures */ }
         // When group is specified, load messages for that group only; otherwise load all groups
         const agRows = group
           ? [db.prepare('SELECT id, folder FROM agent_groups WHERE folder = ?').get(group) as any].filter(Boolean)
@@ -3549,28 +3561,63 @@ export async function handleRequest(
                 } catch {
                   /* delivered table may not exist in older sessions */
                 }
-                const rows = sdb
-                  .prepare('SELECT id, kind, content, timestamp FROM messages_in ORDER BY timestamp DESC LIMIT ?')
-                  .all(perGroupLimit) as any[];
+                let rows: any[];
+                try {
+                  rows = sdb
+                    .prepare('SELECT id, kind, content, timestamp, channel_type, platform_id FROM messages_in ORDER BY timestamp DESC LIMIT ?')
+                    .all(perGroupLimit) as any[];
+                } catch {
+                  rows = sdb
+                    .prepare('SELECT id, kind, content, timestamp FROM messages_in ORDER BY timestamp DESC LIMIT ?')
+                    .all(perGroupLimit) as any[];
+                }
                 for (const r of rows) {
-                  if (!includeSystem && isSystemId(r.id)) continue;
+                  // Agent-to-agent: a2a-* with channel_type='agent' and a
+                  // platform_id that resolves to a real agent_group is a legit
+                  // inbound message from another coworker — show it with the
+                  // coworker-styled bubble. Plumbing pings (no such resolution)
+                  // stay filtered as system noise.
+                  const isA2a = typeof r.id === 'string' && r.id.startsWith('a2a-');
+                  const senderCoworkerName = isA2a && r.channel_type === 'agent' && typeof r.platform_id === 'string'
+                    ? coworkerNameById.get(r.platform_id)
+                    : undefined;
+                  if (!includeSystem && isSystemId(r.id) && !senderCoworkerName) continue;
                   messages.push({
                     ...r,
                     direction: 'incoming',
                     agent_group_id: agRow.id,
                     group_folder: agRow.folder,
                     session_id: sess.id,
+                    ...(senderCoworkerName
+                      ? { senderKind: 'coworker', senderCoworkerName }
+                      : {}),
                   });
                 }
                 sdb.close();
               }
               if (existsSync(outDbPath)) {
                 const sdb = new Database(outDbPath, { readonly: true });
-                const rows = sdb
-                  .prepare('SELECT id, kind, content, timestamp, in_reply_to FROM messages_out ORDER BY timestamp DESC LIMIT ?')
-                  .all(perGroupLimit) as any[];
+                let rows: any[];
+                try {
+                  rows = sdb
+                    .prepare('SELECT id, kind, content, timestamp, in_reply_to, channel_type, platform_id FROM messages_out ORDER BY timestamp DESC LIMIT ?')
+                    .all(perGroupLimit) as any[];
+                } catch {
+                  rows = sdb
+                    .prepare('SELECT id, kind, content, timestamp, in_reply_to FROM messages_out ORDER BY timestamp DESC LIMIT ?')
+                    .all(perGroupLimit) as any[];
+                }
                 for (const r of rows) {
-                  if (!includeSystem && isSystemId(r.in_reply_to)) continue;
+                  // Outbound directed at another coworker: channel_type='agent'
+                  // and platform_id resolves to a real agent_group. Mark with
+                  // recipient info so the client can render a "→ @coworker"
+                  // subscript. Ack replies to system pings (in_reply_to starts
+                  // with claudemd-refresh-/a2a- AND no real recipient) stay
+                  // filtered.
+                  const recipientCoworkerName = r.channel_type === 'agent' && typeof r.platform_id === 'string'
+                    ? coworkerNameById.get(r.platform_id)
+                    : undefined;
+                  if (!includeSystem && isSystemId(r.in_reply_to) && !recipientCoworkerName) continue;
                   const delivered = deliveredByMessageOutId.get(r.id);
                   messages.push({
                     ...r,
@@ -3581,6 +3628,9 @@ export async function handleRequest(
                     body: r.content,
                     platformMessageId: delivered?.platformMessageId ?? null,
                     deliveryStatus: delivered?.status ?? null,
+                    ...(recipientCoworkerName
+                      ? { senderKind: 'self', recipientKind: 'coworker', recipientCoworkerName }
+                      : {}),
                   });
                 }
                 sdb.close();
