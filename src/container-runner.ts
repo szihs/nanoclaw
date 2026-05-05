@@ -1037,6 +1037,11 @@ mkdir -p ~/.codex && cat > ~/.codex/config.toml <<TOML_EOF
 model_provider = "\${CODEX_MODEL_PROVIDER:-nvinference}"
 model = "\${CODEX_MODEL:-openai/openai/gpt-5.5}"
 model_reasoning_effort = "\${CODEX_REASONING_EFFORT:-xhigh}"
+# Docker is the sandbox; codex's bwrap wrapper is redundant nesting and fails
+# with "No permissions to create a new namespace" because Docker's default
+# seccomp profile blocks unshare(CLONE_NEWUSER). Skip codex's sandbox and
+# rely on the container boundary.
+sandbox_mode = "danger-full-access"
 
 [model_providers.\${CODEX_MODEL_PROVIDER:-nvinference}]
 name = "\${CODEX_MODEL_PROVIDER:-nvinference}"
