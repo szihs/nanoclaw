@@ -22,6 +22,32 @@ function log(msg: string): void {
   console.error(`[poll-loop] ${msg}`);
 }
 
+/**
+ * True iff the message is a scheduled task whose content JSON has
+ * `new_session: true`. Centralized so the initial-batch gate and the
+ * mid-query follow-up guard stay in lockstep — historically they diverged
+ * (PR #58 implemented only the initial-batch check, leaving the follow-up
+ * path to push new_session tasks into the active query as resumes; see
+ * bug repro on dev 2026-05-05).
+ */
+export function taskRequestsNewSession(m: { kind: string; content: string }): boolean {
+  if (m.kind !== 'task') return false;
+  try {
+    return Boolean((JSON.parse(m.content) as Record<string, unknown>).new_session);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * True iff the ENTIRE batch is tasks AND at least one has the flag. Mixed
+ * batches (any chat present) preserve conversation history and must resume
+ * the stored continuation — matches PR #58's original intent.
+ */
+export function isNewSessionBatch(keep: Array<{ kind: string; content: string }>): boolean {
+  return keep.length > 0 && keep.every((m) => m.kind === 'task') && keep.some(taskRequestsNewSession);
+}
+
 function generateId(): string {
   return `msg-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 }
@@ -163,12 +189,7 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
     // heartbeat/cron history doesn't accumulate across runs. Only applies
     // when the entire batch is tasks (no chat messages mixed in) — mixed
     // batches default to the stored continuation so chat history is preserved.
-    const isNewSessionBatch =
-      keep.every((m) => m.kind === 'task') &&
-      keep.some((m) => {
-        try { return Boolean((JSON.parse(m.content) as Record<string, unknown>).new_session); }
-        catch { return false; }
-      });
+    const newSessionBatch = isNewSessionBatch(keep);
 
     // Format messages: passthrough commands get raw text (only if the
     // provider natively handles slash commands), others get XML.
@@ -183,11 +204,11 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
     }
 
     log(`Processing ${keep.length} message(s), kinds: ${[...new Set(keep.map((m) => m.kind))].join(',')}`);
-    if (isNewSessionBatch) log('new_session flag set — running task in fresh context');
+    if (newSessionBatch) log('new_session flag set — running task in fresh context');
 
     const query = config.provider.query({
       prompt,
-      continuation: isNewSessionBatch ? undefined : continuation,
+      continuation: newSessionBatch ? undefined : continuation,
       cwd: config.cwd,
       systemContext: config.systemContext,
     });
@@ -196,9 +217,9 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
     const skippedSet = new Set(skipped);
     const processingIds = ids.filter((id) => !commandIds.includes(id) && !skippedSet.has(id));
     try {
-      const result = await processQuery(query, routing, processingIds, config.providerName, isNewSessionBatch);
+      const result = await processQuery(query, routing, processingIds, config.providerName, newSessionBatch);
       // Don't overwrite the stored chat continuation with a task's ephemeral session.
-      if (!isNewSessionBatch && result.continuation && result.continuation !== continuation) {
+      if (!newSessionBatch && result.continuation && result.continuation !== continuation) {
         continuation = result.continuation;
         setContinuation(config.providerName, continuation);
       }
@@ -354,6 +375,31 @@ async function processQuery(
       return true;
     });
     if (newMessages.length > 0) {
+      // new_session bypass guard: if any arriving task carries new_session:true,
+      // DO NOT push into the active query — that would resume the stored
+      // continuation and defeat the flag's whole purpose (the cost-growth-
+      // from-accumulated-context problem PR #58 was meant to solve).
+      // Instead, end the active query; the next poll iteration's initial-batch
+      // path will pick up the pending rows, `isNewSessionBatch` will detect
+      // the flag, and the provider.query call will run with
+      // continuation: undefined.
+      //
+      // Without this guard, any heartbeat-style recurring task fires within
+      // IDLE_END_MS (10 min) of each other and bypasses the flag — making
+      // new_session effectively a no-op for all realistic prod cadences.
+      // Empirically reproduced on dev 2026-05-05 (see the PR description).
+      //
+      // We leave rows as 'pending' (no markProcessing/markCompleted) so the
+      // next loop iteration re-reads them fresh.
+      if (newMessages.some(taskRequestsNewSession)) {
+        log(
+          `new_session task arrived mid-query (${newMessages.length} msg) — ending active query to route through fresh-session path`,
+        );
+        query.end();
+        done = true;
+        return;
+      }
+
       const newIds = newMessages.map((m) => m.id);
       markProcessing(newIds);
 

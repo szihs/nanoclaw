@@ -4,6 +4,7 @@ import { initTestSessionDb, closeSessionDb, getInboundDb, getOutboundDb } from '
 import { getPendingMessages, markCompleted } from './db/messages-in.js';
 import { getUndeliveredMessages } from './db/messages-out.js';
 import { formatMessages, extractRouting } from './formatter.js';
+import { isNewSessionBatch, taskRequestsNewSession } from './poll-loop.js';
 import { MockProvider } from './providers/mock.js';
 
 beforeEach(() => {
@@ -244,5 +245,46 @@ describe('end-to-end with mock provider', () => {
     expect(outMessages).toHaveLength(1);
     expect(JSON.parse(outMessages[0].content).text).toBe('The answer is 4');
     expect(outMessages[0].in_reply_to).toBe('m1');
+  });
+});
+
+describe('new_session predicate (shared by initial-batch gate and mid-query follow-up guard)', () => {
+  // Pins the bug root cause empirically reproduced on dev 2026-05-05: the
+  // initial-batch gate checked the flag, but the pollHandle's follow-up push
+  // path did not, so recurring tasks at cadence < IDLE_END_MS (10 min) were
+  // pushed into the active query and resumed the stored continuation —
+  // defeating new_session. The predicate is shared between both call sites
+  // to keep them in lockstep; these tests pin the shared shape.
+
+  const task = (content: object) => ({ kind: 'task', content: JSON.stringify(content) });
+  const chat = (content: object) => ({ kind: 'chat', content: JSON.stringify(content) });
+
+  it('taskRequestsNewSession — true for task kind with truthy new_session (matches PR #58 reader)', () => {
+    expect(taskRequestsNewSession(task({ prompt: 'x', new_session: true }))).toBe(true);
+    expect(taskRequestsNewSession(task({ prompt: 'x' }))).toBe(false);
+    expect(taskRequestsNewSession(task({ prompt: 'x', new_session: false }))).toBe(false);
+    expect(taskRequestsNewSession(chat({ text: 'hi', new_session: true }))).toBe(false); // chat rejected even with flag
+  });
+
+  it('taskRequestsNewSession — swallows malformed JSON instead of throwing', () => {
+    expect(taskRequestsNewSession({ kind: 'task', content: 'not-json' })).toBe(false);
+    expect(taskRequestsNewSession({ kind: 'task', content: '' })).toBe(false);
+  });
+
+  it('isNewSessionBatch — true when every message is a task AND at least one requests the flag', () => {
+    expect(isNewSessionBatch([task({ prompt: 'a', new_session: true })])).toBe(true);
+    expect(isNewSessionBatch([task({ prompt: 'a' }), task({ prompt: 'b', new_session: true })])).toBe(true);
+  });
+
+  it('isNewSessionBatch — false on mixed batches (chat present preserves history)', () => {
+    expect(isNewSessionBatch([chat({ text: 'hi' }), task({ prompt: 'a', new_session: true })])).toBe(false);
+  });
+
+  it('isNewSessionBatch — false on all-tasks but none flagged', () => {
+    expect(isNewSessionBatch([task({ prompt: 'a' }), task({ prompt: 'b' })])).toBe(false);
+  });
+
+  it('isNewSessionBatch — false on empty batch (defensive: no spurious fresh sessions)', () => {
+    expect(isNewSessionBatch([])).toBe(false);
   });
 });
