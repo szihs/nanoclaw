@@ -205,22 +205,16 @@ function switchToTab(tabId) {
   document.getElementById(tabId)?.classList.add('active');
 }
 
-function renderDetailHooks(cw) {
-  const groupEvents = state.hookEvents.filter((e) => e.group === cw.folder);
-
-  // Build pre-tool map for durations
-  const preTimes = new Map();
-  for (const e of groupEvents) {
-    if (e.event === 'PreToolUse' && e.tool_use_id) preTimes.set(e.tool_use_id, e.timestamp);
-  }
-
-  // Show last 5 tool calls with durations
-  const recentTools = groupEvents.filter((e) => e.event === 'PostToolUse' || e.event === 'PostToolUseFailure').slice(-5);
-  let html = '';
-
-  // Find this coworker's nanoclaw session (primary identity) from cachedSessions.
-  // SDK sub-sessions (Claude Agent SDK UUIDs) are shown nested beneath it.
+// Shared "Active Session" block — two-layer (nanoclaw session id + container_status +
+// "last N ago") with a collapsible list of SDK sub-sessions. Returned as an HTML string
+// WITHOUT the outer <div class="field"><label>Active Session</label>…</div> wrapper so
+// callers can choose whether to wrap it (Coworkers detail uses the wrapper; Pixel Office
+// inspector is injecting into an existing slot). Pass `wrapField: true` to include the
+// field wrapper. Returns '' if there's no nanoclaw session AND no SDK fallback.
+function renderActiveSessionBlock(cw, { wrapField = true } = {}) {
+  const groupEvents = (state.hookEvents || []).filter((e) => e.group === cw.folder);
   const nanoSess = cachedSessions.find((s) => s.group_folder === cw.folder && s.nanoclaw_session_id);
+  let inner = '';
   if (nanoSess) {
     const lastMs = nanoSess.last_active
       ? new Date(nanoSess.last_active).getTime()
@@ -228,8 +222,7 @@ function renderDetailHooks(cw) {
     const ago = lastMs ? timeAgo(lastMs) : '';
     const cs = nanoSess.container_status || 'unknown';
     const subCount = (nanoSess.sdk_subsessions || []).length;
-    html += `<div class="field"><label>Active Session</label>
-      <div class="value" style="display:flex;flex-direction:column;gap:3px">
+    inner = `<div class="value" style="display:flex;flex-direction:column;gap:3px">
         <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">
           <span style="font-size:10px;color:var(--text);font-family:monospace">${esc(nanoSess.nanoclaw_session_id)}</span>
           <span style="font-size:9px;color:var(--text-muted)">[container: ${esc(cs)}${ago ? ' · last ' + esc(ago) : ''}]</span>
@@ -250,22 +243,34 @@ function renderDetailHooks(cw) {
             </button>
           `).join('')}
         </div>` : ''}
-      </div>
-    </div>`;
+      </div>`;
   } else {
-    // Fallback: fall back to the last-seen SDK session if cachedSessions hasn't loaded yet
-    // (keeps something on-screen during initial fetch).
+    // Fallback: fall back to the last-seen SDK session if cachedSessions hasn't loaded yet.
     const sessionEvent = groupEvents.filter((e) => e.session_id).slice(-1)[0];
     const activeSession = sessionEvent?.session_id || null;
-    if (activeSession) {
-      html += `<div class="field"><label>Active Session</label>
-        <div class="value" style="display:flex;align-items:center;gap:6px">
-          <span style="font-size:9px;color:var(--text-dim)">${esc(activeSession.slice(0, 12))}</span>
-          <button class="admin-action-btn" style="font-size:8px;padding:1px 6px" data-view-session="${escAttr(activeSession)}" data-view-session-group="${escAttr(cw.folder)}">View Session</button>
-        </div>
+    if (!activeSession) return '';
+    inner = `<div class="value" style="display:flex;align-items:center;gap:6px">
+        <span style="font-size:9px;color:var(--text-dim)">${esc(activeSession.slice(0, 12))}</span>
+        <button class="admin-action-btn" style="font-size:8px;padding:1px 6px" data-view-session="${escAttr(activeSession)}" data-view-session-group="${escAttr(cw.folder)}">View Session</button>
       </div>`;
-    }
   }
+  return wrapField
+    ? `<div class="field"><label>Active Session</label>${inner}</div>`
+    : inner;
+}
+
+function renderDetailHooks(cw) {
+  const groupEvents = state.hookEvents.filter((e) => e.group === cw.folder);
+
+  // Build pre-tool map for durations
+  const preTimes = new Map();
+  for (const e of groupEvents) {
+    if (e.event === 'PreToolUse' && e.tool_use_id) preTimes.set(e.tool_use_id, e.timestamp);
+  }
+
+  // Show last 5 tool calls with durations
+  const recentTools = groupEvents.filter((e) => e.event === 'PostToolUse' || e.event === 'PostToolUseFailure').slice(-5);
+  let html = renderActiveSessionBlock(cw);
 
   if (recentTools.length === 0 && groupEvents.length === 0) return html;
 
@@ -366,6 +371,14 @@ function applyState(nextState) {
       document.getElementById('detail-activity').textContent = updated.lastActivity ? timeAgo(updated.lastActivity) : 'Never';
       const subagentsEl = document.getElementById('detail-subagents');
       if (subagentsEl) subagentsEl.innerHTML = renderSubagentList(updated);
+      // Keep #detail-session (Pixel Office inspector) live — `last N ago` + container status
+      // drift with state; re-render the shared block so a new task-fire sub-session appears
+      // without waiting for a reselect.
+      const detailSessEl = document.getElementById('detail-session');
+      if (detailSessEl) {
+        const blk = renderActiveSessionBlock(updated, { wrapField: false });
+        if (blk) detailSessEl.innerHTML = blk;
+      }
       const ctxEl = document.getElementById('detail-context');
       if (ctxEl) {
         const fill = ctxEl.querySelector('.context-gauge-fill');
@@ -1310,18 +1323,14 @@ async function showDetailPanel(cw) {
   if (ctxHtml) { ctxField.style.display = ''; ctxEl.innerHTML = ctxHtml; }
   else { ctxField.style.display = 'none'; }
 
-  // Session ID from latest hook event
+  // Active Session block — uses the same helper as the Coworkers detail panel so the
+  // two surfaces can't diverge. Leads with the nanoclaw `sess-…` id + container_status +
+  // "last N ago", with SDK sub-sessions nested below (each drillable). The [View] button
+  // routes through enterNanoclawSessionFlow(...) — identical to the Coworkers tab's path.
   const sessionEl = document.getElementById('detail-session');
-  const groupEvents = (state.hookEvents || []).filter(e => e.group === cw.folder);
-  const lastSessionEvent = groupEvents.filter(e => e.session_id).slice(-1)[0];
-  if (lastSessionEvent?.session_id) {
-    const sid = lastSessionEvent.session_id;
-    sessionEl.innerHTML = `<a href="#" class="tl-session-link" data-session="${esc(sid)}" data-group="${esc(cw.folder)}" style="color:var(--accent)">${esc(sid.slice(0, 12))}...</a>`;
-    sessionEl.querySelector('a').addEventListener('click', (e) => {
-      e.preventDefault();
-      document.querySelector('[data-tab="observability"]')?.click();
-      setTimeout(() => openSessionFlowById(cw.folder, sid), 300);
-    });
+  const activeBlock = renderActiveSessionBlock(cw, { wrapField: false });
+  if (activeBlock) {
+    sessionEl.innerHTML = activeBlock;
   } else {
     sessionEl.textContent = '-';
   }
@@ -1640,20 +1649,87 @@ function updateTimeline() {
     expandedIds.add(el.id);
   });
 
-  container.innerHTML = filtered.slice(0, timelineDisplayLimit).map((ev, idx) => {
-    const gc = getGroupColor(ev.group);
+  // Build session_id -> { nanoclaw_session_id, group_folder, container_status, last_active, shape }
+  // from cachedSessions so we can emit two-tier separators (major = nanoclaw session change,
+  // minor = SDK sub-session change within the same nanoclaw session).
+  const sessionLookup = new Map();
+  for (const p of cachedSessions || []) {
+    for (const s of (p.sdk_subsessions || [])) {
+      sessionLookup.set(s.session_id, {
+        nanoclaw_session_id: p.nanoclaw_session_id || null,
+        agent_group_id: p.agent_group_id || null,
+        group_folder: p.group_folder,
+        container_status: p.container_status || null,
+        last_active: p.last_active || null,
+        shape: s.shape || 'session',
+        first_ts: s.first_ts,
+        last_ts: s.last_ts,
+      });
+    }
+  }
+
+  const displayItems = filtered.slice(0, timelineDisplayLimit);
+  let prevNano = undefined; // sentinel distinct from null (null = "no nanoclaw session")
+  let prevSdk = undefined;
+  let prevGroup = undefined;
+  const htmlParts = [];
+  for (let idx = 0; idx < displayItems.length; idx++) {
+    const ev = displayItems[idx];
+    const sdk = ev.sessionId || null;
+    const meta = sdk ? sessionLookup.get(sdk) : null;
+    const nano = meta?.nanoclaw_session_id ?? null;
+    const group = ev.group || '?';
+    // A separator is valid only when we have a known session boundary — skip for non-hook
+    // rows (messages, task-runs) which don't carry session_id. We still track their group
+    // so switching coworkers mid-stream re-emits the major separator on the next hook row.
+    if (sdk) {
+      const groupChanged = prevGroup !== undefined && prevGroup !== group;
+      const nanoChanged = prevNano !== undefined && prevNano !== nano;
+      const sdkChanged = prevSdk !== undefined && prevSdk !== sdk;
+      if (groupChanged || nanoChanged) {
+        // MAJOR: coworker · sess-<id> · container: <status> · last-active Xm ago
+        const cs = meta?.container_status || 'unknown';
+        const agoLabel = meta?.last_active ? timeAgo(new Date(meta.last_active).getTime()) : '';
+        const sessLabel = nano ? `sess-${String(nano).slice(0, 10)}` : '(no nanoclaw session)';
+        const last = agoLabel ? ` · last-active ${esc(agoLabel)}` : '';
+        htmlParts.push(`<div class="tl-sep tl-sep-major" style="display:flex;align-items:center;gap:8px;margin:10px 0 4px 0;padding:4px 8px;border-top:1px solid var(--border);color:var(--text-muted);font-size:10px;font-family:'Courier New',monospace">
+          <span style="color:${getGroupColor(group)};font-weight:bold">${esc(group)}</span>
+          <span>·</span>
+          <span style="font-family:monospace">${esc(sessLabel)}</span>
+          <span>·</span>
+          <span>container: ${esc(cs)}</span>${last ? `<span>·</span><span>${last}</span>` : ''}
+        </div>`);
+      }
+      if (groupChanged || nanoChanged || sdkChanged) {
+        // MINOR: └ <sdk-uuid-12> · <shape> · <start>-<end>
+        const shape = meta?.shape || 'session';
+        const start = meta?.first_ts ? formatTimeFull(meta.first_ts) : '';
+        const end = meta?.last_ts ? formatTimeFull(meta.last_ts) : '';
+        const range = start && end ? `${start}–${end}` : (start || end || '');
+        htmlParts.push(`<div class="tl-sep tl-sep-minor" style="display:flex;align-items:center;gap:6px;margin:2px 0 2px 16px;padding:2px 6px;border-top:1px dotted var(--border);color:var(--text-dim);font-size:9px;font-family:'Courier New',monospace">
+          <span>└</span>
+          <span style="font-family:monospace">${esc(String(sdk).slice(0, 12))}</span>
+          <span>·</span>
+          <span>${esc(shape)}</span>${range ? `<span>·</span><span>${esc(range)}</span>` : ''}
+        </div>`);
+      }
+      prevNano = nano;
+      prevSdk = sdk;
+    }
+    prevGroup = group;
+    const gc = getGroupColor(group);
     const hasExpand = ev.toolInput || ev.toolResponse;
     const expandId = `tl-expand-${idx}`;
-    return `<div class="tl-entry" data-event-group="${escAttr(ev.group)}" data-event-time="${String(ev.time)}" data-event-type="${escAttr(ev.type)}">
+    htmlParts.push(`<div class="tl-entry" data-event-group="${escAttr(group)}" data-event-time="${String(ev.time)}" data-event-type="${escAttr(ev.type)}">
       <div class="tl-time">${formatTimeFull(ev.time)}</div>
       <div class="tl-line"><div class="tl-dot" style="background:${ev.iconColor}"></div><div class="tl-connector"></div></div>
       <div class="tl-content">
         <div class="tl-header">
-          <span class="tl-group tl-group-link" style="color:${gc}" data-group="${escAttr(ev.group)}">${esc(ev.group)}</span>
+          <span class="tl-group tl-group-link" style="color:${gc}" data-group="${escAttr(group)}">${esc(group)}</span>
           <span class="tl-type ${ev.badgeClass || 'tl-type-hook'}">${ev.badge || 'HOOK'}</span>
           <span class="tl-title">${esc(ev.title)}</span>
           ${ev.duration != null ? `<span class="tl-duration">${formatDuration(ev.duration)}</span>` : ''}
-          ${ev.sessionId ? `<span class="tl-session-link" data-session-id="${escAttr(ev.sessionId)}" data-session-group="${escAttr(ev.group)}">${ev.sessionId.slice(0, 8)}</span>` : ''}
+          ${ev.sessionId ? `<span class="tl-session-link" data-session-id="${escAttr(ev.sessionId)}" data-session-group="${escAttr(group)}">${ev.sessionId.slice(0, 8)}</span>` : ''}
           ${hasExpand ? `<button class="tl-expand-btn" data-target="${expandId}">[+]</button>` : ''}
         </div>
         ${ev.prompt ? `<div class="tl-prompt">${esc(ev.prompt.slice(0, 120))}</div>` : ''}
@@ -1663,8 +1739,9 @@ function updateTimeline() {
           ${ev.toolResponse ? `<div class="tl-code-block"><label>Tool Response</label><pre>${esc(ev.toolResponse)}</pre></div>` : ''}
         </div>` : ''}
       </div>
-    </div>`;
-  }).join('');
+    </div>`);
+  }
+  container.innerHTML = htmlParts.join('');
 
   if (filtered.length === 0) {
     container.innerHTML = '<div class="tl-empty">No events yet. Spawn a coworker or schedule a task.</div>';
@@ -1996,7 +2073,34 @@ function renderSessionFlow(entries) {
     container.innerHTML = '<div class="tl-empty">No events in this session.</div>';
     return;
   }
-  container.innerHTML = entries.map((e, i) => renderFlowEntry(e, i, 0)).join('');
+  // In the aggregated nanoclaw-session view, entries span multiple SDK sub-sessions; emit a
+  // MINOR separator whenever session_id changes between adjacent entries. The single-SDK
+  // view has uniform session_id so this is a no-op there. Subagent children are skipped —
+  // they inherit their parent's session and don't need their own boundary marker.
+  const parts = [];
+  let prevSdk = undefined;
+  for (let i = 0; i < entries.length; i++) {
+    const e = entries[i];
+    const sdk = e.session_id || null;
+    if (sdk && prevSdk !== undefined && prevSdk !== sdk) {
+      const meta = (cachedSessions || [])
+        .flatMap((p) => (p.sdk_subsessions || []))
+        .find((s) => s.session_id === sdk);
+      const shape = meta?.shape || 'session';
+      const start = meta?.first_ts ? formatTimeFull(meta.first_ts) : '';
+      const end = meta?.last_ts ? formatTimeFull(meta.last_ts) : '';
+      const range = start && end ? `${start}–${end}` : (start || end || '');
+      parts.push(`<div class="tl-sep tl-sep-minor" style="display:flex;align-items:center;gap:6px;margin:6px 0 2px 12px;padding:2px 6px;border-top:1px dotted var(--border);color:var(--text-dim);font-size:9px;font-family:'Courier New',monospace">
+        <span>└</span>
+        <span style="font-family:monospace">${esc(String(sdk).slice(0, 12))}</span>
+        <span>·</span>
+        <span>${esc(shape)}</span>${range ? `<span>·</span><span>${esc(range)}</span>` : ''}
+      </div>`);
+    }
+    if (sdk) prevSdk = sdk;
+    parts.push(renderFlowEntry(e, i, 0));
+  }
+  container.innerHTML = parts.join('');
 }
 
 function renderFlowEntry(entry, idx, depth) {
