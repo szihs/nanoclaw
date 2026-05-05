@@ -37,9 +37,10 @@ main / global (flat) — admin + shared assistants, separate lineage.
 | **coworker type** | Named entry in `container/{spines,skills}/*/coworker-types.yaml`. Composes spine fragments + skills + workflows + overlays + bindings. |
 | **spine** | The always-in-context `CLAUDE.md`: identity → invariants → context → workflow/skill index → bindings → customizations → additional instructions. |
 | **trait** | Dotted capability name (`repo.pr`, `code.edit`). Skills `provide`; workflows `require`; types `bind` at the domain level. |
-| **skill** | `SKILL.md` with `provides: [trait, ...]`. Body loads on `/skill-name`. |
-| **workflow** | `SKILL.md` with `type: workflow` + `requires: [trait, ...]`. Body has steps with `{#step-id}` anchors. |
-| **overlay** | `SKILL.md` with `type: overlay`. Splices steps into workflows by matching workflow names or trait domains. |
+| **skill** | `container/skills/<name>/SKILL.md` with `provides: [trait, ...]`. Runtime slash command — body loads on `/skill-name` invocation. |
+| **workflow** | `container/workflows/<name>/WORKFLOW.md` with `requires: [trait, ...]`. Body has steps with `{#step-id}` anchors. Compose-time only — embedded into the spine; NOT a runtime slash command. |
+| **overlay** | `container/overlays/<name>/OVERLAY.md` with `applies-to:` workflow/trait targets. Splices steps into workflows at `insert-after` / `insert-before` anchors. Compose-time only. |
+| **spine fragment** | `container/spines/<project>/{identity,invariants,context}/*.md` plus `coworker-types.yaml`. Contributes to the always-in-context prompt. |
 | **extends** (type) | Inheritance: identity leaf-wins; invariants/context/skills/workflows/overlays append+dedup; bindings leaf-wins per domain. |
 | **extends** (workflow) | Inheritance: parent body + `overrides` per `{#step-id}`. Unoverridden steps run as-is. |
 
@@ -142,8 +143,9 @@ Every coworker instance has `groups/<folder>/.instructions.md`. The composed `CL
 
 ### Add an overlay
 
-1. Create `container/skills/<name>-overlay/SKILL.md` with `type: overlay`, `applies-to`, `insert-after`
-2. Attach via `overlays:` on a coworker type
+1. Create `container/overlays/<name>/OVERLAY.md` with `type: overlay`, `applies-to:` (workflow names or trait domains), and `insert-after` / `insert-before` anchors.
+2. Attach via `overlays:` on a coworker type.
+3. (Optional) If the overlay also needs a runtime Task-tool subagent, drop an `agent.md` alongside the OVERLAY.md — `group-init.ts` copies it into `.claude-shared/agents/`.
 
 ### Bring up a new project
 
@@ -221,10 +223,12 @@ main:
 |---|---|
 | `container/spines/base/` | Universal invariants + context + `base-common` type |
 | `container/spines/<project>/` | Project identity + invariants + context + types |
-| `container/workflows/<name>/` | Workflow SKILL.md (base or project) |
-| `container/skills/<name>-overlay/` | Overlay SKILL.md |
-| `container/skills/<name>/` | Skill SKILL.md |
-| `container/skills/nanoclaw-base/` | Flat main/global body templates |
+| `container/workflows/<name>/WORKFLOW.md` | Workflow body (base or project — embedded into CLAUDE.md at compose time) |
+| `container/overlays/<name>/OVERLAY.md` | Overlay body (inlined at workflow step anchors) |
+| `container/overlays/<name>/agent.md` | Optional Task-tool subagent definition (copied to `.claude-shared/agents/`) |
+| `container/skills/<name>/SKILL.md` | Capability skill body (runtime slash command) |
+| `container/skills/nanoclaw-base/` | Flat main/global body templates (addon to `main`/`global`) |
+| `container/skills/dashboard-base/` | Dashboard formatting addon (context fragment for `main`/`global`) |
 | `src/claude-composer/` | Composer: registry, resolver, spine renderer |
 | `src/container-runner.ts` | Runtime: composeCoworkerClaudeMd, resolveAllowedMcpTools |
 | `scripts/validate-templates.ts` | Author-time validator |
