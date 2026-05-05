@@ -91,6 +91,29 @@ export function nextEvenSeq(db: Database.Database): number {
   return maxSeq < 2 ? 2 : maxSeq + 2 - (maxSeq % 2);
 }
 
+// Stored-timestamp shape contract for messages_in: always an ISO-8601 UTC
+// string. Historically some callers slipped `Date.now()` in as a number,
+// which SQLite stored as REAL and printed back as "<ms>.0" — unparseable by
+// Date.parse and able to bisect downstream sorts via NaN poisoning. We guard
+// at the insert site so the corruption can't re-enter the DB.
+function toIsoTimestamp(raw: unknown, field: string): string {
+  if (typeof raw === 'string') {
+    const s = raw.trim();
+    if (/^\d+(\.\d+)?$/.test(s)) {
+      const n = Number(s);
+      if (Number.isFinite(n)) return new Date(n).toISOString();
+    }
+    const parsed = Date.parse(s);
+    if (Number.isFinite(parsed)) return new Date(parsed).toISOString();
+    throw new Error(`insertMessage: unparseable ${field} "${raw}"`);
+  }
+  if (typeof raw === 'number' && Number.isFinite(raw)) {
+    return new Date(raw).toISOString();
+  }
+  if (raw instanceof Date) return raw.toISOString();
+  throw new Error(`insertMessage: invalid ${field} type ${typeof raw}`);
+}
+
 export function insertMessage(
   db: Database.Database,
   message: {
@@ -110,11 +133,16 @@ export function insertMessage(
     trigger?: 0 | 1;
   },
 ): void {
+  const normalizedTimestamp = toIsoTimestamp(message.timestamp, 'timestamp');
+  const normalizedProcessAfter =
+    message.processAfter == null ? null : toIsoTimestamp(message.processAfter, 'processAfter');
   db.prepare(
     `INSERT INTO messages_in (id, seq, kind, timestamp, status, platform_id, channel_type, thread_id, content, process_after, recurrence, series_id, trigger)
      VALUES (@id, @seq, @kind, @timestamp, 'pending', @platformId, @channelType, @threadId, @content, @processAfter, @recurrence, @id, @trigger)`,
   ).run({
     ...message,
+    timestamp: normalizedTimestamp,
+    processAfter: normalizedProcessAfter,
     trigger: message.trigger ?? 1,
     seq: nextEvenSeq(db),
   });
