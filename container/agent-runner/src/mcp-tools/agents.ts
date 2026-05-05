@@ -47,7 +47,7 @@ export const createAgent: McpToolDefinition = {
         coworkerType: {
           type: 'string',
           description:
-            'Coworker type key from the lego registry at container/skills/*/coworker-types.yaml. Determines the composed spine, skill/workflow index, trait bindings, and derived MCP tool allowlist.',
+            'Coworker type key from the lego registry at container/{spines,skills}/*/coworker-types.yaml. Determines the composed spine, skill/workflow index, trait bindings, and derived MCP tool allowlist.',
         },
         allowedMcpTools: {
           type: 'array',

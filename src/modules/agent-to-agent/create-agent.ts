@@ -127,7 +127,7 @@ export async function handleCreateAgent(content: Record<string, unknown>, sessio
       coworkerType = null;
       creationNote = looksLikePlaceholder
         ? `Requested coworkerType "${requestedCoworkerType}" looked like a placeholder, so the agent was created as untyped.`
-        : `Requested coworkerType "${requestedCoworkerType}" is not in the coworker type registry (container/skills/*/coworker-types.yaml), so the agent was created as untyped.`;
+        : `Requested coworkerType "${requestedCoworkerType}" is not in the coworker type registry (container/{spines,skills}/*/coworker-types.yaml), so the agent was created as untyped.`;
       log.warn('create_agent falling back to untyped coworker', {
         requestedCoworkerType,
         unknownRoles,

@@ -204,7 +204,7 @@ Each branch carries only its own files. Merging both into v2_main produces the f
 
 ### Coworker Types (Lego Registry)
 
-Types are defined in `container/skills/*/coworker-types.yaml`. The extends chain composes identity, invariants, context, workflows, skills, overlays, and bindings.
+Types are defined in `container/{spines,skills}/*/coworker-types.yaml`. The extends chain composes identity, invariants, context, workflows, skills, overlays, and bindings.
 
 | Type | Role | Extends |
 |------|------|---------|

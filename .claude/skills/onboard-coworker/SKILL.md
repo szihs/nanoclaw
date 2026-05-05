@@ -5,7 +5,7 @@ description: Create coworkers from pre-packaged YAML definitions or build new on
 
 # Onboard Coworkers
 
-Scans pre-packaged YAML bundles in `coworkers/` and the lego coworker-type registry under `container/skills/*/coworker-types.yaml` to create agent instances. Also supports defining brand-new coworker types.
+Scans pre-packaged YAML bundles in `coworkers/` and the lego coworker-type registry under `container/{spines,skills}/*/coworker-types.yaml` to create agent instances. Also supports defining brand-new coworker types.
 
 ## Important Constraints
 
@@ -18,7 +18,7 @@ Scans pre-packaged YAML bundles in `coworkers/` and the lego coworker-type regis
 | File | Purpose |
 |------|---------|
 | `coworkers/*.yaml` | Pre-packaged coworker bundles (version 3 exports — name, trigger, instructions, memory snapshot) |
-| `container/skills/*/coworker-types.yaml` | Lego coworker-type registry — each skill ships its own types; duplicate type names merge across skills |
+| `container/{spines,skills}/*/coworker-types.yaml` | Lego coworker-type registry — each skill ships its own types; duplicate type names merge across skills |
 | `container/skills/*/SKILL.md` | Container skills (capability / workflow / overlay bodies) loaded inside the agent |
 | `groups/templates/instructions/` | Reusable instruction overlays (`thorough-analyst`, `terse-reporter`, `code-reviewer`, `ci-focused`) |
 | `docs/lego-coworker-workflows.md` | Full schema for the lego model (types, spine fragments, workflows, skills, overlays, traits, bindings) |
@@ -28,7 +28,7 @@ Scans pre-packaged YAML bundles in `coworkers/` and the lego coworker-type regis
 Before asking the user anything:
 
 1. **Scan `coworkers/` directory** for `.yaml` files — these are pre-packaged coworker bundles
-2. **Scan `container/skills/*/coworker-types.yaml`** for registered coworker types. Skip the `main` and `global` type keys — those are the base agents, not spawnable coworkers
+2. **Scan `container/{spines,skills}/*/coworker-types.yaml`** for registered coworker types. Skip the `main` and `global` type keys — those are the base agents, not spawnable coworkers
 3. **Scan `groups/`** for already-spawned instances (each instance has its own folder)
 4. **List instruction overlays** from `groups/templates/instructions/`
 
@@ -40,7 +40,7 @@ Pre-packaged coworker bundles (coworkers/):
   [ ] <yaml-name-2>         — <agent.name / summary from bundle>
   ...
 
-Available coworker types (container/skills/*/coworker-types.yaml):
+Available coworker types (container/{spines,skills}/*/coworker-types.yaml):
   - <type-name-1>           — <description from yaml>
   - <type-name-2>           — <description from yaml>
   ...
@@ -64,7 +64,7 @@ Then ask using AskUserQuestion:
 For each selected YAML file:
 
 1. Read the YAML file from `coworkers/{name}.yaml`
-2. Check `requires.coworkerTypes` — verify every referenced type exists in the merged registry (scan `container/skills/*/coworker-types.yaml`). If a required type is missing, the user likely needs to install its provider skill first (e.g. `/add-<project>`)
+2. Check `requires.coworkerTypes` — verify every referenced type exists in the merged registry (scan `container/{spines,skills}/*/coworker-types.yaml`). If a required type is missing, the user likely needs to install its provider skill first (e.g. `/add-<project>`)
 3. Ask the user for optional customizations:
    - **Instruction overlay** (from `groups/templates/instructions/`) — communication style
    - **Custom instructions** (appended after the overlay) — domain-specific tweaks

@@ -34,7 +34,7 @@ main / global (flat) — admin + shared assistants, separate lineage.
 
 | Term | What it is |
 |---|---|
-| **coworker type** | Named entry in `container/skills/*/coworker-types.yaml`. Composes spine fragments + skills + workflows + overlays + bindings. |
+| **coworker type** | Named entry in `container/{spines,skills}/*/coworker-types.yaml`. Composes spine fragments + skills + workflows + overlays + bindings. |
 | **spine** | The always-in-context `CLAUDE.md`: identity → invariants → context → workflow/skill index → bindings → customizations → additional instructions. |
 | **trait** | Dotted capability name (`repo.pr`, `code.edit`). Skills `provide`; workflows `require`; types `bind` at the domain level. |
 | **skill** | `SKILL.md` with `provides: [trait, ...]`. Body loads on `/skill-name`. |
