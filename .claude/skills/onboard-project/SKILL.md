@@ -184,7 +184,7 @@ From the analysis, determine:
 
 Create all files. Use `{project}` as the prefix. Use `{Project}` (capitalized) in descriptions.
 
-### 2a. Spine: `container/skills/spine-{project}/`
+### 2a. Spine: `container/spines/{project}/`
 
 **`identity/engineer.md`** — One paragraph. Derive from repo description and primary language:
 > You are a {Project} engineer. You work on {repo description from GitHub}. You understand {key technical domains from analysis}. You prefer {coding style preferences from analysis}.
@@ -222,11 +222,11 @@ Create all files. Use `{project}` as the prefix. Use `{Project}` (capitalized) i
   description: "{Project} spine — identity, API invariants, repo layout."
   project: {project}
   extends: base-common
-  identity: container/skills/spine-{project}/identity/engineer.md
+  identity: container/spines/{project}/identity/engineer.md
   invariants:
-    - container/skills/spine-{project}/invariants/public-api.md
+    - container/spines/{project}/invariants/public-api.md
   context:
-    - container/skills/spine-{project}/context/layout.md
+    - container/spines/{project}/context/layout.md
   skills:
     - {project}-build
     - {project}-code-reader

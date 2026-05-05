@@ -138,18 +138,18 @@ At this point `nv-<name>` is 1 commit on top of `$ANCESTOR`, containing all lego
 
 ```bash
 git rm -r \
-  container/skills/spine-base/ \
+  container/spines/base/ \
   container/skills/nanoclaw-base/ \
   container/skills/base-nanoclaw/ \
-  container/skills/base-plan/ \
-  container/skills/codex-critique/ \
-  container/skills/critique-overlay/ \
-  container/skills/deep-research/ \
-  container/skills/document-workflow/ \
-  container/skills/implement-workflow/ \
-  container/skills/investigate-workflow/ \
+  container/workflows/base-plan/ \
+  container/overlays/codex-critique/ \
+  container/overlays/critique/ \
+  container/workflows/deep-research/ \
+  container/workflows/document/ \
+  container/workflows/implement/ \
+  container/workflows/investigate/ \
   container/skills/plan-overlay/ \
-  container/skills/review-workflow/ \
+  container/workflows/review/ \
   src/db/migrations/006-coworker-fields.ts \
   src/db/migrations/014-hook-events.ts \
   src/db/migrations/015-agent-routing.ts \
@@ -158,7 +158,7 @@ git rm -r \
 
 Also remove cross-project skill references that don't belong:
 - `add-slang/SKILL.md` from non-slang branches
-- `container/skills/spine-slang/context/layout.md` from non-slang branches
+- `container/spines/slang/context/layout.md` from non-slang branches
 - `container/agent-runner/src/providers/codex.ts` + its `import './codex.js'` line from all project branches (covered by upstream's `/add-codex` skill)
 
 Check after removal — **keep** any `<project>-*` prefixed variants (e.g. `slang-document-workflow/` in nv-slang). Only the generic unprefixed versions are nv-main's.
