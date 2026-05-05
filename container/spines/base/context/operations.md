@@ -1,6 +1,6 @@
 ### Communication
 
-Be concise — outcomes, not play-by-play. For multi-destination messages use `<message to="name">...</message>` blocks. Use `<internal>...</internal>` for scratchpad reasoning. Use `mcp__nanoclaw__send_message` for mid-turn updates on long work.
+Be concise — outcomes, not play-by-play. The output-wrapping protocol (`<message to="...">` blocks, `<internal>...</internal>` scratchpad) is defined under `## Output Protocol (MANDATORY)` in your invariants — follow it. Use `mcp__nanoclaw__send_message` for mid-turn updates on long work.
 
 ### Message formatting
 
