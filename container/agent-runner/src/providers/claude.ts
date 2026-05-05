@@ -351,6 +351,42 @@ export class ClaudeProvider implements AgentProvider {
         } else if (message.type === 'result') {
           const text = 'result' in message ? (message as { result?: string }).result ?? null : null;
           yield { type: 'result', text };
+          // Emit structured per-turn usage so the poll-loop can log
+          // a grep-friendly line. Fields come from the SDK's result
+          // message (shape: { usage: { input_tokens, cache_*_input_tokens,
+          // output_tokens, cache_creation: { ephemeral_*_input_tokens } },
+          // duration_ms, total_cost_usd, num_turns, session_id }).
+          const r = message as {
+            session_id?: string;
+            duration_ms?: number;
+            total_cost_usd?: number;
+            num_turns?: number;
+            usage?: {
+              input_tokens?: number;
+              output_tokens?: number;
+              cache_creation_input_tokens?: number;
+              cache_read_input_tokens?: number;
+              cache_creation?: {
+                ephemeral_1h_input_tokens?: number;
+                ephemeral_5m_input_tokens?: number;
+              };
+            };
+          };
+          if (r.usage) {
+            yield {
+              type: 'usage',
+              inputTokens: r.usage.input_tokens ?? 0,
+              outputTokens: r.usage.output_tokens ?? 0,
+              cacheCreationInputTokens: r.usage.cache_creation_input_tokens ?? 0,
+              cacheReadInputTokens: r.usage.cache_read_input_tokens ?? 0,
+              ephemeral1hInputTokens: r.usage.cache_creation?.ephemeral_1h_input_tokens ?? 0,
+              ephemeral5mInputTokens: r.usage.cache_creation?.ephemeral_5m_input_tokens ?? 0,
+              durationMs: r.duration_ms ?? 0,
+              totalCostUsd: r.total_cost_usd ?? 0,
+              numTurns: r.num_turns ?? 0,
+              sessionId: r.session_id ?? null,
+            };
+          }
         } else if (message.type === 'system' && (message as { subtype?: string }).subtype === 'api_retry') {
           yield { type: 'error', message: 'API retry', retryable: true };
         } else if (message.type === 'system' && (message as { subtype?: string }).subtype === 'rate_limit_event') {

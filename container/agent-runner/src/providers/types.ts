@@ -75,6 +75,26 @@ export type ProviderEvent =
   | { type: 'error'; message: string; retryable: boolean; classification?: string }
   | { type: 'progress'; message: string }
   /**
+   * Per-turn usage accounting. Emitted once after a turn completes when the
+   * underlying provider surfaces token/cost numbers. Lets the poll-loop log
+   * a structured line per turn (grep/aggregate for perf investigations).
+   * Fields mirror the Anthropic usage shape; providers that don't know a
+   * value (e.g. Codex doesn't separate cache tiers) pass 0 rather than omit.
+   */
+  | {
+      type: 'usage';
+      inputTokens: number;
+      outputTokens: number;
+      cacheCreationInputTokens: number;
+      cacheReadInputTokens: number;
+      ephemeral1hInputTokens: number;
+      ephemeral5mInputTokens: number;
+      durationMs: number;
+      totalCostUsd: number;
+      numTurns: number;
+      sessionId: string | null;
+    }
+  /**
    * Liveness signal. Providers MUST yield this on every underlying SDK
    * event (tool call, thinking, partial message, anything) so the
    * poll-loop's idle timer stays honest during long tool runs.
