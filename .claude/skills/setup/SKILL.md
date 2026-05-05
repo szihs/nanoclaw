@@ -187,7 +187,7 @@ Ask them to let you know when done.
 
 Check if nv-main is already merged:
 ```bash
-ls container/skills/spine-base/coworker-types.yaml 2>/dev/null
+ls container/spines/base/coworker-types.yaml 2>/dev/null
 ```
 
 If NOT found, merge the coworker infrastructure:

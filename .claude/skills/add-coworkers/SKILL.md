@@ -16,7 +16,7 @@ git symbolic-ref HEAD 2>/dev/null || git checkout -b nv-coworkers
 
 Check if already applied:
 ```bash
-ls container/skills/spine-base/coworker-types.yaml 2>/dev/null
+ls container/spines/base/coworker-types.yaml 2>/dev/null
 ```
 If it exists, skip to Phase 3 (project add-ons).
 
@@ -38,7 +38,7 @@ git merge origin/nv-main --no-edit || {
 This brings in:
 - Lego spine composer (`src/claude-composer/`)
 - Project-scoped trait resolver with cross-project binding protection
-- Base spine (`container/skills/spine-base/`) with universal invariants + context
+- Base spine (`container/spines/base/`) with universal invariants + context
 - Core workflows: investigate, implement, review, document
 - Base skills: base-nanoclaw, plan, deep-research, codex-critique
 - Updated add-dashboard and add-slang skills (merge from nv-* branches)
