@@ -12,7 +12,6 @@ nanoclaw-common:
     - nanoclaw-code-reader
     - nanoclaw-github
     - deep-research
-    - codex-critique
   workflows:
     - investigate
     - review
