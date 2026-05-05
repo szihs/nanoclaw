@@ -7,14 +7,14 @@
 base-common:
   description: "Universal coworker spine — safety, truthfulness, scope, workspace conventions, invocation protocol. Every project type extends this."
   invariants:
-    - container/skills/spine-base/invariants/safety.md
-    - container/skills/spine-base/invariants/truthfulness.md
-    - container/skills/spine-base/invariants/scope.md
+    - container/spines/base/invariants/safety.md
+    - container/spines/base/invariants/truthfulness.md
+    - container/spines/base/invariants/scope.md
   context:
-    - container/skills/spine-base/context/capabilities.md
-    - container/skills/spine-base/context/workspace.md
-    - container/skills/spine-base/context/invocation.md
-    - container/skills/spine-base/context/operations.md
+    - container/spines/base/context/capabilities.md
+    - container/spines/base/context/workspace.md
+    - container/spines/base/context/invocation.md
+    - container/spines/base/context/operations.md
   skills:
     - base-nanoclaw
     - plan
