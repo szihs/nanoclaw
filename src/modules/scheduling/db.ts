@@ -58,6 +58,10 @@ export interface TaskUpdate {
   script?: string | null;
   recurrence?: string | null;
   processAfter?: string;
+  // Toggle new_session in the stored content JSON. true writes
+  // `new_session: true`; false strips the key entirely (so the stored
+  // blob stays minimal for legacy tasks).
+  newSession?: boolean;
 }
 
 // Merges content JSON in-place so callers can update prompt/script without
@@ -75,7 +79,8 @@ export function updateTask(db: Database.Database, taskId: string, update: TaskUp
 
   const setProcessAfter = update.processAfter !== undefined;
   const setRecurrence = update.recurrence !== undefined;
-  const mergeContent = update.prompt !== undefined || update.script !== undefined;
+  const mergeContent =
+    update.prompt !== undefined || update.script !== undefined || update.newSession !== undefined;
 
   const tx = db.transaction(() => {
     for (const row of rows) {
@@ -84,6 +89,8 @@ export function updateTask(db: Database.Database, taskId: string, update: TaskUp
         const parsed = JSON.parse(row.content) as Record<string, unknown>;
         if (update.prompt !== undefined) parsed.prompt = update.prompt;
         if (update.script !== undefined) parsed.script = update.script;
+        if (update.newSession === true) parsed.new_session = true;
+        else if (update.newSession === false) delete parsed.new_session;
         content = JSON.stringify(parsed);
       }
 

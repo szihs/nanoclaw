@@ -52,6 +52,11 @@ export const scheduleTask: McpToolDefinition = {
             'Cron expression for recurring tasks (e.g., "0 9 * * 1-5" = weekdays at 9am user-local). Evaluated in the user\'s timezone.',
         },
         script: { type: 'string', description: 'Optional pre-agent script to run before processing' },
+        new_session: {
+          type: 'boolean',
+          description:
+            'For recurring heartbeat/cron tasks only: when true, each fire runs in a fresh Claude session instead of resuming prior history. Prevents the recurring-task conversation from accumulating every fire\'s context indefinitely (which would otherwise drive repeated compactions and grow cache-read tokens). Use when the task is stateless across fires (state persists via files on disk, not in-conversation memory). Default false.',
+        },
       },
       required: ['prompt', 'processAfter'],
     },
@@ -74,8 +79,13 @@ export const scheduleTask: McpToolDefinition = {
     const r = routing();
     const recurrence = (args.recurrence as string) || null;
     const script = (args.script as string) || null;
+    const newSession = args.new_session === true;
 
-    // Write as a system action — host will insert into inbound.db
+    // Write as a system action — host will insert into inbound.db.
+    // `new_session` is only meaningful for recurring tasks (flat-cost heartbeat
+    // model vs resume-continuation model); the host handler in
+    // src/modules/scheduling/actions.ts writes it into the stored task content
+    // which the poll-loop reads per PR #58.
     writeMessageOut({
       id,
       kind: 'system',
@@ -89,11 +99,16 @@ export const scheduleTask: McpToolDefinition = {
         script,
         processAfter,
         recurrence,
+        ...(newSession ? { new_session: true } : {}),
       }),
     });
 
-    log(`schedule_task: ${id} at ${processAfter}${recurrence ? ` (recurring: ${recurrence})` : ''}`);
-    return ok(`Task scheduled (id: ${id}, runs at: ${processAfter}${recurrence ? `, recurrence: ${recurrence}` : ''})`);
+    log(
+      `schedule_task: ${id} at ${processAfter}${recurrence ? ` (recurring: ${recurrence})` : ''}${newSession ? ' [new_session]' : ''}`,
+    );
+    return ok(
+      `Task scheduled (id: ${id}, runs at: ${processAfter}${recurrence ? `, recurrence: ${recurrence}` : ''}${newSession ? ', new_session: true' : ''})`,
+    );
   },
 };
 
@@ -260,6 +275,11 @@ export const updateTask: McpToolDefinition = {
           type: 'string',
           description: 'New pre-agent script (optional). Pass empty string to clear.',
         },
+        new_session: {
+          type: 'boolean',
+          description:
+            'Toggle the new_session flag on the stored task content (optional). true: future fires run in a fresh Claude session. false: strip the flag (future fires resume the stored continuation). See schedule_task docs for when to use.',
+        },
       },
       required: ['taskId'],
     },
@@ -282,6 +302,7 @@ export const updateTask: McpToolDefinition = {
     // Empty string clears recurrence/script; undefined leaves them as-is.
     if (typeof args.recurrence === 'string') update.recurrence = args.recurrence === '' ? null : args.recurrence;
     if (typeof args.script === 'string') update.script = args.script === '' ? null : args.script;
+    if (args.new_session === true || args.new_session === false) update.new_session = args.new_session;
 
     if (Object.keys(update).length === 1) return err('at least one field to update is required');
 

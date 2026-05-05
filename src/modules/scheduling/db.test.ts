@@ -280,3 +280,59 @@ describe('insertRecurrence', () => {
     db.close();
   });
 });
+
+describe('updateTask — new_session toggle', () => {
+  // new_session is a boolean flag in the stored content JSON that the
+  // agent-runner poll-loop reads to decide whether a recurring task fire
+  // resumes the stored continuation or starts a fresh Claude session (PR
+  // #58 reader; this test pins the writer side).
+  it('setting newSession=true writes new_session:true into content', () => {
+    const db = freshDb();
+    insertBasicTask(db, 'task-1', '*/5 * * * *');
+    const touched = updateTask(db, 'task-1', { newSession: true });
+    expect(touched).toBe(1);
+    const row = db.prepare('SELECT content FROM messages_in WHERE id = ?').get('task-1') as { content: string };
+    const parsed = JSON.parse(row.content) as Record<string, unknown>;
+    expect(parsed.new_session).toBe(true);
+    expect(parsed.prompt).toBe('noop'); // other fields preserved
+    db.close();
+  });
+
+  it('setting newSession=false strips the key from content', () => {
+    const db = freshDb();
+    insertTask(db, {
+      id: 'task-2',
+      processAfter: new Date().toISOString(),
+      recurrence: '*/5 * * * *',
+      platformId: null,
+      channelType: null,
+      threadId: null,
+      content: JSON.stringify({ prompt: 'noop', new_session: true }),
+    });
+    updateTask(db, 'task-2', { newSession: false });
+    const row = db.prepare('SELECT content FROM messages_in WHERE id = ?').get('task-2') as { content: string };
+    const parsed = JSON.parse(row.content) as Record<string, unknown>;
+    expect('new_session' in parsed).toBe(false);
+    expect(parsed.prompt).toBe('noop');
+    db.close();
+  });
+
+  it('omitting newSession leaves the existing flag untouched', () => {
+    const db = freshDb();
+    insertTask(db, {
+      id: 'task-3',
+      processAfter: new Date().toISOString(),
+      recurrence: '*/5 * * * *',
+      platformId: null,
+      channelType: null,
+      threadId: null,
+      content: JSON.stringify({ prompt: 'old', new_session: true }),
+    });
+    updateTask(db, 'task-3', { prompt: 'new' });
+    const row = db.prepare('SELECT content FROM messages_in WHERE id = ?').get('task-3') as { content: string };
+    const parsed = JSON.parse(row.content) as Record<string, unknown>;
+    expect(parsed.prompt).toBe('new');
+    expect(parsed.new_session).toBe(true);
+    db.close();
+  });
+});
