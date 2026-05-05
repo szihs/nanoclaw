@@ -3122,6 +3122,44 @@ export async function handleRequest(
     return;
   }
 
+  // API: liveness + readiness probe. Unauthenticated — designed for external
+  // uptime checks and K8s readiness/liveness. Reports build/version, db
+  // reachability, and a simple `ok` boolean. Returns 200 if DB is reachable,
+  // 503 otherwise.
+  if (url.pathname === '/api/health') {
+    let dbOk = false;
+    let groupCount: number | null = null;
+    try {
+      const db = getWriteDb();
+      if (db) {
+        const row = db.prepare('SELECT COUNT(*) AS n FROM agent_groups').get() as { n: number };
+        groupCount = row.n;
+        dbOk = true;
+      }
+    } catch {
+      /* dbOk stays false */
+    }
+    const pkg = (() => {
+      try {
+        return JSON.parse(readFileSync(join(getProjectRoot(), 'package.json'), 'utf-8')) as {
+          version?: string;
+        };
+      } catch {
+        return {};
+      }
+    })();
+    const body = {
+      ok: dbOk,
+      version: pkg.version ?? null,
+      uptimeSec: Math.round(process.uptime()),
+      db: { reachable: dbOk, groupCount },
+      pid: process.pid,
+    };
+    res.writeHead(dbOk ? 200 : 503, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify(body));
+    return;
+  }
+
   if (url.pathname === '/api/events') {
     if (!requireAuth(req, res)) return;
     res.writeHead(200, {
