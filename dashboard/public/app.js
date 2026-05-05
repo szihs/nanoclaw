@@ -207,9 +207,6 @@ function switchToTab(tabId) {
 
 function renderDetailHooks(cw) {
   const groupEvents = state.hookEvents.filter((e) => e.group === cw.folder);
-  // Find active session
-  const sessionEvent = groupEvents.filter((e) => e.session_id).slice(-1)[0];
-  const activeSession = sessionEvent?.session_id || null;
 
   // Build pre-tool map for durations
   const preTimes = new Map();
@@ -221,13 +218,53 @@ function renderDetailHooks(cw) {
   const recentTools = groupEvents.filter((e) => e.event === 'PostToolUse' || e.event === 'PostToolUseFailure').slice(-5);
   let html = '';
 
-  if (activeSession) {
+  // Find this coworker's nanoclaw session (primary identity) from cachedSessions.
+  // SDK sub-sessions (Claude Agent SDK UUIDs) are shown nested beneath it.
+  const nanoSess = cachedSessions.find((s) => s.group_folder === cw.folder && s.nanoclaw_session_id);
+  if (nanoSess) {
+    const lastMs = nanoSess.last_active
+      ? new Date(nanoSess.last_active).getTime()
+      : (nanoSess.sdk_subsessions[0]?.last_ts ?? 0);
+    const ago = lastMs ? timeAgo(lastMs) : '';
+    const cs = nanoSess.container_status || 'unknown';
+    const subCount = (nanoSess.sdk_subsessions || []).length;
     html += `<div class="field"><label>Active Session</label>
-      <div class="value" style="display:flex;align-items:center;gap:6px">
-        <span style="font-size:9px;color:var(--text-dim)">${activeSession.slice(0, 12)}</span>
-        <button class="admin-action-btn" style="font-size:8px;padding:1px 6px" data-view-session="${escAttr(activeSession)}" data-view-session-group="${escAttr(cw.folder)}">View Session</button>
+      <div class="value" style="display:flex;flex-direction:column;gap:3px">
+        <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">
+          <span style="font-size:10px;color:var(--text);font-family:monospace">${esc(nanoSess.nanoclaw_session_id)}</span>
+          <span style="font-size:9px;color:var(--text-muted)">[container: ${esc(cs)}${ago ? ' · last ' + esc(ago) : ''}]</span>
+          <button class="admin-action-btn" style="font-size:8px;padding:1px 6px"
+            data-view-nanoclaw-session="${escAttr(nanoSess.nanoclaw_session_id)}"
+            data-view-nanoclaw-agid="${escAttr(nanoSess.agent_group_id || '')}"
+            data-view-session-group="${escAttr(cw.folder)}">View</button>
+        </div>
+        ${subCount > 0 ? `<div style="font-size:9px;color:var(--text-dim)">▸ ${subCount} SDK sub-session${subCount === 1 ? '' : 's'}</div>` : ''}
+        ${subCount > 0 ? `<div style="display:flex;flex-direction:column;gap:2px;margin-left:10px">
+          ${nanoSess.sdk_subsessions.slice(0, 6).map((s) => `
+            <button class="hook-entry hook-entry-link" style="display:flex;gap:8px;align-items:center;font-size:9px;padding:1px 4px;text-align:left"
+              data-view-session="${escAttr(s.session_id)}" data-view-session-group="${escAttr(cw.folder)}">
+              <span style="font-family:monospace;color:var(--text-dim)">${esc(s.session_id.slice(0, 11))}</span>
+              <span style="min-width:58px;color:var(--text-muted)">${esc(s.shape || 'session')}</span>
+              <span style="color:var(--text-muted)">${formatTimeFull(s.last_ts)}</span>
+              <span style="color:var(--text-muted)">${Number(s.event_count).toLocaleString()} ev</span>
+            </button>
+          `).join('')}
+        </div>` : ''}
       </div>
     </div>`;
+  } else {
+    // Fallback: fall back to the last-seen SDK session if cachedSessions hasn't loaded yet
+    // (keeps something on-screen during initial fetch).
+    const sessionEvent = groupEvents.filter((e) => e.session_id).slice(-1)[0];
+    const activeSession = sessionEvent?.session_id || null;
+    if (activeSession) {
+      html += `<div class="field"><label>Active Session</label>
+        <div class="value" style="display:flex;align-items:center;gap:6px">
+          <span style="font-size:9px;color:var(--text-dim)">${esc(activeSession.slice(0, 12))}</span>
+          <button class="admin-action-btn" style="font-size:8px;padding:1px 6px" data-view-session="${escAttr(activeSession)}" data-view-session-group="${escAttr(cw.folder)}">View Session</button>
+        </div>
+      </div>`;
+    }
   }
 
   if (recentTools.length === 0 && groupEvents.length === 0) return html;
@@ -1817,6 +1854,11 @@ function renderMessageMetaSuffix(m) {
 // SESSION FLOW VIEW
 // ===================================================================
 
+// cachedSessions now holds the nested shape from /api/hook-events/sessions:
+//   [{ nanoclaw_session_id, group_folder, agent_group_id, container_status,
+//      last_active, created_at, event_count_total,
+//      sdk_subsessions: [{ session_id, first_ts, last_ts, event_count, shape }] }]
+// Nanoclaw session is the primary identity; SDK UUIDs are sub-sessions under it.
 async function fetchSessions() {
   try {
     const res = await fetch('/api/hook-events/sessions');
@@ -1830,10 +1872,32 @@ function updateSessionSelector() {
   if (!sel) return;
   const currentVal = sel.value;
   sel.innerHTML = '<option value="">Timeline view (all events)</option>';
-  for (const s of cachedSessions) {
-    const ts = formatTimeFull(s.first_ts);
-    const label = `${s.group_folder} | ${ts} | ${s.event_count} events | ${s.session_id.slice(0, 12)}`;
-    sel.innerHTML += `<option value="${escAttr(s.session_id)}" data-group="${escAttr(s.group_folder)}">${esc(label)}</option>`;
+  // Top-level = nanoclaw session; children = SDK sub-sessions (indented label, optgroup for visual nesting).
+  for (const p of cachedSessions) {
+    // Use last_active when present, otherwise the latest sub-session last_ts.
+    const parentLastMs = p.last_active
+      ? new Date(p.last_active).getTime()
+      : (p.sdk_subsessions[0]?.last_ts ?? 0);
+    const parentTs = parentLastMs ? formatTimeFull(parentLastMs) : '';
+    const parentAgo = parentLastMs ? timeAgo(parentLastMs) : '';
+    const parentLabel = p.nanoclaw_session_id
+      ? `${p.group_folder} | ${parentTs} (${parentAgo}) | ${p.event_count_total} ev | ${p.nanoclaw_session_id}`
+      : `${p.group_folder} | (no active nanoclaw session)`;
+    // Sentinel value "nano:<agid>:<sess-id>" so the change handler can route to the nanoclaw-session view.
+    const parentVal = p.nanoclaw_session_id ? `nano:${p.agent_group_id}:${p.nanoclaw_session_id}` : '';
+    if (parentVal) {
+      sel.innerHTML += `<option value="${escAttr(parentVal)}" data-group="${escAttr(p.group_folder)}" data-kind="nanoclaw">${esc(parentLabel)}</option>`;
+    }
+    // SDK sub-sessions nested under the parent (plain <select> — prefix with indent + marker).
+    for (const s of (p.sdk_subsessions || [])) {
+      // ALWAYS use last_ts (not first_ts — that was the old bug: ghost sessions showed their start time
+      // and looked "recently active" even though they died immediately).
+      const ts = formatTimeFull(s.last_ts);
+      const ago = timeAgo(s.last_ts);
+      const shape = s.shape ? ` [${s.shape}]` : '';
+      const label = `    └ ${ts} (${ago}) | ${s.event_count} ev${shape} | ${s.session_id.slice(0, 12)}`;
+      sel.innerHTML += `<option value="${escAttr(s.session_id)}" data-group="${escAttr(p.group_folder)}" data-kind="sdk">${esc(label)}</option>`;
+    }
   }
   if (currentVal) sel.value = currentVal;
 }
@@ -1843,14 +1907,24 @@ setInterval(fetchSessions, 10000);
 fetchSessions();
 
 document.getElementById('session-select')?.addEventListener('change', (e) => {
-  const sessionId = e.target.value;
-  if (!sessionId) {
+  const value = e.target.value;
+  if (!value) {
     exitSessionFlow();
     return;
   }
   const opt = e.target.selectedOptions[0];
   const group = opt?.dataset?.group || '';
-  enterSessionFlow(group, sessionId);
+  const kind = opt?.dataset?.kind || 'sdk';
+  if (kind === 'nanoclaw' && value.startsWith('nano:')) {
+    // "nano:<agent_group_id>:<nanoclaw_session_id>" — aggregated view
+    const rest = value.slice('nano:'.length);
+    const colonIdx = rest.indexOf(':');
+    const agentGroupId = colonIdx >= 0 ? rest.slice(0, colonIdx) : '';
+    const nanoclawSessionId = colonIdx >= 0 ? rest.slice(colonIdx + 1) : '';
+    enterNanoclawSessionFlow(group, agentGroupId, nanoclawSessionId);
+    return;
+  }
+  enterSessionFlow(group, value);
 });
 
 document.getElementById('session-back-btn')?.addEventListener('click', () => {
@@ -1876,6 +1950,32 @@ async function enterSessionFlow(group, sessionId) {
     renderSessionFlow(sessionFlowData.entries);
   } catch {
     container.innerHTML = '<div class="tl-empty">Failed to load session flow.</div>';
+  }
+}
+
+// Aggregated nanoclaw-session view — renders every hook event under the nanoclaw session
+// (i.e. across all SDK sub-sessions that ran since sessions.created_at) in one flow.
+async function enterNanoclawSessionFlow(group, agentGroupId, nanoclawSessionId) {
+  sessionFlowMode = true;
+  timelineNoMoreEvents = false;
+  timelineDisplayLimit = 200;
+  timelineOlderEvents = [];
+  document.getElementById('session-back-btn').style.display = 'inline-block';
+  document.getElementById('timeline-filter-bar').style.display = 'none';
+  const container = document.getElementById('timeline-list');
+  container.innerHTML = '<div class="tl-empty">Loading nanoclaw session flow...</div>';
+
+  try {
+    const params = new URLSearchParams({
+      agent_group_id: agentGroupId,
+      nanoclaw_session_id: nanoclawSessionId,
+    });
+    const res = await fetch(`/api/hook-events/nanoclaw-session-flow?${params}`);
+    if (!res.ok) throw new Error('fetch failed');
+    sessionFlowData = await res.json();
+    renderSessionFlow(sessionFlowData.entries);
+  } catch {
+    container.innerHTML = '<div class="tl-empty">Failed to load nanoclaw session flow.</div>';
   }
 }
 
@@ -2015,7 +2115,29 @@ document.addEventListener('click', (e) => {
     return;
   }
 
-  // Click "View Session" button in detail panel
+  // Click "View" button on a nanoclaw session in the detail panel — aggregated view
+  // across all SDK sub-sessions under this nanoclaw session.
+  const viewNanoBtn = e.target.closest('[data-view-nanoclaw-session]');
+  if (viewNanoBtn) {
+    const sid = viewNanoBtn.dataset.viewNanoclawSession;
+    const agid = viewNanoBtn.dataset.viewNanoclawAgid;
+    const grp = viewNanoBtn.dataset.viewSessionGroup;
+    if (sid && agid) {
+      switchToTab('observability');
+      // Reflect the selection in the dropdown so the Back button / URL feel consistent.
+      const sel = document.getElementById('session-select');
+      if (sel) {
+        const parentVal = `nano:${agid}:${sid}`;
+        for (const opt of sel.options) {
+          if (opt.value === parentVal) { sel.value = parentVal; break; }
+        }
+      }
+      enterNanoclawSessionFlow(grp, agid, sid);
+    }
+    return;
+  }
+
+  // Click "View Session" button in detail panel (single SDK sub-session drilldown — legacy path)
   const viewSessionBtn = e.target.closest('[data-view-session]');
   if (viewSessionBtn) {
     const sid = viewSessionBtn.dataset.viewSession;

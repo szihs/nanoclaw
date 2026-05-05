@@ -1259,6 +1259,167 @@ describe('dashboard server', () => {
     rmSync(importedGroupDir, { recursive: true, force: true });
     rmSync(v1Root, { recursive: true, force: true });
   });
+
+  // ── /api/hook-events/sessions — nanoclaw session as primary, SDK UUIDs as sub-sessions ──
+  describe('/api/hook-events/sessions — nested nanoclaw/SDK shape', () => {
+    function seedHookEventsSchema(db: Database.Database): void {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS sessions (
+          id TEXT PRIMARY KEY,
+          agent_group_id TEXT NOT NULL,
+          messaging_group_id TEXT,
+          thread_id TEXT,
+          agent_provider TEXT,
+          status TEXT DEFAULT 'active',
+          container_status TEXT DEFAULT 'stopped',
+          last_active TEXT,
+          created_at TEXT NOT NULL
+        );
+      `);
+    }
+
+    function insertHookEvent(
+      db: Database.Database,
+      row: {
+        group_folder: string;
+        event: string;
+        session_id: string;
+        timestamp: number;
+        tool?: string;
+        extra?: any;
+      },
+    ) {
+      db.prepare(
+        `INSERT INTO hook_events (group_folder, event, tool, session_id, extra, timestamp)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+      ).run(
+        row.group_folder,
+        row.event,
+        row.tool ?? null,
+        row.session_id,
+        row.extra ? JSON.stringify(row.extra) : null,
+        row.timestamp,
+      );
+    }
+
+    it('nests SDK sub-sessions under the active nanoclaw v2 session and classifies shapes', async () => {
+      const db = createDashboardTestDb();
+      seedHookEventsSchema(db);
+      const now = Date.now();
+      const createdAt = new Date(now - 86400000).toISOString();
+
+      // One agent_group + one ACTIVE nanoclaw session (the primary identity).
+      db.prepare(
+        'INSERT INTO agent_groups (id, name, folder, is_admin, created_at) VALUES (?, ?, ?, 0, ?)',
+      ).run('ag-forger', 'Forger', 'nanoclaw-forger', createdAt);
+      db.prepare(
+        `INSERT INTO sessions (id, agent_group_id, status, container_status, last_active, created_at)
+         VALUES (?, ?, 'active', 'running', ?, ?)`,
+      ).run('sess-forger', 'ag-forger', new Date(now - 10000).toISOString(), createdAt);
+
+      // Three SDK sub-sessions with varying shapes:
+      //   main — heavy, source=startup, includes a UserPromptSubmit
+      //   task-fire — heavy, source=resume, includes a UserPromptSubmit
+      //   ghost — 2 events, no UserPromptSubmit
+      insertHookEvent(db, { group_folder: 'nanoclaw-forger', event: 'SessionStart', session_id: 'sdk-main', timestamp: now - 60000, extra: { source: 'startup' } });
+      insertHookEvent(db, { group_folder: 'nanoclaw-forger', event: 'UserPromptSubmit', session_id: 'sdk-main', timestamp: now - 59000 });
+      for (let i = 0; i < 45; i++) {
+        insertHookEvent(db, { group_folder: 'nanoclaw-forger', event: 'PostToolUse', tool: 'Read', session_id: 'sdk-main', timestamp: now - 50000 + i });
+      }
+
+      insertHookEvent(db, { group_folder: 'nanoclaw-forger', event: 'SessionStart', session_id: 'sdk-task', timestamp: now - 30000, extra: { source: 'resume' } });
+      insertHookEvent(db, { group_folder: 'nanoclaw-forger', event: 'UserPromptSubmit', session_id: 'sdk-task', timestamp: now - 29000 });
+      for (let i = 0; i < 45; i++) {
+        insertHookEvent(db, { group_folder: 'nanoclaw-forger', event: 'PostToolUse', tool: 'Bash', session_id: 'sdk-task', timestamp: now - 20000 + i });
+      }
+
+      insertHookEvent(db, { group_folder: 'nanoclaw-forger', event: 'SessionStart', session_id: 'sdk-ghost', timestamp: now - 15000, extra: { source: 'startup' } });
+      insertHookEvent(db, { group_folder: 'nanoclaw-forger', event: 'InstructionsLoaded', session_id: 'sdk-ghost', timestamp: now - 14999 });
+
+      db.close();
+
+      const res = await fetch(`${baseUrl}/api/hook-events/sessions`);
+      expect(res.status).toBe(200);
+      const body = await res.json() as any[];
+      expect(Array.isArray(body)).toBe(true);
+
+      const forger = body.find((p: any) => p.group_folder === 'nanoclaw-forger');
+      expect(forger).toBeDefined();
+      expect(forger.nanoclaw_session_id).toBe('sess-forger');
+      expect(forger.agent_group_id).toBe('ag-forger');
+      expect(forger.container_status).toBe('running');
+      // event_count_total spans all SDK sub-sessions.
+      expect(forger.event_count_total).toBeGreaterThanOrEqual(45 * 2 + 2); // at least the tool-use batches + prompts
+      expect(Array.isArray(forger.sdk_subsessions)).toBe(true);
+      expect(forger.sdk_subsessions.length).toBe(3);
+
+      // Sub-sessions sorted DESC by last_ts — task-fire most recent, ghost older, main oldest.
+      for (let i = 1; i < forger.sdk_subsessions.length; i++) {
+        expect(forger.sdk_subsessions[i - 1].last_ts).toBeGreaterThanOrEqual(forger.sdk_subsessions[i].last_ts);
+      }
+
+      const main = forger.sdk_subsessions.find((s: any) => s.session_id === 'sdk-main');
+      const task = forger.sdk_subsessions.find((s: any) => s.session_id === 'sdk-task');
+      const ghost = forger.sdk_subsessions.find((s: any) => s.session_id === 'sdk-ghost');
+      expect(main.shape).toBe('main');
+      expect(task.shape).toBe('task-fire');
+      expect(ghost.shape).toBe('ghost');
+    });
+
+    it('classifies a session with only InstructionsLoaded events (no UserPromptSubmit) as "ghost"', async () => {
+      const db = createDashboardTestDb();
+      seedHookEventsSchema(db);
+      const now = Date.now();
+      const createdAt = new Date(now - 3600000).toISOString();
+      db.prepare('INSERT INTO agent_groups (id, name, folder, is_admin, created_at) VALUES (?, ?, ?, 0, ?)').run(
+        'ag-g', 'Ghosts', 'ghost-probe', createdAt,
+      );
+      db.prepare(
+        `INSERT INTO sessions (id, agent_group_id, status, container_status, created_at) VALUES (?, ?, 'active', 'stopped', ?)`,
+      ).run('sess-g', 'ag-g', createdAt);
+      insertHookEvent(db, { group_folder: 'ghost-probe', event: 'SessionStart', session_id: 'sdk-g', timestamp: now - 10000 });
+      insertHookEvent(db, { group_folder: 'ghost-probe', event: 'InstructionsLoaded', session_id: 'sdk-g', timestamp: now - 9999 });
+      db.close();
+
+      const res = await fetch(`${baseUrl}/api/hook-events/sessions`);
+      expect(res.status).toBe(200);
+      const body = await res.json() as any[];
+      const g = body.find((p: any) => p.group_folder === 'ghost-probe');
+      expect(g).toBeDefined();
+      expect(g.sdk_subsessions).toHaveLength(1);
+      expect(g.sdk_subsessions[0].shape).toBe('ghost');
+    });
+
+    it('still returns the old flat shape when ?flat=1 is passed', async () => {
+      const db = createDashboardTestDb();
+      seedHookEventsSchema(db);
+      const now = Date.now();
+      const createdAt = new Date(now - 3600000).toISOString();
+      db.prepare('INSERT INTO agent_groups (id, name, folder, is_admin, created_at) VALUES (?, ?, ?, 0, ?)').run(
+        'ag-f', 'Flat', 'flat-probe', createdAt,
+      );
+      db.prepare(
+        `INSERT INTO sessions (id, agent_group_id, status, created_at) VALUES (?, ?, 'active', ?)`,
+      ).run('sess-f', 'ag-f', createdAt);
+      insertHookEvent(db, { group_folder: 'flat-probe', event: 'UserPromptSubmit', session_id: 'sdk-f', timestamp: now - 5000 });
+      insertHookEvent(db, { group_folder: 'flat-probe', event: 'PostToolUse', tool: 'Read', session_id: 'sdk-f', timestamp: now - 4000 });
+      db.close();
+
+      const res = await fetch(`${baseUrl}/api/hook-events/sessions?flat=1`);
+      expect(res.status).toBe(200);
+      const body = await res.json() as any[];
+      expect(Array.isArray(body)).toBe(true);
+      const row = body.find((r: any) => r.session_id === 'sdk-f');
+      expect(row).toBeDefined();
+      expect(row).toHaveProperty('session_id');
+      expect(row).toHaveProperty('first_ts');
+      expect(row).toHaveProperty('last_ts');
+      expect(row).toHaveProperty('event_count');
+      // Nested-shape fields must NOT appear in flat mode.
+      expect(row).not.toHaveProperty('nanoclaw_session_id');
+      expect(row).not.toHaveProperty('sdk_subsessions');
+    });
+  });
 });
 
 // ── Ask-question & credential card tests ──
