@@ -6,11 +6,13 @@ import path from 'path';
 import Database from 'better-sqlite3';
 
 import {
+  compareMessagesAscending,
   ensureDashboardChatWiring,
   forceOpenDbForTests,
   resetTransientDashboardStateForTests,
   resolveCoworkerTypeMetadata,
   startServer,
+  timestampToEpochMs,
 } from './server.js';
 
 const PROJECT_ROOT = path.resolve(import.meta.dirname, '..');
@@ -1336,8 +1338,8 @@ describe('/api/messages — card metadata and pending state', () => {
     const sessDir = path.join(DATA_DIR, 'v2-sessions', 'ag-q', 'sess-q');
     mkdirSync(sessDir, { recursive: true });
     const outDb = new Database(path.join(sessDir, 'outbound.db'));
-    outDb.exec('CREATE TABLE messages_out (id TEXT PRIMARY KEY, kind TEXT, content TEXT, timestamp TEXT)');
-    outDb.prepare('INSERT INTO messages_out VALUES (?, ?, ?, ?)').run(
+    outDb.exec('CREATE TABLE messages_out (id TEXT PRIMARY KEY, kind TEXT, content TEXT, timestamp TEXT, in_reply_to TEXT)');
+    outDb.prepare('INSERT INTO messages_out (id, kind, content, timestamp) VALUES (?, ?, ?, ?)').run(
       'msg-1', 'chat-sdk', JSON.stringify({ type: 'ask_question', questionId: 'qid-1', question: 'Pick one', options: ['A', 'B'] }), now,
     );
     outDb.close();
@@ -1369,8 +1371,8 @@ describe('/api/messages — card metadata and pending state', () => {
     const sessDir = path.join(DATA_DIR, 'v2-sessions', 'ag-q2', 'sess-q2');
     mkdirSync(sessDir, { recursive: true });
     const outDb = new Database(path.join(sessDir, 'outbound.db'));
-    outDb.exec('CREATE TABLE messages_out (id TEXT PRIMARY KEY, kind TEXT, content TEXT, timestamp TEXT)');
-    outDb.prepare('INSERT INTO messages_out VALUES (?, ?, ?, ?)').run(
+    outDb.exec('CREATE TABLE messages_out (id TEXT PRIMARY KEY, kind TEXT, content TEXT, timestamp TEXT, in_reply_to TEXT)');
+    outDb.prepare('INSERT INTO messages_out (id, kind, content, timestamp) VALUES (?, ?, ?, ?)').run(
       'msg-2', 'chat-sdk', JSON.stringify({ type: 'ask_question', questionId: 'qid-gone', question: 'Old Q', options: ['X'] }), now,
     );
     outDb.close();
@@ -1410,20 +1412,20 @@ describe('/api/messages — card metadata and pending state', () => {
     inDb.close();
 
     const outDb = new Database(path.join(sessDir, 'outbound.db'));
-    outDb.exec('CREATE TABLE messages_out (id TEXT PRIMARY KEY, kind TEXT, content TEXT, timestamp TEXT)');
-    outDb.prepare('INSERT INTO messages_out VALUES (?, ?, ?, ?)').run(
+    outDb.exec('CREATE TABLE messages_out (id TEXT PRIMARY KEY, kind TEXT, content TEXT, timestamp TEXT, in_reply_to TEXT)');
+    outDb.prepare('INSERT INTO messages_out (id, kind, content, timestamp) VALUES (?, ?, ?, ?)').run(
       'msg-base',
       'chat-sdk',
       JSON.stringify({ text: 'Draft update', files: ['report.txt'] }),
       '2026-04-16T10:00:00.000Z',
     );
-    outDb.prepare('INSERT INTO messages_out VALUES (?, ?, ?, ?)').run(
+    outDb.prepare('INSERT INTO messages_out (id, kind, content, timestamp) VALUES (?, ?, ?, ?)').run(
       'msg-edit',
       'chat-sdk',
       JSON.stringify({ operation: 'edit', messageId: 'platform-1', text: 'Final update' }),
       '2026-04-16T10:01:00.000Z',
     );
-    outDb.prepare('INSERT INTO messages_out VALUES (?, ?, ?, ?)').run(
+    outDb.prepare('INSERT INTO messages_out (id, kind, content, timestamp) VALUES (?, ?, ?, ?)').run(
       'msg-react',
       'chat-sdk',
       JSON.stringify({ operation: 'reaction', messageId: 'platform-1', emoji: ':thumbsup:' }),
@@ -1476,8 +1478,8 @@ describe('/api/messages — card metadata and pending state', () => {
     inDb.close();
 
     const outDb = new Database(path.join(sessDir, 'outbound.db'));
-    outDb.exec('CREATE TABLE messages_out (id TEXT PRIMARY KEY, kind TEXT, content TEXT, timestamp TEXT)');
-    outDb.prepare('INSERT INTO messages_out VALUES (?, ?, ?, ?)').run(
+    outDb.exec('CREATE TABLE messages_out (id TEXT PRIMARY KEY, kind TEXT, content TEXT, timestamp TEXT, in_reply_to TEXT)');
+    outDb.prepare('INSERT INTO messages_out (id, kind, content, timestamp) VALUES (?, ?, ?, ?)').run(
       'msg-file',
       'chat-sdk',
       JSON.stringify({ files: ['artifact.json'] }),
@@ -1602,5 +1604,120 @@ describe('/api/credentials/submit and /api/credentials/reject', () => {
     });
     // Should NOT be 403 — that would mean requireStrictAuth is blocking
     expect(res.status).not.toBe(403);
+  });
+});
+
+describe('timestampToEpochMs', () => {
+  it('parses ISO UTC strings', () => {
+    expect(timestampToEpochMs('2026-05-05T08:05:45.526Z')).toBe(Date.parse('2026-05-05T08:05:45.526Z'));
+  });
+
+  it('parses SQLite-format datetime as UTC', () => {
+    // Outbound DB writes "YYYY-MM-DD HH:MM:SS" and the agent-runner inserts UTC;
+    // the normalizer must treat it as UTC, not local, to stay monotonic with
+    // ISO-formatted inbound rows.
+    expect(timestampToEpochMs('2026-05-05 08:06:38')).toBe(Date.parse('2026-05-05T08:06:38Z'));
+  });
+
+  it('parses numeric ms as number and as string, including trailing ".0"', () => {
+    expect(timestampToEpochMs(1777692192745)).toBe(1777692192745);
+    expect(timestampToEpochMs('1777692192745')).toBe(1777692192745);
+    // This shape is what caused the forger bisection: SQLite stored REAL,
+    // Python/Node saw "1777692192745.0", and the old normalizer produced
+    // unparseable "1777692192745.0.000Z".
+    expect(timestampToEpochMs('1777692192745.0')).toBe(1777692192745);
+  });
+
+  it('returns NaN for unparseable input rather than a poisoned value', () => {
+    expect(Number.isNaN(timestampToEpochMs(''))).toBe(true);
+    expect(Number.isNaN(timestampToEpochMs('not a date'))).toBe(true);
+    expect(Number.isNaN(timestampToEpochMs(null))).toBe(true);
+    expect(Number.isNaN(timestampToEpochMs(undefined))).toBe(true);
+  });
+});
+
+describe('compareMessagesAscending', () => {
+  it('orders mixed ISO and SQLite formats chronologically', () => {
+    const a = { id: 'a', timestamp: '2026-05-05T08:05:45.526Z' };
+    const b = { id: 'b', timestamp: '2026-05-05 08:06:38' };
+    expect(compareMessagesAscending(a, b)).toBeLessThan(0);
+    expect(compareMessagesAscending(b, a)).toBeGreaterThan(0);
+  });
+
+  it('does not bisect a sort when one row has an unparseable timestamp', () => {
+    // Regression: the real forger bug. One malformed row produced NaN from
+    // Date.parse, poisoning the comparator and splitting the sort into two
+    // direction-clustered runs instead of interleaving by time.
+    const messages = [
+      { id: 'out-2', direction: 'outgoing', timestamp: '2026-05-05T08:37:39.000Z' },
+      { id: 'in-2', direction: 'incoming', timestamp: '2026-05-05T08:37:26.414Z' },
+      { id: 'out-1', direction: 'outgoing', timestamp: '2026-05-05T08:06:38.000Z' },
+      { id: 'in-1', direction: 'incoming', timestamp: '2026-05-05T08:05:45.526Z' },
+      { id: 'bad', direction: 'incoming', timestamp: 'not-a-date' },
+    ];
+    const sorted = [...messages].sort(compareMessagesAscending);
+    const realOrder = sorted.filter((m) => m.id !== 'bad').map((m) => m.id);
+    expect(realOrder).toEqual(['in-1', 'out-1', 'in-2', 'out-2']);
+    // NaN-timestamped row is pushed to the tail so the good rows stay interleaved.
+    expect(sorted[sorted.length - 1].id).toBe('bad');
+  });
+});
+
+describe('/api/messages system-id filter', () => {
+  function seedFilterTestSession() {
+    const db = createTestDbWithSessions();
+    const now = new Date().toISOString();
+    db.prepare('INSERT INTO agent_groups (id, name, folder, is_admin, created_at) VALUES (?, ?, ?, ?, ?)').run(
+      'ag-filter-test', 'FilterTest', 'filter-test', 0, now,
+    );
+    db.prepare('INSERT INTO sessions (id, agent_group_id, status, created_at) VALUES (?, ?, ?, ?)').run(
+      'sess-filter-test', 'ag-filter-test', 'active', now,
+    );
+    db.close();
+
+    const sessDir = path.join(DATA_DIR, 'v2-sessions', 'ag-filter-test', 'sess-filter-test');
+    mkdirSync(sessDir, { recursive: true });
+
+    const inDb = new Database(path.join(sessDir, 'inbound.db'));
+    inDb.exec('CREATE TABLE messages_in (id TEXT PRIMARY KEY, kind TEXT, content TEXT, timestamp TEXT)');
+    const inIns = inDb.prepare('INSERT INTO messages_in VALUES (?, ?, ?, ?)');
+    inIns.run('dash-real-1', 'chat', '{"text":"real user message"}', now);
+    inIns.run('claudemd-refresh-1', 'chat', '{"text":"Your instructions were updated"}', now);
+    inIns.run('a2a-noise-1', 'chat', '{"text":"No response requested"}', now);
+    inDb.close();
+
+    const outDb = new Database(path.join(sessDir, 'outbound.db'));
+    outDb.exec('CREATE TABLE messages_out (id TEXT PRIMARY KEY, kind TEXT, content TEXT, timestamp TEXT, in_reply_to TEXT)');
+    const outIns = outDb.prepare('INSERT INTO messages_out VALUES (?, ?, ?, ?, ?)');
+    outIns.run('msg-real-reply', 'chat', '{"text":"real agent reply"}', now, 'dash-real-1');
+    outIns.run('msg-ack-claudemd', 'chat', '{"text":"ack"}', now, 'claudemd-refresh-1');
+    outIns.run('msg-ack-a2a', 'chat', '{"text":"ack a2a"}', now, 'a2a-noise-1');
+    outDb.close();
+
+    forceOpenDbForTests();
+  }
+
+  it('hides claudemd-refresh and a2a messages by default', async () => {
+    seedFilterTestSession();
+    const res = await fetch(`${baseUrl}/api/messages?group=filter-test&limit=50`);
+    expect(res.status).toBe(200);
+    const data = (await res.json()) as { messages: any[] };
+    const ids = data.messages.map((m) => m.id).sort();
+    expect(ids).toEqual(['dash-real-1', 'msg-real-reply']);
+  });
+
+  it('returns the full stream when includeSystem=1 (debug/timeline)', async () => {
+    seedFilterTestSession();
+    const res = await fetch(`${baseUrl}/api/messages?group=filter-test&limit=50&includeSystem=1`);
+    const data = (await res.json()) as { messages: any[] };
+    const ids = data.messages.map((m) => m.id).sort();
+    expect(ids).toEqual([
+      'a2a-noise-1',
+      'claudemd-refresh-1',
+      'dash-real-1',
+      'msg-ack-a2a',
+      'msg-ack-claudemd',
+      'msg-real-reply',
+    ]);
   });
 });

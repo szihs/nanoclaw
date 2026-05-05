@@ -232,10 +232,44 @@ function getMessageAttachmentMimeType(filename: string): string {
   return MESSAGE_ATTACHMENT_MIME_TYPES[ext] || 'application/octet-stream';
 }
 
-function compareMessagesAscending(a: any, b: any): number {
-  const at = a.timestamp ? Date.parse(a.timestamp) : 0;
-  const bt = b.timestamp ? Date.parse(b.timestamp) : 0;
-  if (at !== bt) return at - bt;
+// Normalize any stored-timestamp shape the sessions DBs have ever written into
+// a numeric epoch-ms. Known shapes:
+//   • ISO UTC string:          "2026-05-05T08:05:45.526Z"
+//   • SQLite datetime (UTC):   "2026-05-05 08:06:38"
+//   • Numeric string / number: "1777692192745" | 1777692192745 | "1777692192745.0"
+// Anything unparseable returns NaN; callers must treat NaN as "unknown" and
+// avoid subtraction with it (NaN poisons a comparator — one bad row then
+// bisects the whole sort).
+export function timestampToEpochMs(raw: unknown): number {
+  if (raw == null || raw === '') return NaN;
+  if (typeof raw === 'number') return Number.isFinite(raw) ? raw : NaN;
+  const s = String(raw).trim();
+  if (!s) return NaN;
+  if (/^-?\d+(\.\d+)?$/.test(s)) {
+    const n = Number(s);
+    return Number.isFinite(n) ? n : NaN;
+  }
+  const hasSpace = s.includes(' ') && !s.includes('T');
+  const iso = hasSpace ? s.replace(' ', 'T') + (/[Zz]|[+-]\d{2}:?\d{2}$/.test(s) ? '' : 'Z') : s;
+  const parsed = Date.parse(iso);
+  return Number.isNaN(parsed) ? NaN : parsed;
+}
+
+export function compareMessagesAscending(a: any, b: any): number {
+  const at = timestampToEpochMs(a.timestamp);
+  const bt = timestampToEpochMs(b.timestamp);
+  const aBad = Number.isNaN(at);
+  const bBad = Number.isNaN(bt);
+  if (aBad && bBad) {
+    // Both unparseable: fall through to id tiebreaker so the compare stays
+    // transitive (returning 0 for many pairs breaks TimSort's partial order).
+  } else if (aBad) {
+    return 1; // push NaN rows to the end
+  } else if (bBad) {
+    return -1;
+  } else if (at !== bt) {
+    return at - bt;
+  }
   const aid = String(a.id ?? '');
   const bid = String(b.id ?? '');
   return aid.localeCompare(bid);
@@ -3486,6 +3520,14 @@ export async function handleRequest(
     if (!requireAuth(req, res)) return;
     const group = url.searchParams.get('group');
     const limit = Math.min(parseInt(url.searchParams.get('limit') || '200', 10), 500);
+    // System/protocol traffic (CLAUDE.md refresh pings, agent-to-agent
+    // acks) lives in the same inbound/outbound tables as real user chat and
+    // clutters the channel view. Hidden by default for the single-coworker
+    // view; pass ?includeSystem=1 to opt in (timeline/debug still shows all).
+    const includeSystem = url.searchParams.get('includeSystem') === '1';
+    const SYSTEM_ID_PREFIXES = ['claudemd-refresh-', 'a2a-'];
+    const isSystemId = (id: unknown) =>
+      typeof id === 'string' && SYSTEM_ID_PREFIXES.some((p) => id.startsWith(p));
     let messages: any[] = [];
     const hasMore = false;
     if (db) {
@@ -3524,6 +3566,7 @@ export async function handleRequest(
                   .prepare('SELECT id, kind, content, timestamp FROM messages_in ORDER BY timestamp DESC LIMIT ?')
                   .all(perGroupLimit) as any[];
                 for (const r of rows) {
+                  if (!includeSystem && isSystemId(r.id)) continue;
                   messages.push({
                     ...r,
                     direction: 'incoming',
@@ -3537,9 +3580,10 @@ export async function handleRequest(
               if (existsSync(outDbPath)) {
                 const sdb = new Database(outDbPath, { readonly: true });
                 const rows = sdb
-                  .prepare('SELECT id, kind, content, timestamp FROM messages_out ORDER BY timestamp DESC LIMIT ?')
+                  .prepare('SELECT id, kind, content, timestamp, in_reply_to FROM messages_out ORDER BY timestamp DESC LIMIT ?')
                   .all(perGroupLimit) as any[];
                 for (const r of rows) {
+                  if (!includeSystem && isSystemId(r.in_reply_to)) continue;
                   const delivered = deliveredByMessageOutId.get(r.id);
                   messages.push({
                     ...r,
@@ -3559,10 +3603,13 @@ export async function handleRequest(
             }
           }
         }
-        // Normalize timestamps before sort (outbound uses SQLite datetime, inbound uses ISO)
+        // Normalize timestamps before sort. Session DBs have historically written
+        // several shapes (SQLite datetime, ISO, numeric ms); funnel them all to
+        // ISO UTC so the client and comparator see one format.
         for (const m of messages) {
-          if (m.timestamp && !m.timestamp.includes('T')) {
-            m.timestamp = m.timestamp.replace(' ', 'T') + '.000Z';
+          const ms = timestampToEpochMs(m.timestamp);
+          if (!Number.isNaN(ms)) {
+            m.timestamp = new Date(ms).toISOString();
           }
         }
         // Normalize content — extracts cardType, questionId, options, credentialId
