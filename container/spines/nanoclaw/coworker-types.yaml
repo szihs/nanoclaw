@@ -12,9 +12,7 @@ nanoclaw-common:
     - nanoclaw-code-reader
     - nanoclaw-github
     - deep-research
-  workflows:
-    - investigate
-    - review
+  workflows: []
   overlays:
     - critique-overlay
   mcpServers:
@@ -48,8 +46,6 @@ nanoclaw-writer:
   workflows:
     - nanoclaw-investigate
     - nanoclaw-implement
-    - implement
-    - document
     - nanoclaw-review
     - nanoclaw-document
   bindings:
