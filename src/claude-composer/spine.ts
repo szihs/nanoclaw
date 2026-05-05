@@ -97,6 +97,37 @@ function demoteHeadings(md: string, levels: number): string {
   return lines.join('\n');
 }
 
+// Rewrite unresolved template placeholders (`{{name}}`, `{{foo.bar}}`,
+// `{{foo_bar}}`) in workflow / overlay bodies so the agent sees them as
+// user-supplied placeholders rather than raw handlebars.
+//
+//   {{target}}         → <target>
+//   {{report.path}}    → <report.path>
+//   {{target_slug}}    → <target_slug>
+//
+// The composer deliberately does NOT resolve these from the workflow's
+// `params:` frontmatter — that would require runtime binding to the user's
+// request. Converting to `<name>` renders naturally in prose ("read
+// <target>") and avoids confusing the agent with unrendered Jinja/Handlebars
+// syntax.
+//
+// Skips fenced code blocks entirely so that backticked examples of the
+// template syntax itself (e.g. documentation snippets) stay literal.
+function rewritePlaceholders(md: string): string {
+  const lines = md.split('\n');
+  let inCodeFence = false;
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (/^\s*```/.test(line)) {
+      inCodeFence = !inCodeFence;
+      continue;
+    }
+    if (inCodeFence) continue;
+    lines[i] = line.replace(/\{\{\s*([a-zA-Z_][a-zA-Z0-9_.]*)\s*\}\}/g, (_m, name) => `<${name}>`);
+  }
+  return lines.join('\n');
+}
+
 // Rewrite backtick-wrapped `/name` references embedded inside workflow /
 // overlay bodies so the agent doesn't confuse workflow names (embedded
 // procedures) with skill names (runtime slash commands) or overlay names
@@ -367,7 +398,8 @@ export function renderCoworkerSpine(
     // backticked `/workflow` refs become section refs and `/overlay` refs
     // become Task-tool subagent pointers. Capability skill refs stay literal.
     const wfJoined = wfBlocks.join('\n\n');
-    parts.push(rewriteSlashRefs(wfJoined, workflowNames, capabilitySkillNames, overlayNames));
+    const slashRewritten = rewriteSlashRefs(wfJoined, workflowNames, capabilitySkillNames, overlayNames);
+    parts.push(rewritePlaceholders(slashRewritten));
   }
 
   // --- Skills ---
