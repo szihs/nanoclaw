@@ -7,7 +7,20 @@ import { routeInbound } from './router.js';
 import type { InboundEvent } from './channels/adapter.js';
 
 const MAX_BODY_SIZE = 1024 * 1024; // 1 MB
-const VALID_DECISIONS = new Set(['Approve', 'Reject']);
+// Canonical values are `Approve` / `Reject` (capitalized), but we accept
+// any case on the wire and canonicalize in `canonicalizeDecision`. This
+// matches what approval-button handlers expect downstream while letting
+// clients (and tests) post lowercase without a 400.
+const CANONICAL_DECISIONS = ['Approve', 'Reject'] as const;
+const VALID_DECISIONS = new Set<string>(CANONICAL_DECISIONS);
+
+function canonicalizeDecision(raw: string): string | null {
+  const normalized = raw.trim().toLowerCase();
+  for (const canonical of CANONICAL_DECISIONS) {
+    if (canonical.toLowerCase() === normalized) return canonical;
+  }
+  return null;
+}
 
 export interface DashboardIngressHandle {
   server: Server;
@@ -81,7 +94,8 @@ async function handleApprovalAction(
       writeJson(res, 400, { error: 'approvalId and decision required' });
       return;
     }
-    if (!VALID_DECISIONS.has(decision)) {
+    const canonical = canonicalizeDecision(decision);
+    if (!canonical) {
       writeJson(res, 400, {
         error: `Invalid decision "${decision}". Must be one of: ${[...VALID_DECISIONS].join(', ')}`,
       });
@@ -91,8 +105,8 @@ async function handleApprovalAction(
       writeJson(res, 501, { error: 'action handler not configured' });
       return;
     }
-    await onActionFn(approvalId, decision, 'dashboard-admin');
-    log.info('Dashboard approval action', { approvalId, decision });
+    await onActionFn(approvalId, canonical, 'dashboard-admin');
+    log.info('Dashboard approval action', { approvalId, decision: canonical });
     writeJson(res, 200, { ok: true });
   } catch (err) {
     log.error('Failed to handle dashboard action', { err });

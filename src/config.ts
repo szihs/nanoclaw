@@ -53,6 +53,27 @@ export const ONECLI_API_KEY = process.env.ONECLI_API_KEY || envConfig.ONECLI_API
 export const MAX_MESSAGES_PER_PROMPT = Math.max(1, parseInt(process.env.MAX_MESSAGES_PER_PROMPT || '10', 10) || 10);
 export const IPC_POLL_INTERVAL = 1000;
 export const IDLE_TIMEOUT = parseInt(process.env.IDLE_TIMEOUT || '1800000', 10); // 30min default — how long to keep container alive after last result
+
+// Lifecycle invariant (regression guard for issue #2): IDLE_TIMEOUT is the
+// grace period after the last agent reply; CONTAINER_TIMEOUT is the hard
+// ceiling on total container lifetime. If idle >= ceiling, the idle sweeper
+// will never cull before the hard kill — producing orphaned containers and
+// misleading watchdog logs. Warn at startup rather than hard-fail to avoid
+// breaking unusual CI configs, but make the misconfiguration loud.
+export function validateContainerTimeouts(
+  idle = IDLE_TIMEOUT,
+  ceiling = CONTAINER_TIMEOUT,
+): { ok: boolean; warning?: string } {
+  if (idle >= ceiling) {
+    return {
+      ok: false,
+      warning:
+        `[config] IDLE_TIMEOUT (${idle}ms) >= CONTAINER_TIMEOUT (${ceiling}ms) — ` +
+        `idle sweep will never fire before the hard kill. Set IDLE_TIMEOUT strictly less than CONTAINER_TIMEOUT.`,
+    };
+  }
+  return { ok: true };
+}
 export const MAX_CONCURRENT_CONTAINERS = Math.max(1, parseInt(process.env.MAX_CONCURRENT_CONTAINERS || '5', 10) || 5);
 
 function escapeRegex(str: string): string {
