@@ -1259,6 +1259,253 @@ describe('dashboard server', () => {
     rmSync(importedGroupDir, { recursive: true, force: true });
     rmSync(v1Root, { recursive: true, force: true });
   });
+
+  // ── /api/hook-events/sessions — nanoclaw session as primary, SDK UUIDs as sub-sessions ──
+  describe('/api/hook-events/sessions — nested nanoclaw/SDK shape', () => {
+    function seedHookEventsSchema(db: Database.Database): void {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS sessions (
+          id TEXT PRIMARY KEY,
+          agent_group_id TEXT NOT NULL,
+          messaging_group_id TEXT,
+          thread_id TEXT,
+          agent_provider TEXT,
+          status TEXT DEFAULT 'active',
+          container_status TEXT DEFAULT 'stopped',
+          last_active TEXT,
+          created_at TEXT NOT NULL
+        );
+      `);
+    }
+
+    function insertHookEvent(
+      db: Database.Database,
+      row: {
+        group_folder: string;
+        event: string;
+        session_id: string;
+        timestamp: number;
+        tool?: string;
+        extra?: any;
+      },
+    ) {
+      db.prepare(
+        `INSERT INTO hook_events (group_folder, event, tool, session_id, extra, timestamp)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+      ).run(
+        row.group_folder,
+        row.event,
+        row.tool ?? null,
+        row.session_id,
+        row.extra ? JSON.stringify(row.extra) : null,
+        row.timestamp,
+      );
+    }
+
+    it('nests SDK sub-sessions under the active nanoclaw v2 session and classifies shapes', async () => {
+      const db = createDashboardTestDb();
+      seedHookEventsSchema(db);
+      const now = Date.now();
+      const createdAt = new Date(now - 86400000).toISOString();
+
+      // One agent_group + one ACTIVE nanoclaw session (the primary identity).
+      db.prepare(
+        'INSERT INTO agent_groups (id, name, folder, is_admin, created_at) VALUES (?, ?, ?, 0, ?)',
+      ).run('ag-forger', 'Forger', 'nanoclaw-forger', createdAt);
+      db.prepare(
+        `INSERT INTO sessions (id, agent_group_id, status, container_status, last_active, created_at)
+         VALUES (?, ?, 'active', 'running', ?, ?)`,
+      ).run('sess-forger', 'ag-forger', new Date(now - 10000).toISOString(), createdAt);
+
+      // Three SDK sub-sessions with varying shapes:
+      //   main — heavy, source=startup, includes a UserPromptSubmit
+      //   task-fire — heavy, source=resume, includes a UserPromptSubmit
+      //   ghost — 2 events, no UserPromptSubmit
+      insertHookEvent(db, { group_folder: 'nanoclaw-forger', event: 'SessionStart', session_id: 'sdk-main', timestamp: now - 60000, extra: { source: 'startup' } });
+      insertHookEvent(db, { group_folder: 'nanoclaw-forger', event: 'UserPromptSubmit', session_id: 'sdk-main', timestamp: now - 59000 });
+      for (let i = 0; i < 45; i++) {
+        insertHookEvent(db, { group_folder: 'nanoclaw-forger', event: 'PostToolUse', tool: 'Read', session_id: 'sdk-main', timestamp: now - 50000 + i });
+      }
+
+      insertHookEvent(db, { group_folder: 'nanoclaw-forger', event: 'SessionStart', session_id: 'sdk-task', timestamp: now - 30000, extra: { source: 'resume' } });
+      insertHookEvent(db, { group_folder: 'nanoclaw-forger', event: 'UserPromptSubmit', session_id: 'sdk-task', timestamp: now - 29000 });
+      for (let i = 0; i < 45; i++) {
+        insertHookEvent(db, { group_folder: 'nanoclaw-forger', event: 'PostToolUse', tool: 'Bash', session_id: 'sdk-task', timestamp: now - 20000 + i });
+      }
+
+      insertHookEvent(db, { group_folder: 'nanoclaw-forger', event: 'SessionStart', session_id: 'sdk-ghost', timestamp: now - 15000, extra: { source: 'startup' } });
+      insertHookEvent(db, { group_folder: 'nanoclaw-forger', event: 'InstructionsLoaded', session_id: 'sdk-ghost', timestamp: now - 14999 });
+
+      db.close();
+
+      const res = await fetch(`${baseUrl}/api/hook-events/sessions`);
+      expect(res.status).toBe(200);
+      const body = await res.json() as any[];
+      expect(Array.isArray(body)).toBe(true);
+
+      const forger = body.find((p: any) => p.group_folder === 'nanoclaw-forger');
+      expect(forger).toBeDefined();
+      expect(forger.nanoclaw_session_id).toBe('sess-forger');
+      expect(forger.agent_group_id).toBe('ag-forger');
+      expect(forger.container_status).toBe('running');
+      // event_count_total spans all SDK sub-sessions.
+      expect(forger.event_count_total).toBeGreaterThanOrEqual(45 * 2 + 2); // at least the tool-use batches + prompts
+      expect(Array.isArray(forger.sdk_subsessions)).toBe(true);
+      expect(forger.sdk_subsessions.length).toBe(3);
+
+      // Sub-sessions sorted DESC by last_ts — task-fire most recent, ghost older, main oldest.
+      for (let i = 1; i < forger.sdk_subsessions.length; i++) {
+        expect(forger.sdk_subsessions[i - 1].last_ts).toBeGreaterThanOrEqual(forger.sdk_subsessions[i].last_ts);
+      }
+
+      const main = forger.sdk_subsessions.find((s: any) => s.session_id === 'sdk-main');
+      const task = forger.sdk_subsessions.find((s: any) => s.session_id === 'sdk-task');
+      const ghost = forger.sdk_subsessions.find((s: any) => s.session_id === 'sdk-ghost');
+      expect(main.shape).toBe('main');
+      expect(task.shape).toBe('task-fire');
+      expect(ghost.shape).toBe('ghost');
+    });
+
+    it('classifies a session with only InstructionsLoaded events (no UserPromptSubmit) as "ghost"', async () => {
+      const db = createDashboardTestDb();
+      seedHookEventsSchema(db);
+      const now = Date.now();
+      const createdAt = new Date(now - 3600000).toISOString();
+      db.prepare('INSERT INTO agent_groups (id, name, folder, is_admin, created_at) VALUES (?, ?, ?, 0, ?)').run(
+        'ag-g', 'Ghosts', 'ghost-probe', createdAt,
+      );
+      db.prepare(
+        `INSERT INTO sessions (id, agent_group_id, status, container_status, created_at) VALUES (?, ?, 'active', 'stopped', ?)`,
+      ).run('sess-g', 'ag-g', createdAt);
+      insertHookEvent(db, { group_folder: 'ghost-probe', event: 'SessionStart', session_id: 'sdk-g', timestamp: now - 10000 });
+      insertHookEvent(db, { group_folder: 'ghost-probe', event: 'InstructionsLoaded', session_id: 'sdk-g', timestamp: now - 9999 });
+      db.close();
+
+      const res = await fetch(`${baseUrl}/api/hook-events/sessions`);
+      expect(res.status).toBe(200);
+      const body = await res.json() as any[];
+      const g = body.find((p: any) => p.group_folder === 'ghost-probe');
+      expect(g).toBeDefined();
+      expect(g.sdk_subsessions).toHaveLength(1);
+      expect(g.sdk_subsessions[0].shape).toBe('ghost');
+    });
+
+    it('still returns the old flat shape when ?flat=1 is passed', async () => {
+      const db = createDashboardTestDb();
+      seedHookEventsSchema(db);
+      const now = Date.now();
+      const createdAt = new Date(now - 3600000).toISOString();
+      db.prepare('INSERT INTO agent_groups (id, name, folder, is_admin, created_at) VALUES (?, ?, ?, 0, ?)').run(
+        'ag-f', 'Flat', 'flat-probe', createdAt,
+      );
+      db.prepare(
+        `INSERT INTO sessions (id, agent_group_id, status, created_at) VALUES (?, ?, 'active', ?)`,
+      ).run('sess-f', 'ag-f', createdAt);
+      insertHookEvent(db, { group_folder: 'flat-probe', event: 'UserPromptSubmit', session_id: 'sdk-f', timestamp: now - 5000 });
+      insertHookEvent(db, { group_folder: 'flat-probe', event: 'PostToolUse', tool: 'Read', session_id: 'sdk-f', timestamp: now - 4000 });
+      db.close();
+
+      const res = await fetch(`${baseUrl}/api/hook-events/sessions?flat=1`);
+      expect(res.status).toBe(200);
+      const body = await res.json() as any[];
+      expect(Array.isArray(body)).toBe(true);
+      const row = body.find((r: any) => r.session_id === 'sdk-f');
+      expect(row).toBeDefined();
+      expect(row).toHaveProperty('session_id');
+      expect(row).toHaveProperty('first_ts');
+      expect(row).toHaveProperty('last_ts');
+      expect(row).toHaveProperty('event_count');
+      // Nested-shape fields must NOT appear in flat mode.
+      expect(row).not.toHaveProperty('nanoclaw_session_id');
+      expect(row).not.toHaveProperty('sdk_subsessions');
+    });
+
+    // Regression: selecting a nanoclaw session must return ALL sub-sessions of that coworker
+    // and ZERO events from any other coworker — and the reverse (single SDK filter) must
+    // return only the matching UUID's events. This is the "no mix" guarantee the UI relies on.
+    it('nanoclaw-session-flow and session-flow both enforce strict no-mixing across coworkers', async () => {
+      const db = createDashboardTestDb();
+      seedHookEventsSchema(db);
+      const now = Date.now();
+      const createdAt = new Date(now - 3600000).toISOString();
+
+      // Two coworkers. Coworker X has ONE nanoclaw session with TWO SDK sub-sessions
+      // (uuid-main + uuid-taskfire — representing the post-PR-#108 "new_session:true"
+      // world where each task fire spins up a fresh SDK UUID under the same nanoclaw
+      // session). Coworker Y is a DIFFERENT coworker on a DIFFERENT folder — its events
+      // must never leak into X's aggregated view.
+      db.prepare(
+        'INSERT INTO agent_groups (id, name, folder, is_admin, created_at) VALUES (?, ?, ?, 0, ?)',
+      ).run('ag-X', 'CoworkerX', 'cw-x', createdAt);
+      db.prepare(
+        'INSERT INTO agent_groups (id, name, folder, is_admin, created_at) VALUES (?, ?, ?, 0, ?)',
+      ).run('ag-Y', 'CoworkerY', 'cw-y', createdAt);
+      db.prepare(
+        `INSERT INTO sessions (id, agent_group_id, status, container_status, last_active, created_at)
+         VALUES (?, ?, 'active', 'running', ?, ?)`,
+      ).run('sess-A', 'ag-X', new Date(now - 1000).toISOString(), createdAt);
+
+      // Coworker X — uuid-main: UserPromptSubmit + PostToolUse pair (Pre/Post for duration).
+      insertHookEvent(db, { group_folder: 'cw-x', event: 'UserPromptSubmit', session_id: 'uuid-main', timestamp: now - 60000 });
+      insertHookEvent(db, { group_folder: 'cw-x', event: 'SessionStart', session_id: 'uuid-main', timestamp: now - 59500 });
+      insertHookEvent(db, { group_folder: 'cw-x', event: 'Stop', session_id: 'uuid-main', timestamp: now - 59000 });
+      // Coworker X — uuid-taskfire: UserPromptSubmit + SessionStart + Stop (all flow-renderable).
+      insertHookEvent(db, { group_folder: 'cw-x', event: 'UserPromptSubmit', session_id: 'uuid-taskfire', timestamp: now - 30000 });
+      insertHookEvent(db, { group_folder: 'cw-x', event: 'SessionStart', session_id: 'uuid-taskfire', timestamp: now - 29500 });
+      insertHookEvent(db, { group_folder: 'cw-x', event: 'Stop', session_id: 'uuid-taskfire', timestamp: now - 29000 });
+      // Coworker Y — uuid-other: three flow-renderable events on a DIFFERENT folder.
+      insertHookEvent(db, { group_folder: 'cw-y', event: 'UserPromptSubmit', session_id: 'uuid-other', timestamp: now - 20000 });
+      insertHookEvent(db, { group_folder: 'cw-y', event: 'SessionStart', session_id: 'uuid-other', timestamp: now - 19500 });
+      insertHookEvent(db, { group_folder: 'cw-y', event: 'Stop', session_id: 'uuid-other', timestamp: now - 19000 });
+
+      db.close();
+
+      // 1) Nanoclaw-session-flow for sess-A should return exactly 6 flow entries (both sub-sessions
+      //    of X — 3 each) and ZERO from Y.
+      const nanoRes = await fetch(
+        `${baseUrl}/api/hook-events/nanoclaw-session-flow?agent_group_id=ag-X&nanoclaw_session_id=sess-A`,
+      );
+      expect(nanoRes.status).toBe(200);
+      const nanoBody = await nanoRes.json() as any;
+      expect(nanoBody.group_folder).toBe('cw-x');
+      expect(nanoBody.entries).toHaveLength(6);
+      const nanoSessionIds = new Set<string>(nanoBody.entries.map((e: any) => e.session_id));
+      expect(nanoSessionIds.has('uuid-main')).toBe(true);
+      expect(nanoSessionIds.has('uuid-taskfire')).toBe(true);
+      expect(nanoSessionIds.has('uuid-other')).toBe(false);
+
+      // 2) Single-SDK session-flow for uuid-main + group=cw-x must return ONLY uuid-main events.
+      const sdkRes = await fetch(`${baseUrl}/api/hook-events/session-flow?session_id=uuid-main&group=cw-x`);
+      expect(sdkRes.status).toBe(200);
+      const sdkBody = await sdkRes.json() as any;
+      expect(sdkBody.entries).toHaveLength(3);
+      // No taskfire / other leakage — all event timestamps must fall in uuid-main's range.
+      for (const e of sdkBody.entries) {
+        expect(e.timestamp).toBeGreaterThanOrEqual(now - 60000);
+        expect(e.timestamp).toBeLessThanOrEqual(now - 59000);
+      }
+
+      // 3) /api/hook-events/sessions — coworker X's parent has both sdks, Y's has only uuid-other.
+      const sessRes = await fetch(`${baseUrl}/api/hook-events/sessions`);
+      expect(sessRes.status).toBe(200);
+      const sessBody = await sessRes.json() as any[];
+      const parentX = sessBody.find((p: any) => p.group_folder === 'cw-x');
+      const parentY = sessBody.find((p: any) => p.group_folder === 'cw-y');
+      expect(parentX).toBeDefined();
+      expect(parentX.nanoclaw_session_id).toBe('sess-A');
+      const xSubIds = new Set<string>(parentX.sdk_subsessions.map((s: any) => s.session_id));
+      expect(xSubIds.has('uuid-main')).toBe(true);
+      expect(xSubIds.has('uuid-taskfire')).toBe(true);
+      expect(xSubIds.has('uuid-other')).toBe(false);
+      // Y has no active nanoclaw session — but the orphan entry must still list its SDK
+      // sub-session (bucketed under a null parent) and must NOT include X's sdks.
+      expect(parentY).toBeDefined();
+      const ySubIds = new Set<string>(parentY.sdk_subsessions.map((s: any) => s.session_id));
+      expect(ySubIds.has('uuid-other')).toBe(true);
+      expect(ySubIds.has('uuid-main')).toBe(false);
+      expect(ySubIds.has('uuid-taskfire')).toBe(false);
+    });
+  });
 });
 
 // ── Ask-question & credential card tests ──

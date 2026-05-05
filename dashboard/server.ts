@@ -3334,7 +3334,23 @@ export async function handleRequest(
     return;
   }
 
-  // API: list distinct sessions from hook_events
+  // API: list sessions from hook_events, grouped by nanoclaw v2 session.
+  //
+  // Two session concepts are stacked in NanoClaw:
+  //   1. nanoclaw v2 session — filesystem sandbox (sessions.id, sessions.status='active', etc.)
+  //   2. Claude Agent SDK session — a single SDK conversation UUID in hook_events.session_id
+  //
+  // With `new_session: true` as the default (PR #108), a single nanoclaw session routinely
+  // contains many SDK UUIDs (main long-running session + one per scheduled-task fire).
+  // This endpoint returns nanoclaw sessions as top-level entries with SDK sub-sessions nested
+  // underneath, so the UI can present the two layers distinctly.
+  //
+  // Response shape (default):
+  //   [{ nanoclaw_session_id, group_folder, agent_group_id, container_status,
+  //      last_active, created_at, event_count_total, sdk_subsessions: [...] }]
+  //
+  // Legacy flat shape (for backward-compat callers): ?flat=1 returns the old array of
+  //   { session_id, group_folder, first_ts, last_ts, event_count }.
   if (url.pathname === '/api/hook-events/sessions') {
     if (!requireAuth(req, res)) return;
     const heDb = getHookEventsDb();
@@ -3344,17 +3360,255 @@ export async function handleRequest(
       return;
     }
     const group = url.searchParams.get('group');
+    const flat = url.searchParams.get('flat') === '1';
     try {
-      const query = group
-        ? `SELECT session_id, group_folder, MIN(timestamp) as first_ts, MAX(timestamp) as last_ts, COUNT(*) as event_count
-           FROM hook_events WHERE session_id IS NOT NULL AND session_id != '' AND group_folder = ?
-           GROUP BY session_id ORDER BY last_ts DESC LIMIT 50`
-        : `SELECT session_id, group_folder, MIN(timestamp) as first_ts, MAX(timestamp) as last_ts, COUNT(*) as event_count
-           FROM hook_events WHERE session_id IS NOT NULL AND session_id != ''
-           GROUP BY session_id ORDER BY last_ts DESC LIMIT 50`;
-      const rows = group ? heDb.prepare(query).all(group) : heDb.prepare(query).all();
+      // Build flat per-SDK-session rows first — we need these either way.
+      const flatQuery = group
+        ? `SELECT session_id, group_folder, MIN(timestamp) as first_ts, MAX(timestamp) as last_ts,
+                  COUNT(*) as event_count,
+                  SUM(CASE WHEN event = 'UserPromptSubmit' THEN 1 ELSE 0 END) as user_prompt_count,
+                  MAX(CASE WHEN event = 'SessionStart' THEN extra ELSE NULL END) as session_start_extra
+             FROM hook_events
+             WHERE session_id IS NOT NULL AND session_id != '' AND group_folder = ?
+             GROUP BY session_id
+             ORDER BY last_ts DESC
+             LIMIT 200`
+        : `SELECT session_id, group_folder, MIN(timestamp) as first_ts, MAX(timestamp) as last_ts,
+                  COUNT(*) as event_count,
+                  SUM(CASE WHEN event = 'UserPromptSubmit' THEN 1 ELSE 0 END) as user_prompt_count,
+                  MAX(CASE WHEN event = 'SessionStart' THEN extra ELSE NULL END) as session_start_extra
+             FROM hook_events
+             WHERE session_id IS NOT NULL AND session_id != ''
+             GROUP BY session_id
+             ORDER BY last_ts DESC
+             LIMIT 200`;
+      const flatRows = (group ? heDb.prepare(flatQuery).all(group) : heDb.prepare(flatQuery).all()) as any[];
+
+      if (flat) {
+        // Legacy shape — strip the classification-helper columns.
+        const legacy = flatRows.slice(0, 50).map((r) => ({
+          session_id: r.session_id,
+          group_folder: r.group_folder,
+          first_ts: r.first_ts,
+          last_ts: r.last_ts,
+          event_count: r.event_count,
+        }));
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(legacy));
+        return;
+      }
+
+      // Look up the active nanoclaw session per group_folder.
+      // Edge case: if multiple 'active' rows exist, pick the latest created_at.
+      const folderSet = new Set<string>(flatRows.map((r) => r.group_folder).filter(Boolean));
+      type NanoSess = { id: string; agent_group_id: string; folder: string; status: string; container_status: string; last_active: string | null; created_at: string };
+      const nanoByFolder = new Map<string, NanoSess>();
+      if (folderSet.size > 0) {
+        const folders = Array.from(folderSet);
+        const placeholders = folders.map(() => '?').join(',');
+        let nanoRows: any[] = [];
+        try {
+          nanoRows = heDb
+            .prepare(
+              `SELECT s.id AS id, s.agent_group_id AS agent_group_id, ag.folder AS folder,
+                      s.status AS status, s.container_status AS container_status,
+                      s.last_active AS last_active, s.created_at AS created_at
+                 FROM sessions s
+                 JOIN agent_groups ag ON ag.id = s.agent_group_id
+                 WHERE s.status = 'active' AND ag.folder IN (${placeholders})
+                 ORDER BY s.created_at DESC`,
+            )
+            .all(...folders) as any[];
+        } catch {
+          // sessions or agent_groups table may be missing in some environments — fall through with no nanoclaw data.
+          nanoRows = [];
+        }
+        for (const n of nanoRows) {
+          if (!nanoByFolder.has(n.folder)) nanoByFolder.set(n.folder, n); // latest created_at wins
+        }
+      }
+
+      // Classify each SDK sub-session.
+      //  - "ghost": event_count <= 3 AND no UserPromptSubmit (i.e. only InstructionsLoaded / session bookkeeping)
+      //  - "main" vs "task-fire": for "heavy" sessions (>= 40 events) — main has SessionStart.source=='startup',
+      //                            task-fire has source=='resume' or any other non-startup source.
+      //  - "session": default
+      function classifyShape(r: any): string {
+        const eventCount = Number(r.event_count) || 0;
+        const userPromptCount = Number(r.user_prompt_count) || 0;
+        if (eventCount <= 3 && userPromptCount === 0) return 'ghost';
+        let source: string | null = null;
+        if (r.session_start_extra) {
+          try {
+            const parsed = JSON.parse(r.session_start_extra);
+            source = typeof parsed?.source === 'string' ? parsed.source : null;
+          } catch { /* ignore */ }
+        }
+        if (eventCount >= 40) {
+          if (source === 'startup') return 'main';
+          return 'task-fire';
+        }
+        return 'session';
+      }
+
+      // Group flat rows by their nanoclaw session id (one per group_folder for now).
+      // SDK sessions whose group has no active nanoclaw session are bucketed under a synthetic null parent
+      // — so the UI can still surface them (e.g. a coworker that was stopped).
+      type Parent = {
+        nanoclaw_session_id: string | null;
+        group_folder: string;
+        agent_group_id: string | null;
+        container_status: string | null;
+        last_active: string | null;
+        created_at: string | null;
+        event_count_total: number;
+        sdk_subsessions: any[];
+        _last_ts_num: number; // for sorting
+      };
+      const parentByKey = new Map<string, Parent>();
+      for (const r of flatRows) {
+        const nano = nanoByFolder.get(r.group_folder);
+        const key = nano ? nano.id : `__orphan__${r.group_folder}`;
+        let parent = parentByKey.get(key);
+        if (!parent) {
+          parent = {
+            nanoclaw_session_id: nano ? nano.id : null,
+            group_folder: r.group_folder,
+            agent_group_id: nano ? nano.agent_group_id : null,
+            container_status: nano ? nano.container_status : null,
+            last_active: nano ? nano.last_active : null,
+            created_at: nano ? nano.created_at : null,
+            event_count_total: 0,
+            sdk_subsessions: [],
+            _last_ts_num: 0,
+          };
+          parentByKey.set(key, parent);
+        }
+        parent.event_count_total += Number(r.event_count) || 0;
+        const lastTsNum = Number(r.last_ts) || 0;
+        if (lastTsNum > parent._last_ts_num) parent._last_ts_num = lastTsNum;
+        parent.sdk_subsessions.push({
+          session_id: r.session_id,
+          first_ts: r.first_ts,
+          last_ts: r.last_ts,
+          event_count: r.event_count,
+          shape: classifyShape(r),
+        });
+      }
+
+      // Sort sub-sessions DESC by last_ts, then sort parents DESC by last_active (fall back to _last_ts_num).
+      const parents = Array.from(parentByKey.values());
+      for (const p of parents) {
+        p.sdk_subsessions.sort((a, b) => (Number(b.last_ts) || 0) - (Number(a.last_ts) || 0));
+      }
+      parents.sort((a, b) => {
+        const at = a.last_active ? new Date(a.last_active).getTime() : a._last_ts_num;
+        const bt = b.last_active ? new Date(b.last_active).getTime() : b._last_ts_num;
+        return bt - at;
+      });
+      // Strip the sort-helper field before emitting.
+      const out = parents.slice(0, 50).map(({ _last_ts_num, ...rest }) => rest);
+
       res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify(rows));
+      res.end(JSON.stringify(out));
+    } catch (e: any) {
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: e.message }));
+    }
+    return;
+  }
+
+  // API: structured session flow for an entire nanoclaw v2 session (all SDK sub-sessions combined).
+  // Loads every hook event for the group whose timestamp >= sessions.created_at for the given nanoclaw_session_id,
+  // then runs it through the same PreToolUse/PostToolUse pairing pipeline as /api/hook-events/session-flow.
+  if (url.pathname === '/api/hook-events/nanoclaw-session-flow') {
+    if (!requireAuth(req, res)) return;
+    const heDb = getHookEventsDb();
+    const agentGroupId = url.searchParams.get('agent_group_id');
+    const nanoclawSessionId = url.searchParams.get('nanoclaw_session_id');
+    if (!heDb || !agentGroupId || !nanoclawSessionId) {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end('{"entries":[]}');
+      return;
+    }
+    try {
+      // Resolve folder + created_at for the nanoclaw session.
+      const nano = heDb
+        .prepare(
+          `SELECT ag.folder AS folder, s.created_at AS created_at
+             FROM sessions s JOIN agent_groups ag ON ag.id = s.agent_group_id
+             WHERE s.id = ? AND s.agent_group_id = ? LIMIT 1`,
+        )
+        .get(nanoclawSessionId, agentGroupId) as any;
+      if (!nano) {
+        res.writeHead(404, { 'Content-Type': 'application/json' });
+        res.end('{"error":"nanoclaw session not found"}');
+        return;
+      }
+      const createdAtMs = nano.created_at ? new Date(nano.created_at).getTime() : 0;
+      const rows: any[] = heDb
+        .prepare(
+          `SELECT * FROM hook_events WHERE group_folder = ? AND timestamp >= ? ORDER BY timestamp ASC`,
+        )
+        .all(nano.folder, createdAtMs);
+
+      // Same pipeline as /api/hook-events/session-flow but without per-session_id filtering.
+      const entries: any[] = [];
+      const preToolMap = new Map<string, any>();
+      const subagentStack: any[] = [];
+      for (const row of rows) {
+        const extra = row.extra ? JSON.parse(row.extra) : {};
+        if (row.event === 'SessionStart') {
+          entries.push({ type: 'session_start', timestamp: row.timestamp, extra, session_id: row.session_id });
+        } else if (row.event === 'UserPromptSubmit') {
+          entries.push({ type: 'user_prompt', timestamp: row.timestamp, message: row.message || '', session_id: row.session_id });
+        } else if (row.event === 'PreToolUse') {
+          if (row.tool_use_id) preToolMap.set(row.tool_use_id, row);
+        } else if (row.event === 'PostToolUse' || row.event === 'PostToolUseFailure') {
+          const pre = row.tool_use_id ? preToolMap.get(row.tool_use_id) : null;
+          const duration = pre ? row.timestamp - pre.timestamp : null;
+          const entry: any = {
+            type: 'tool_call',
+            tool: row.tool,
+            tool_use_id: row.tool_use_id,
+            timestamp: row.timestamp,
+            duration,
+            tool_input: row.tool_input,
+            tool_response: row.tool_response,
+            failed: row.event === 'PostToolUseFailure',
+            agent_id: row.agent_id,
+            session_id: row.session_id,
+          };
+          if (subagentStack.length > 0) subagentStack[subagentStack.length - 1].children.push(entry);
+          else entries.push(entry);
+          if (row.tool_use_id) preToolMap.delete(row.tool_use_id);
+        } else if (row.event === 'SubagentStart') {
+          const block: any = { type: 'subagent_block', agent_id: row.agent_id, agent_type: row.agent_type, timestamp: row.timestamp, children: [] };
+          subagentStack.push(block);
+        } else if (row.event === 'SubagentStop') {
+          const block = subagentStack.pop();
+          if (block) {
+            block.end_timestamp = row.timestamp;
+            block.duration = row.timestamp - block.timestamp;
+            if (subagentStack.length > 0) subagentStack[subagentStack.length - 1].children.push(block);
+            else entries.push(block);
+          }
+        } else if (row.event === 'PreCompact') {
+          entries.push({ type: 'compact', timestamp: row.timestamp });
+        } else if (row.event === 'Notification') {
+          entries.push({ type: 'notification', timestamp: row.timestamp, message: row.message || '' });
+        } else if (row.event === 'Stop' || row.event === 'SessionEnd') {
+          entries.push({ type: 'session_end', timestamp: row.timestamp, extra, session_id: row.session_id });
+        }
+      }
+      while (subagentStack.length > 0) {
+        const block = subagentStack.pop()!;
+        if (subagentStack.length > 0) subagentStack[subagentStack.length - 1].children.push(block);
+        else entries.push(block);
+      }
+
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ entries, nanoclaw_session_id: nanoclawSessionId, group_folder: nano.folder }));
     } catch (e: any) {
       res.writeHead(500, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: e.message }));
