@@ -45,21 +45,23 @@ function extractStepTitle(body: string | undefined, stepId: string): string {
 
 // Render a single workflow step as a sub-section under the workflow heading.
 // Heading is stable: `#### N. <Step Title>`. The rawBody becomes the prose
-// body below the heading; if the body's first line was a bullet like
-// "1. **Name** — body" we strip the redundant title prefix so the body reads
-// as pure prose.
+// body below the heading; we strip any leading "N. **Title** — " prefix from
+// the body so the title isn't repeated twice (once in the heading, once in
+// the body's bullet prefix).
 function renderStepBlock(n: number, stepId: string, rawBody: string, title: string): string {
   const header = `#### ${n}. ${title}`;
   const cleaned = stripStepAnchors(rawBody).trim();
   if (!cleaned) return header;
   const lines = cleaned.split('\n');
-  // Drop a leading "N. **Title** — " prefix if present; otherwise keep the
-  // body verbatim.
+  // Remove "N. " source numbering (we own the count) AND the bolded title
+  // repeat. Accept optional "— " / "- " separators between title and body.
   const first = lines[0];
-  const prefixMatch = first.match(/^\s*\d+[.)]\s+(\*\*[^*\n]+\*\*\s*(?:\{#[^}]+\})?\s*[—-]?\s*)?(.*)$/);
+  const prefixMatch = first.match(
+    /^\s*\d+[.)]\s+(?:\*\*[^*\n]+\*\*\s*(?:\{#[^}]+\})?\s*[—-]?\s*)?(.*)$/,
+  );
   let body: string;
   if (prefixMatch) {
-    const remainder = prefixMatch[2].trim();
+    const remainder = prefixMatch[1].trim();
     body = [remainder, ...lines.slice(1)].join('\n').trimEnd();
   } else {
     body = cleaned;
@@ -76,6 +78,79 @@ function renderGateBlock(overlayName: string, body: string, position: 'BEFORE' |
   const where = position === 'BEFORE' ? `before \`${stepId}\`` : `after \`${stepId}\``;
   const demoted = demoteHeadings(body.trim(), 3);
   return `#### ⟐ ${label} (${where})\n\n${demoted}`;
+}
+
+// ---- Stage-aware overlay rendering ----
+//
+// Many overlays (e.g. critique-overlay) organize their body into per-stage
+// sections whose headings encode anchor semantics, e.g.:
+//
+//     ## PLAN_REVIEW (before `patch` in /implement)
+//     ## DIAGNOSIS_REVIEW (after `root-cause` or `report`)
+//     ## CODE_REVIEW (after `patch`)
+//     ## OUTPUT_REVIEW (after `draft` or `write`)
+//
+// plus shared sections (e.g. `## 3-Round Protocol`, `## Record verdicts`)
+// that apply across all stages.
+//
+// `parseStagedOverlay` parses such bodies into:
+//   - stages:  { anchorKey → stage body }, keyed by "before:step" / "after:step"
+//   - shared:  string (concatenated non-stage top-level sections)
+//   - leading: string (preamble before the first `## ` heading)
+// Non-staged overlays return null — caller falls back to full-body emit.
+interface StagedOverlay {
+  leading: string;
+  stagesByAnchor: Map<string, string>; // "before:patch" / "after:report" → body
+  shared: string;
+}
+
+function parseStagedOverlay(body: string): StagedOverlay | null {
+  const lines = body.split('\n');
+  const sections: { heading: string; body: string[] }[] = [];
+  let leading: string[] = [];
+  let current: { heading: string; body: string[] } | null = null;
+  let inFence = false;
+  for (const line of lines) {
+    if (/^\s*```/.test(line)) inFence = !inFence;
+    if (!inFence) {
+      const m = line.match(/^## (.+)$/);
+      if (m) {
+        if (current) sections.push(current);
+        current = { heading: m[1], body: [] };
+        continue;
+      }
+    }
+    if (current) current.body.push(line);
+    else leading.push(line);
+  }
+  if (current) sections.push(current);
+  if (sections.length === 0) return null;
+
+  // Heading must match STAGE_NAME (before|after `step1` [or `step2` ...])
+  // to qualify as a stage section. Everything else is shared.
+  const anchorRe = /^([A-Z][A-Z0-9_]+)\s*\((before|after)\s+`([a-z0-9-]+)`(?:\s+or\s+`([a-z0-9-]+)`)?/;
+  const stagesByAnchor = new Map<string, string>();
+  const sharedSections: string[] = [];
+  let sawStaged = false;
+  for (const s of sections) {
+    const m = s.heading.match(anchorRe);
+    if (!m) {
+      sharedSections.push(`## ${s.heading}\n${s.body.join('\n').trimEnd()}`);
+      continue;
+    }
+    sawStaged = true;
+    const stageName = m[1];
+    const position = m[2];
+    const body = `**${stageName}** — ${s.heading}\n\n${s.body.join('\n').trimEnd()}`.trim();
+    stagesByAnchor.set(`${position}:${m[3]}`, body);
+    if (m[4]) stagesByAnchor.set(`${position}:${m[4]}`, body);
+  }
+  if (!sawStaged) return null; // ordinary overlay — fall back
+  return {
+    leading: leading.join('\n').trim(),
+    stagesByAnchor,
+    shared: sharedSections.join('\n\n').trim(),
+  };
 }
 
 // Demote ATX markdown headings by `levels`, capped at h6. Ignores code fences.
@@ -366,9 +441,17 @@ export function renderCoworkerSpine(
     parts.push('## Workflows');
     const wfBlocks: string[] = [];
 
-    // Dedup overlay full bodies across anchor sites. First anchor per overlay
-    // emits the full body; subsequent anchors get a short pointer.
+    // Gate rendering state:
+    //   emittedOverlay   — for non-staged overlays, first anchor emits full
+    //                      body and later anchors point back (existing dedup).
+    //   stagedCache      — cache the `parseStagedOverlay` result per overlay.
+    //   sharedGateState  — for STAGED overlays, collects the overlay's
+    //                      leading + shared-section text exactly once. Emitted
+    //                      as a single `## Gate Protocol` block after all
+    //                      workflow blocks.
     const emittedOverlay = new Map<string, { workflowName: string; stepId: string }>();
+    const stagedCache = new Map<string, StagedOverlay | null>();
+    const sharedGateState = new Map<string, { leading: string; shared: string }>();
 
     for (const w of manifest.workflows) {
       const wfCustomizations = manifest.customizations.filter((c) => c.workflow === w.name);
@@ -411,7 +494,7 @@ export function renderCoworkerSpine(
           // BEFORE gates.
           for (const gate of gatesBefore.get(stepId) || []) {
             chunks.push(
-              emitGate(emittedOverlay, gate.overlayName, gate.body, 'BEFORE', stepId, w.name),
+              emitGate(emittedOverlay, stagedCache, sharedGateState, gate.overlayName, gate.body, 'BEFORE', stepId, w.name),
             );
           }
 
@@ -428,7 +511,7 @@ export function renderCoworkerSpine(
           // AFTER gates.
           for (const gate of gatesAfter.get(stepId) || []) {
             chunks.push(
-              emitGate(emittedOverlay, gate.overlayName, gate.body, 'AFTER', stepId, w.name),
+              emitGate(emittedOverlay, stagedCache, sharedGateState, gate.overlayName, gate.body, 'AFTER', stepId, w.name),
             );
           }
         }
@@ -445,6 +528,26 @@ export function renderCoworkerSpine(
     const wfJoined = wfBlocks.join('\n\n');
     const slashRewritten = rewriteSlashRefs(wfJoined, workflowNames, capabilitySkillNames, overlayNames);
     parts.push(rewritePlaceholders(slashRewritten));
+
+    // Emit shared gate protocols for every staged overlay whose stages
+    // appeared as inline anchors above. Each overlay contributes one
+    // `### <OVERLAY> Gate Protocol` subsection under a single top-level
+    // `## Gate Protocol` heading. This keeps cross-stage content (3-round
+    // protocol, record-verdicts steps, etc.) in one place per coworker
+    // instead of repeating it at every anchor.
+    if (sharedGateState.size > 0) {
+      const blocks: string[] = [];
+      for (const [overlayName, { leading, shared }] of sharedGateState) {
+        const title = overlayName.toUpperCase().replaceAll('-', ' ');
+        const pieces = [leading, shared].filter(Boolean).join('\n\n').trim();
+        if (!pieces) continue;
+        blocks.push(`### ${title} Gate Protocol\n\n${demoteHeadings(pieces, 3)}`);
+      }
+      if (blocks.length > 0) {
+        parts.push('## Gate Protocol');
+        parts.push(blocks.join('\n\n'));
+      }
+    }
   }
 
   // --- Skills ---
@@ -458,10 +561,8 @@ export function renderCoworkerSpine(
       ),
     );
   }
-
-  if (manifest.skills.length > 0) {
-    parts.push('_Invoke a skill with its slash command. Skill bodies load on demand._');
-  }
+  // Footer dropped — `container/spines/base/context/invocation.md` already
+  // covers the "skills are slash commands / workflows are embedded" split.
 
   if (extraInstructions?.trim()) {
     parts.push('## Additional Instructions');
@@ -471,23 +572,60 @@ export function renderCoworkerSpine(
   return parts.join('\n\n').trimEnd() + '\n';
 }
 
-// Dedup overlay body emissions across anchor sites. First anchor: full body.
-// Subsequent anchors: short pointer to the first emission.
+// Emit a gate block. Uses stage-aware rendering when the overlay body
+// encodes anchor semantics (see `parseStagedOverlay`); otherwise falls back
+// to first-body-full / later-pointer dedup.
+//
+// Stage-aware mode: each anchor site emits ONLY the matching stage section
+// (e.g. the `insert-after: patch` anchor gets just the CODE_REVIEW body,
+// not the PLAN_REVIEW + DIAGNOSIS_REVIEW + OUTPUT_REVIEW siblings). Shared
+// sections are deduped to a single trailing `## Gate Protocol` block per
+// coworker, collected in `sharedGateSections`.
 function emitGate(
   seen: Map<string, { workflowName: string; stepId: string }>,
+  staged: Map<string, StagedOverlay | null>,
+  sharedGateSections: Map<string, { leading: string; shared: string }>,
   overlayName: string,
   body: string,
   position: 'BEFORE' | 'AFTER',
   stepId: string,
   workflowName: string,
 ): string {
+  // Cache the parse per overlay.
+  if (!staged.has(overlayName)) {
+    staged.set(overlayName, parseStagedOverlay(body));
+  }
+  const parsed = staged.get(overlayName);
+
+  const label = `${overlayName.toUpperCase().replaceAll('-', ' ')} GATE`;
+  const where = position === 'BEFORE' ? `before \`${stepId}\`` : `after \`${stepId}\``;
+
+  if (parsed) {
+    // Stage-aware: find the matching stage body.
+    const key = `${position.toLowerCase()}:${stepId}`;
+    const stageBody = parsed.stagesByAnchor.get(key);
+    // Collect the shared + leading sections exactly once per overlay.
+    if (!sharedGateSections.has(overlayName)) {
+      sharedGateSections.set(overlayName, { leading: parsed.leading, shared: parsed.shared });
+    }
+    if (stageBody) {
+      return `#### ⟐ ${label} (${where})\n\n${demoteHeadings(stageBody, 3)}`;
+    }
+    // Anchor defined but no stage match in the parsed body — emit a minimal
+    // pointer so the agent still sees the gate marker.
+    return (
+      `#### ⟐ ${label} (${where})\n\n` +
+      `Apply the **${label}** protocol (see the shared **Gate Protocol** section below).`
+    );
+  }
+
+  // Non-staged overlay: first anchor emits full body, subsequent anchors
+  // point back to the first emission.
   if (!seen.has(overlayName)) {
     seen.set(overlayName, { workflowName, stepId });
     return renderGateBlock(overlayName, body, position, stepId);
   }
   const first = seen.get(overlayName)!;
-  const label = `${overlayName.toUpperCase().replaceAll('-', ' ')} GATE`;
-  const where = position === 'BEFORE' ? `before \`${stepId}\`` : `after \`${stepId}\``;
   return (
     `#### ⟐ ${label} (${where})\n\n` +
     `Follow the **${label}** protocol documented under the **${first.workflowName}** ` +

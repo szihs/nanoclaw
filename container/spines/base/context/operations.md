@@ -6,10 +6,6 @@ Be concise — outcomes, not play-by-play. For multi-destination messages use `<
 
 Use standard Markdown: `**bold**`, `*italic*`, `[links](url)`, `## headings`, fenced code blocks. Use Unicode emoji directly (`✅ ❌ ⚠️`) — not `:emoji:` shortcodes.
 
-### Workspace
-
-`/workspace/agent/` — persistent workspace. `conversations/` has session history. Share learnings via `mcp__nanoclaw__append_learning`.
-
 ### Packages & MCP
 
 Your container is ephemeral — anything installed via `apt-get` or `pnpm install -g` is lost on restart. To install packages that persist:
