@@ -32,7 +32,9 @@ export type {
  */
 export function composeCoworkerSpine(options: ComposeCoworkerSpineOptions): string {
   const projectRoot = options.projectRoot ?? process.cwd();
-  return renderCoworkerSpine(projectRoot, options.coworkerType, options.extraInstructions);
+  return renderCoworkerSpine(projectRoot, options.coworkerType, options.extraInstructions, {
+    disableOverlays: options.disableOverlays === true,
+  });
 }
 
 /**

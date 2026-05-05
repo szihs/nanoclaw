@@ -368,10 +368,19 @@ export function renderCoworkerSpine(
   projectRoot: string,
   coworkerType: string,
   extraInstructions: string | null | undefined,
+  opts: { disableOverlays?: boolean } = {},
 ): string {
   const types = readCoworkerTypes(projectRoot);
   const catalog = readSkillCatalog(projectRoot);
   const manifest = resolveCoworkerManifest(types, coworkerType, catalog, projectRoot);
+
+  // Per-coworker overlay disable: strip every overlay customization attached
+  // to workflows before rendering. Drops all `⟐ ... GATE` inline blocks and
+  // the trailing `## Gate Protocol` section. Honors `agent_groups.disable_overlays`
+  // passed from container-runner.ts.
+  if (opts.disableOverlays) {
+    manifest.customizations = manifest.customizations.filter((c) => c.kind !== 'overlay');
+  }
 
   if (manifest.flat) {
     // Flat mode: emit identity (e.g. upstream body) and context fragments
