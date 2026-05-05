@@ -12,7 +12,6 @@ slang-common:
     - slang-code-reader
     - slang-github
     - deep-research
-    - codex-critique
   workflows: []
   overlays:
     - critique-overlay
