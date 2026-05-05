@@ -850,6 +850,14 @@ async function buildContainerArgs(
     'ANTHROPIC_DEFAULT_SONNET_MODEL',
     'ANTHROPIC_DEFAULT_HAIKU_MODEL',
     'ENABLE_PROMPT_CACHING_1H',
+    // Separate Bedrock-specific toggle read by the Claude Code SDK when
+    // requests route through an aws/anthropic/bedrock-* model. All three
+    // instances (lego/prod/dev) use the NVIDIA inference-api proxy with
+    // bedrock models, so `ENABLE_PROMPT_CACHING_1H_BEDROCK` is the one that
+    // actually takes effect; `ENABLE_PROMPT_CACHING_1H` alone is ignored on
+    // the Bedrock path.
+    'ENABLE_PROMPT_CACHING_1H_BEDROCK',
+    'FORCE_PROMPT_CACHING_5M',
     'CLAUDE_CODE_EFFORT_LEVEL',
     'CLAUDE_CODE_AUTO_COMPACT_WINDOW',
     'CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING',
