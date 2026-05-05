@@ -249,6 +249,30 @@ function resolveTypeManifest(agentGroup: AgentGroup): {
   }
 }
 
+/**
+ * Whether the runtime overlay hooks (plan-gate, critique-tracker, intent-router,
+ * edit-counter, workflow-state-reset) should be injected into the container's
+ * settings.json for this agent group.
+ *
+ * Mirrors the compose-time contract in `claude-composer/spine.ts`: when the
+ * per-coworker `agent_groups.disable_overlays` flag is 1, every overlay-driven
+ * behavior is suppressed — spine rendering (PR #97) AND runtime hook gates.
+ * Without this, disable_overlays would strip the Gate Protocol text but the
+ * hooks would still block Edit/Write/Bash, so the coworker would fail writes
+ * with no corresponding prompt explaining why.
+ *
+ * Exported for the R20 runtime-side counterpart of the R19 compose-time test.
+ */
+export function resolveOverlayHookFlags(agentGroup: AgentGroup): { hasPlan: boolean; hasCritique: boolean } {
+  if (agentGroup.disable_overlays === 1) return { hasPlan: false, hasCritique: false };
+  const { overlayNames, workflows: wfManifest } = resolveTypeManifest(agentGroup);
+  const hasCritique = overlayNames.includes('critique-overlay');
+  // Plan gate is part of critique-overlay (insert-before: [patch]) and only
+  // applies when the coworker has implement-family workflows.
+  const hasPlan = hasCritique && wfManifest.some((w) => w.name.includes('implement'));
+  return { hasPlan, hasCritique };
+}
+
 export function resolveAllowedMcpTools(agentGroup: AgentGroup): string[] {
   if (agentGroup.is_admin) {
     const adminOverride = process.env.ADMIN_MCP_TOOLS || '';
@@ -669,14 +693,11 @@ function buildMounts(
     }
 
     // Overlay hook injection: enforce plan/critique gates via runtime hooks.
-    // Reads the resolved manifest to see which overlays apply to this type.
+    // Uses resolveOverlayHookFlags() so agent_groups.disable_overlays=1 skips
+    // injection entirely — matches the compose-time contract in PR #97.
     const hooksDir = path.join(process.cwd(), 'container', 'hooks');
     if (fs.existsSync(hooksDir)) {
-      const { overlayNames, workflows: wfManifest } = resolveTypeManifest(agentGroup);
-      const hasCritique = overlayNames.includes('critique-overlay');
-      // Plan gate is now part of critique-overlay (insert-before: [patch]).
-      // It applies when the coworker has implement-family workflows.
-      const hasPlan = hasCritique && wfManifest.some((w) => w.name.includes('implement'));
+      const { hasPlan, hasCritique } = resolveOverlayHookFlags(agentGroup);
 
       const hasCmd = (event: string, cmd: string): boolean =>
         (settings.hooks[event] ?? []).some((h: { hooks?: { command?: string }[] }) =>
@@ -833,11 +854,19 @@ async function buildContainerArgs(
   // so the agent-runner's poll-loop can run the router on follow-up pushes
   // (the SDK fires UserPromptSubmit only on the initial query; mid-query
   // query.push() does not, so the agent-runner has to invoke the hook itself).
+  // Skipped when disable_overlays=1: with no intent-router hook registered
+  // in settings.json, the env var would be dead weight at best and would
+  // still drive intent-router-bridge.ts on follow-up pushes at worst.
   {
-    const { workflows: wfList } = resolveTypeManifest(agentGroup);
-    if (wfList.length > 0) {
-      const routingTable = wfList.map((w) => `${w.name}:${w.description.slice(0, 60).replace(/[;:]/g, ' ')}`).join(';');
-      args.push('-e', `OVERLAY_WORKFLOWS=${routingTable}`);
+    const { hasPlan, hasCritique } = resolveOverlayHookFlags(agentGroup);
+    if (hasPlan || hasCritique) {
+      const { workflows: wfList } = resolveTypeManifest(agentGroup);
+      if (wfList.length > 0) {
+        const routingTable = wfList
+          .map((w) => `${w.name}:${w.description.slice(0, 60).replace(/[;:]/g, ' ')}`)
+          .join(';');
+        args.push('-e', `OVERLAY_WORKFLOWS=${routingTable}`);
+      }
     }
   }
 
