@@ -7,7 +7,14 @@
 import fs from 'fs';
 import path from 'path';
 
-import { DASHBOARD_INGRESS_HOST, DASHBOARD_INGRESS_PORT, DATA_DIR, MCP_PROXY_PORT, PROXY_BIND_HOST } from './config.js';
+import {
+  DASHBOARD_INGRESS_HOST,
+  DASHBOARD_INGRESS_PORT,
+  DATA_DIR,
+  MCP_PROXY_PORT,
+  PROXY_BIND_HOST,
+  validateContainerTimeouts,
+} from './config.js';
 import { enforceStartupBackoff, resetCircuitBreaker } from './circuit-breaker.js';
 import { initDb, getDb } from './db/connection.js';
 import { runMigrations } from './db/migrations/index.js';
@@ -112,7 +119,15 @@ async function main(): Promise<void> {
 
   log.info('NanoClaw starting');
 
-  // 0. Circuit breaker — backoff on rapid restarts
+  // 0a. Validate critical env invariants. Warn (don't crash) — see Issue #2:
+  //     an idle timeout >= container timeout means idle-sweep never fires
+  //     before the hard kill, producing orphaned-container churn.
+  const timeoutCheck = validateContainerTimeouts();
+  if (!timeoutCheck.ok && timeoutCheck.warning) {
+    log.warn(timeoutCheck.warning);
+  }
+
+  // 0b. Circuit breaker — backoff on rapid restarts
   await enforceStartupBackoff();
 
   // 1. Init central DB
