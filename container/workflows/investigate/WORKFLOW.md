@@ -20,7 +20,7 @@ Understand the problem. Classify, research, and report — but do not fix.
 ## Invariants
 
 - Separate confirmed facts from hypotheses — label each explicitly.
-- Do not propose code changes. Investigation classifies and routes; `/implement` builds.
+- Do not propose code changes. Investigation classifies and routes; the project's implement workflow builds.
 - Keep a written trail so the next session can resume without re-investigating.
 
 ## Steps

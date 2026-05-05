@@ -27,7 +27,7 @@ import path from 'path';
 
 import { afterEach, describe, expect, it } from 'vitest';
 
-import { composeCoworkerSpine } from './claude-composer.js';
+import { composeCoworkerSpine, readCoworkerTypes } from './claude-composer.js';
 
 const tempDirs: string[] = [];
 
@@ -642,5 +642,39 @@ describe('R11: mount/copy code does not pull workflows or overlay bodies into co
       expect(hostPath[1]).not.toMatch(/container\/workflows/);
       expect(hostPath[1]).not.toMatch(/container\/spines/);
     }
+  });
+});
+
+describe('R18: composing every non-abstract coworker type emits zero "Unknown slash ref" warnings', () => {
+  // Any such warning means a workflow/overlay body references a `/name` that
+  // doesn't resolve to a workflow, overlay, or capability skill in the leaf
+  // catalog — an instruction-quality bug (the agent is told to invoke a
+  // non-existent slash command). This test treats every warning as a failure.
+  //
+  // Types without `invariants` or with an empty `workflows` list are treated
+  // as abstract / incomplete and skipped — only concrete leaf types compose.
+  it('no warnings from any concrete leaf type discovered under container/spines/', () => {
+    const types = readCoworkerTypes(REPO_ROOT);
+    const leafNames = Object.entries(types)
+      .filter(([, t]) => Array.isArray(t.workflows) && t.workflows.length > 0)
+      .map(([name]) => name);
+    // nv-main alone has no leaf types (only abstract `base-common`); the
+    // assertion fires on nv-coworkers integration where project leaves exist.
+    if (leafNames.length === 0) return;
+
+    const originalWarn = console.warn;
+    const warnings: string[] = [];
+    console.warn = (...args: unknown[]) => {
+      warnings.push(args.map(String).join(' '));
+    };
+    try {
+      for (const type of leafNames) {
+        composeCoworkerSpine({ coworkerType: type, projectRoot: REPO_ROOT });
+      }
+    } finally {
+      console.warn = originalWarn;
+    }
+    const unknownSlash = warnings.filter((w) => /\[composer\] Unknown slash ref/.test(w));
+    expect(unknownSlash, `composer warnings:\n${unknownSlash.join('\n')}`).toEqual([]);
   });
 });

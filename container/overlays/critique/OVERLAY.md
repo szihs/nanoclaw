@@ -28,7 +28,7 @@ This overlay fires at multiple points in every workflow. The **same codex-critiq
 
 ---
 
-## PLAN_REVIEW (before `patch` in /implement)
+## PLAN_REVIEW (before `patch`)
 
 **You must write a plan before writing any code.**
 
