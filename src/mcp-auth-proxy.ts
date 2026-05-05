@@ -69,6 +69,44 @@ export function revokeContainerToken(token: string): void {
 const discoveredTools: Record<string, string[]> = {};
 
 /**
+ * MCP tool annotations captured during discovery. Per the MCP spec, tools
+ * may declare `annotations` with hint fields (`openWorldHint`,
+ * `readOnlyHint`, `destructiveHint`) that classify the tool's behavior.
+ *
+ * Keyed by server name, then by raw tool name (no `mcp__<server>__` prefix).
+ * Only tools whose tools/list response includes an `annotations` object get
+ * an entry — absent annotations produce no entry (we don't fabricate
+ * defaults; that would be indistinguishable from an explicit false value).
+ */
+export interface ToolAnnotations {
+  openWorldHint?: boolean;
+  readOnlyHint?: boolean;
+  destructiveHint?: boolean;
+}
+const discoveredAnnotations: Record<string, Record<string, ToolAnnotations>> = {};
+
+/**
+ * Pure helper: pick just the three annotation fields we care about from a
+ * raw MCP tool entry. Exported for testing — the parse loop in
+ * discoverTools() uses it too, so both paths share one contract.
+ *
+ * Returns null when the tool has no `annotations` object (so callers can
+ * skip caching an entry rather than cache an empty object).
+ */
+export function parseToolAnnotations(tool: { annotations?: unknown }): ToolAnnotations | null {
+  const raw = tool.annotations;
+  if (!raw || typeof raw !== 'object') return null;
+  const src = raw as Record<string, unknown>;
+  const out: ToolAnnotations = {};
+  if (typeof src.openWorldHint === 'boolean') out.openWorldHint = src.openWorldHint;
+  if (typeof src.readOnlyHint === 'boolean') out.readOnlyHint = src.readOnlyHint;
+  if (typeof src.destructiveHint === 'boolean') out.destructiveHint = src.destructiveHint;
+  // Only return a record if at least one field was present.
+  if (Object.keys(out).length === 0) return null;
+  return out;
+}
+
+/**
  * Discover tools from an MCP server via JSON-RPC tools/list.
  * Called once after supergateway starts.  Results are cached.
  */
@@ -119,12 +157,34 @@ export async function discoverTools(serverName: string, upstreamPort: number): P
     // Step 2: tools/list using the session
     const listBody = JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'tools/list' });
     const listRes = await mcpRequest(listBody, sid);
-    const parsed = parseSSE(listRes.raw) as { result?: { tools?: { name: string }[] } };
+    const parsed = parseSSE(listRes.raw) as {
+      result?: { tools?: { name: string; annotations?: unknown }[] };
+    };
 
     if (parsed.result?.tools) {
       const toolNames = parsed.result.tools.map((t) => t.name);
       discoveredTools[serverName] = toolNames;
-      log.info('MCP tool discovery complete', { server: serverName, count: toolNames.length });
+
+      // Capture annotations per tool (only when present). Keep per-server
+      // to match the discoveredTools cache shape — flattening happens in
+      // getDiscoveredToolAnnotations().
+      const annoMap: Record<string, ToolAnnotations> = {};
+      for (const tool of parsed.result.tools) {
+        const parsedAnno = parseToolAnnotations(tool);
+        if (parsedAnno) annoMap[tool.name] = parsedAnno;
+      }
+      if (Object.keys(annoMap).length > 0) {
+        discoveredAnnotations[serverName] = annoMap;
+      } else {
+        // Clear any stale annotations from a previous discovery run.
+        delete discoveredAnnotations[serverName];
+      }
+
+      log.info('MCP tool discovery complete', {
+        server: serverName,
+        count: toolNames.length,
+        annotated: Object.keys(annoMap).length,
+      });
       return toolNames;
     }
   } catch (err) {
@@ -148,9 +208,29 @@ export function getDiscoveredToolInventory(): Record<string, string[]> {
   return result;
 }
 
+/**
+ * Flattened map of all discovered tool annotations, keyed by the same
+ * `mcp__<server>__<tool>` prefix scheme used by getDiscoveredToolInventory().
+ * Tools without annotations are absent from this map.
+ *
+ * Consumed by container-runner.resolveCritiqueGatedTools() to identify
+ * external-posting tools that should be gated by plan-gate.sh alongside
+ * Edit/Write.
+ */
+export function getDiscoveredToolAnnotations(): Record<string, ToolAnnotations> {
+  const result: Record<string, ToolAnnotations> = {};
+  for (const [server, toolMap] of Object.entries(discoveredAnnotations)) {
+    for (const [toolName, anno] of Object.entries(toolMap)) {
+      result[`mcp__${server}__${toolName}`] = anno;
+    }
+  }
+  return result;
+}
+
 /** Clear cached tool inventory for a server (called on stop/before rediscovery). */
 export function clearDiscoveredTools(serverName: string): void {
   delete discoveredTools[serverName];
+  delete discoveredAnnotations[serverName];
 }
 
 // ── Auth proxy server ───────────────────────────────────────────────────────
