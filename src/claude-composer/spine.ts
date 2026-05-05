@@ -301,7 +301,9 @@ export function renderCoworkerSpine(
       const overlays = wfCustomizations.filter((c) => c.kind === 'overlay');
 
       const uses = w.uses.length > 0 ? ` Uses: ${w.uses.join(', ')}.` : '';
-      const extendsNote = extendsC?.extendsWorkflow ? ` (extends \`/${extendsC.extendsWorkflow}\`)` : '';
+      const extendsNote = extendsC?.extendsWorkflow
+        ? ` (extends the **${extendsC.extendsWorkflow}** workflow section below)`
+        : '';
       let block = `### /${w.name}\n\n${w.description}${uses}${extendsNote}`;
 
       if (w.steps.length > 0) {

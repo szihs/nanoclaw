@@ -55,7 +55,7 @@ If the merge reports conflicts, resolve them by reading the conflicted files and
 
 No direct edits to `groups/main/CLAUDE.md` or `groups/global/CLAUDE.md` are needed — both regenerate from the lego spine.
 
-The composer scans every `container/skills/*/coworker-types.yaml`. This skill's `container/spines/slang/coworker-types.yaml` declares the `slang-*` typed coworkers. To refresh the checked-in prompts:
+The composer scans every `container/{spines,skills}/*/coworker-types.yaml`. This skill's `container/spines/slang/coworker-types.yaml` declares the `slang-*` typed coworkers. To refresh the checked-in prompts:
 
 ```bash
 npm run rebuild:claude
@@ -142,7 +142,7 @@ If yes, ensure the MCP server is configured in the container's `.claude/settings
 
 ### Spawning coworkers
 
-From the main chat, users can spawn specialist coworkers after choosing a type from the lego registry (`container/skills/*/coworker-types.yaml`):
+From the main chat, users can spawn specialist coworkers after choosing a type from the lego registry (`container/{spines,skills}/*/coworker-types.yaml`):
 
 ```
 @Andy spawn <type-from-registry> investigate-generics "Investigate generic type inference in the IR"

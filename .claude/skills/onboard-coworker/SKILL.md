@@ -141,7 +141,7 @@ Key rules (full schema in `docs/lego-coworker-workflows.md`):
 
 - `extends` — parent type name. Invariants, context, workflows, skills, overlays append + dedup; identity and bindings leaf-wins.
 - `identity` / `invariants` / `context` — paths to markdown files under `container/skills/`. These render into the always-in-context spine.
-- `workflows` / `skills` / `overlays` — names matching `SKILL.md` `name:` frontmatter under `container/skills/*/`. Bodies load on-demand when the agent invokes the slash command.
+- `workflows` / `skills` / `overlays` — names matching `SKILL.md` `name:` frontmatter under `container/skills/*/`. Workflow bodies are embedded at compose time; capability skills load on demand when invoked via slash command.
 - `bindings` — map abstract trait names (`repo.pr`, `code.edit`, `test.run`, …) to concrete skill names. The composer uses these to derive the agent's MCP tool allowlist from each bound skill's `allowed-tools`.
 - `flat: true` — special mode for base agents like `main` / `global` that render verbatim without structural headings. Leave unset for typed coworkers.
 

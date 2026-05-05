@@ -44,7 +44,7 @@ After `install_packages`, call `mcp__nanoclaw__request_rebuild` to bake packages
 
 **IMPORTANT: NEVER call `create_agent` without asking the user first. You MUST use `ask_user_question` before creating ANY coworker.**
 
-**Step 1 — ALWAYS ask the user to confirm coworkerType.** Use `ask_user_question` with the available types as options. Put the most likely type as option 1 (it becomes the default). Read `container/skills/*/coworker-types.yaml` for the list. Example:
+**Step 1 — ALWAYS ask the user to confirm coworkerType.** Use `ask_user_question` with the available types as options. Put the most likely type as option 1 (it becomes the default). Read `container/{spines,skills}/*/coworker-types.yaml` for the list. Example:
 
 ```
 ask_user_question("Which coworker type for <name>?", options: [

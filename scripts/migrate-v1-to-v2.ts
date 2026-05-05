@@ -19,7 +19,7 @@
  * ## Output
  *
  *   {out-dir}/{folder}.yaml       — per-group v3 import bundles (drop into v2 coworkers/)
- *   {out-dir}/coworker-types.json  — v1 type registry (reference only — v2 types live in container/skills/*/coworker-types.yaml and must be ported by hand if they aren't already covered by a lego skill)
+ *   {out-dir}/coworker-types.json  — v1 type registry (reference only — v2 types live in container/{spines,skills}/*/coworker-types.yaml and must be ported by hand if they aren't already covered by a lego skill)
  *   {out-dir}/templates/           — v1 template directory (reference only — v2 only keeps groups/templates/instructions/; per-project role templates moved under container/skills/*/)
  *   {out-dir}/scheduled-tasks.yaml — summary of cron tasks to recreate manually
  *   {out-dir}/MIGRATION-SUMMARY.md — human-readable migration summary
