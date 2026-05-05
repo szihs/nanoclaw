@@ -3157,13 +3157,23 @@ function renderCwMessages() {
   const credentialHtml = (cwState.pendingCredentials || []).map(renderCredentialItem).join('');
   const messageHtml = cwState.messages.map((m) => {
     const isOutgoing = m.direction === 'outgoing';
-    const cls = isOutgoing ? 'assistant' : 'user';
+    // Agent-to-agent styling: inbound from another coworker gets its own class
+    // with a green left-border bubble, mirroring the approval/question/credential
+    // card pattern so the operator can tell at a glance "this didn't come from me".
+    const isFromCoworker = !isOutgoing && m.senderKind === 'coworker';
+    const isToCoworker = isOutgoing && m.recipientKind === 'coworker';
+    const cls = isFromCoworker ? 'coworker' : isOutgoing ? 'assistant' : (isToCoworker ? 'user to-coworker' : 'user');
     const time = m.timestamp ? formatTime(m.timestamp) : '';
     const text = m.displayContent || m.content || '';
     const attachmentsHtml = renderMessageAttachmentsHtml(m.attachments);
     const metaSuffix = renderMessageMetaSuffix(m);
     const isSystem = m.kind === 'task' || m.kind === 'system';
     const kindLabel = m.kind && m.kind !== 'chat' ? ` <span style="font-size:7px;color:#999;font-style:italic">${esc(m.kind)}</span>` : '';
+    const coworkerLabel = isFromCoworker && m.senderCoworkerName
+      ? ` <span style="font-size:7px;color:#10b981;font-style:italic">from @${esc(m.senderCoworkerName)}</span>`
+      : isToCoworker && m.recipientCoworkerName
+      ? ` <span style="font-size:7px;color:#10b981;font-style:italic">→ @${esc(m.recipientCoworkerName)}</span>`
+      : '';
     const systemStyle = isSystem ? ' style="opacity:0.5;font-size:9px;border-left:2px solid #555;padding-left:6px"' : '';
 
     // Ask question card — render with option buttons if still pending
@@ -3192,10 +3202,13 @@ function renderCwMessages() {
       </div>`;
     }
 
-    const bubbleBody = `${text ? (isOutgoing ? md(text) : esc(text)) : ''}${attachmentsHtml}`;
+    // Messages from another coworker are markdown-authored just like assistant replies,
+    // so render as markdown rather than escaped plain text.
+    const renderAsMd = isOutgoing || isFromCoworker;
+    const bubbleBody = `${text ? (renderAsMd ? md(text) : esc(text)) : ''}${attachmentsHtml}`;
     return `<div class="cw-msg ${cls}"${systemStyle}>
       <div class="cw-msg-bubble">${bubbleBody || '<span style="color:#9ca3af">(empty message)</span>'}</div>
-      <div class="cw-msg-time">${time}${kindLabel}${metaSuffix}</div>
+      <div class="cw-msg-time">${time}${kindLabel}${coworkerLabel}${metaSuffix}</div>
     </div>`;
   }).join('');
   if (!approvalHtml && !credentialHtml && !messageHtml) {

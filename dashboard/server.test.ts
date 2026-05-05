@@ -1732,4 +1732,46 @@ describe('/api/messages system-id filter', () => {
       'msg-real-reply',
     ]);
   });
+
+  it('surfaces a2a messages from a real coworker with senderKind/senderCoworkerName', async () => {
+    const db = createTestDbWithSessions();
+    const now = new Date().toISOString();
+    db.prepare('INSERT INTO agent_groups (id, name, folder, is_admin, created_at) VALUES (?, ?, ?, ?, ?)').run(
+      'ag-receiver', 'Receiver', 'receiver', 0, now,
+    );
+    // The "other" coworker whose platform_id will be embedded in the a2a row
+    db.prepare('INSERT INTO agent_groups (id, name, folder, is_admin, created_at) VALUES (?, ?, ?, ?, ?)').run(
+      'ag-sender-123', 'SenderBot', 'sender-bot', 0, now,
+    );
+    db.prepare('INSERT INTO sessions (id, agent_group_id, status, created_at) VALUES (?, ?, ?, ?)').run(
+      'sess-receiver', 'ag-receiver', 'active', now,
+    );
+    db.close();
+
+    const sessDir = path.join(DATA_DIR, 'v2-sessions', 'ag-receiver', 'sess-receiver');
+    mkdirSync(sessDir, { recursive: true });
+    const inDb = new Database(path.join(sessDir, 'inbound.db'));
+    inDb.exec('CREATE TABLE messages_in (id TEXT PRIMARY KEY, kind TEXT, content TEXT, timestamp TEXT, channel_type TEXT, platform_id TEXT)');
+    const inIns = inDb.prepare('INSERT INTO messages_in VALUES (?, ?, ?, ?, ?, ?)');
+    // Legit inter-coworker send: platform_id resolves to a real agent_group
+    inIns.run('a2a-from-real-coworker', 'chat', '{"text":"Hey, can you bump deps?"}', now, 'agent', 'ag-sender-123');
+    // Plumbing ping: no matching agent_group — should stay filtered
+    inIns.run('a2a-plumbing-noise', 'chat', '{"text":"ping"}', now, 'agent', 'ag-does-not-exist');
+    // Human dashboard message — baseline
+    inIns.run('dash-real-1', 'chat', '{"text":"hi"}', now, 'dashboard', 'dashboard:receiver');
+    inDb.close();
+    forceOpenDbForTests();
+
+    const res = await fetch(`${baseUrl}/api/messages?group=receiver&limit=50`);
+    expect(res.status).toBe(200);
+    const data = (await res.json()) as { messages: any[] };
+    const ids = data.messages.map((m) => m.id).sort();
+    // Real coworker a2a shows up; plumbing noise stays filtered.
+    expect(ids).toEqual(['a2a-from-real-coworker', 'dash-real-1']);
+    const coworkerMsg = data.messages.find((m) => m.id === 'a2a-from-real-coworker');
+    expect(coworkerMsg.senderKind).toBe('coworker');
+    expect(coworkerMsg.senderCoworkerName).toBe('SenderBot');
+    const human = data.messages.find((m) => m.id === 'dash-real-1');
+    expect(human.senderKind).toBeUndefined();
+  });
 });

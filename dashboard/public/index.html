@@ -754,6 +754,13 @@
     .cw-msg.assistant .cw-msg-bubble a:hover { text-decoration: underline; }
     .cw-msg-time { font-size: 0.625rem; color: var(--text-muted); margin-top: 2px; }
     .cw-msg.user .cw-msg-time { text-align: right; }
+    /* Agent-to-agent: inbound from another coworker (mirrors approval/question card styling) */
+    .cw-msg.coworker { margin-right: auto; }
+    .cw-msg.coworker .cw-msg-bubble { background: var(--bg-hover); color: var(--text); border-left: 3px solid var(--green); padding-left: 8px; }
+    .cw-msg.coworker .cw-msg-bubble p { margin: 0 0 6px 0; }
+    .cw-msg.coworker .cw-msg-bubble p:last-child { margin-bottom: 0; }
+    /* Outbound directed at another coworker — visible accent on the outgoing (right) side */
+    .cw-msg.user.to-coworker .cw-msg-bubble { background: #1d4ed8; border-right: 3px solid var(--green); padding-right: 8px; }
     .cw-chat-input { padding: 8px 16px; border-top: 1px solid var(--border); display: flex; gap: 8px; align-items: flex-end; }
     .cw-chat-input textarea { flex: 1; background: var(--bg); color: var(--text); border: 1px solid var(--border); border-radius: 4px; padding: 6px 8px; font-family: var(--font); font-size: 0.75rem; resize: none; min-height: 32px; max-height: 100px; }
     .cw-chat-input button { background: var(--green); color: #fff; border: none; border-radius: 4px; padding: 6px 14px; font-family: var(--font); font-size: 0.75rem; cursor: pointer; height: 32px; }
