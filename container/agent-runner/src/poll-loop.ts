@@ -473,6 +473,24 @@ function handleEvent(event: ProviderEvent, _routing: RoutingContext): void {
     case 'progress':
       log(`Progress: ${event.message}`);
       break;
+    case 'usage':
+      // Structured per-turn accounting. Grep-friendly: every field is a
+      // bare keyword=value token, same line. Stable schema so downstream
+      // tooling (ccusage / ad-hoc awk / the 2×2 stress-test harness)
+      // can parse without JSON.
+      log(
+        `Usage: sessionId=${event.sessionId ?? 'null'} ` +
+          `durationMs=${event.durationMs} ` +
+          `numTurns=${event.numTurns} ` +
+          `input=${event.inputTokens} ` +
+          `output=${event.outputTokens} ` +
+          `cacheCreate=${event.cacheCreationInputTokens} ` +
+          `cacheRead=${event.cacheReadInputTokens} ` +
+          `ephemeral1h=${event.ephemeral1hInputTokens} ` +
+          `ephemeral5m=${event.ephemeral5mInputTokens} ` +
+          `costUsd=${event.totalCostUsd}`,
+      );
+      break;
   }
 }
 
