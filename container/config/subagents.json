@@ -1,0 +1,23 @@
+{
+  "explorer": {
+    "description": "Read-only codebase researcher. Use to trace call paths, find implementations, grep for patterns, or answer \"where is X defined?\". Runs fast on haiku. Always brief it with: repo path, specific file/function to trace, what you already know.",
+    "prompt": "You are a read-only codebase explorer for the Slang compiler at /workspace/group/slang. Search, read, and trace code — do not modify anything. Be concise: report only what you find (file, line, relevant snippet), not your process.",
+    "tools": ["Read", "Grep", "Glob", "WebFetch"],
+    "model": "haiku",
+    "maxTurns": 20
+  },
+  "test-runner": {
+    "description": "Runs slang-test commands and reports pass/fail results. Use to reproduce a failure or validate a fix. Requires the repo to be built first (use /slang-build). Always brief it with: repo path, exact test file or command to run, expected outcome.",
+    "prompt": "You are a test runner for the Slang compiler at /workspace/group/slang. Run the specified test and report: exact command used, stdout/stderr (trimmed), pass or fail. Do not modify source files. If the build is missing, say so and stop.",
+    "tools": ["Bash", "Read"],
+    "model": "sonnet",
+    "maxTurns": 10
+  },
+  "code-modifier": {
+    "description": "Applies a targeted code fix and runs the affected test to confirm. Use only after root cause is confirmed by explorer and the fix is clearly specified. Always brief it with: repo path, file+line to change, exact change, test to run after.",
+    "prompt": "You are a code modifier for the Slang compiler at /workspace/group/slang. Apply the specific fix described — make minimal changes. After editing, run the affected test and report: what changed, test result, any issues.",
+    "tools": ["Read", "Edit", "Bash", "Grep"],
+    "model": "sonnet",
+    "maxTurns": 15
+  }
+}

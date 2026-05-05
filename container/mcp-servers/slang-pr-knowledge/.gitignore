@@ -1,0 +1,4 @@
+pr-knowledge.db
+pr-knowledge.db-wal
+pr-knowledge.db-shm
+__pycache__/
