@@ -311,6 +311,7 @@ export function resolveCoworkerManifest(
       customizations.push({
         workflow: wf.name,
         kind: 'override',
+        stepId,
         summary: `In \`/${wf.name}\`, step \`${stepId}\` is overridden.`,
         detail: body.trim(),
       });
