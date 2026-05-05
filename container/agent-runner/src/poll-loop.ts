@@ -400,6 +400,23 @@ async function processQuery(
         return;
       }
 
+      // Update the shared routing when a follow-up brings richer routing
+      // than the initial batch had. Common case: the initial batch was a
+      // scheduled task (no channel/platform) and a chat arrives mid-turn —
+      // we want the chat's reply to land back on that channel, not get
+      // silently dropped because the initial routing was null. Prefer any
+      // non-null channelType+platformId from the new batch; otherwise keep
+      // the existing routing.
+      const followUpRouting = extractRouting(newMessages);
+      if (followUpRouting.channelType && followUpRouting.platformId) {
+        if (!routing.channelType || !routing.platformId) {
+          log(
+            `Promoting routing from follow-up (${followUpRouting.channelType}:${followUpRouting.platformId}); initial routing was null`,
+          );
+        }
+        routing = followUpRouting;
+      }
+
       const newIds = newMessages.map((m) => m.id);
       markProcessing(newIds);
 

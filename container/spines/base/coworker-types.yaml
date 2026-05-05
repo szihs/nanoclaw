@@ -9,6 +9,7 @@
 base-common:
   description: "Universal coworker spine — safety, truthfulness, scope, workspace conventions, invocation protocol. Every project type extends this."
   invariants:
+    - container/spines/base/invariants/output-protocol.md
     - container/spines/base/invariants/safety.md
     - container/spines/base/invariants/truthfulness.md
     - container/spines/base/invariants/scope.md
