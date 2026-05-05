@@ -341,7 +341,7 @@ Body: Repo URL, clone command, PR process (from `PR_PROCESS`), issue conventions
 
 ### 2c. Workflow extensions (4 workflows)
 
-**`container/skills/{project}-investigate-workflow/SKILL.md`**:
+**`container/workflows/{project}-investigate/WORKFLOW.md`**:
 ```yaml
 ---
 name: {project}-investigate
@@ -358,7 +358,7 @@ overrides:
 ---
 ```
 
-**`container/skills/{project}-implement-workflow/SKILL.md`**:
+**`container/workflows/{project}-implement/WORKFLOW.md`**:
 ```yaml
 ---
 name: {project}-implement
@@ -376,7 +376,7 @@ overrides:
 ---
 ```
 
-**`container/skills/{project}-review-workflow/SKILL.md`**:
+**`container/workflows/{project}-review/WORKFLOW.md`**:
 ```yaml
 ---
 name: {project}-review
@@ -392,7 +392,7 @@ overrides:
 ---
 ```
 
-**`container/skills/{project}-document-workflow/SKILL.md`**:
+**`container/workflows/{project}-document/WORKFLOW.md`**:
 ```yaml
 ---
 name: {project}-document

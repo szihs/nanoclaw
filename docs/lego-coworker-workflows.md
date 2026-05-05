@@ -131,13 +131,13 @@ Every coworker instance has `groups/<folder>/.instructions.md`. The composed `CL
 
 ### Add a workflow
 
-1. Create `container/skills/<name>-workflow/SKILL.md` with `type: workflow`, `requires:`, and `{#step-id}` anchors
+1. Create `container/workflows/<name>/WORKFLOW.md` with `type: workflow`, `requires:`, and `{#step-id}` anchors
 2. Reference from a coworker type's `workflows:` list
 3. Ensure all required traits have bindings
 
 ### Specialize a workflow
 
-1. Create `container/skills/<project>-<name>-workflow/SKILL.md` with `extends: <base-name>` and `overrides:`
+1. Create `container/workflows/<project>-<name>/WORKFLOW.md` with `extends: <base-name>` and `overrides:`
 2. Only override the steps that need project-specific behavior
 
 ### Add an overlay
@@ -221,7 +221,7 @@ main:
 |---|---|
 | `container/spines/base/` | Universal invariants + context + `base-common` type |
 | `container/spines/<project>/` | Project identity + invariants + context + types |
-| `container/skills/<name>-workflow/` | Workflow SKILL.md (base or project) |
+| `container/workflows/<name>/` | Workflow SKILL.md (base or project) |
 | `container/skills/<name>-overlay/` | Overlay SKILL.md |
 | `container/skills/<name>/` | Skill SKILL.md |
 | `container/skills/nanoclaw-base/` | Flat main/global body templates |
