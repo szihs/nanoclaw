@@ -437,8 +437,14 @@ export function renderCoworkerSpine(
   }
 
   // --- Workflows: full body embedded with inline overlay gates ---
+  //
+  // Assembly order: we render workflow bodies first (which populates
+  // `sharedGateState` from staged-overlay anchors), then emit the
+  // `## Gate Protocol` section BEFORE `## Workflows` so the reader learns
+  // the gate protocol before hitting inline `⟐ ... GATE` blocks. The
+  // workflow output is buffered into `wfOutput` and pushed after the
+  // gate block.
   if (manifest.workflows.length > 0) {
-    parts.push('## Workflows');
     const wfBlocks: string[] = [];
 
     // Gate rendering state:
@@ -527,7 +533,7 @@ export function renderCoworkerSpine(
     // become Task-tool subagent pointers. Capability skill refs stay literal.
     const wfJoined = wfBlocks.join('\n\n');
     const slashRewritten = rewriteSlashRefs(wfJoined, workflowNames, capabilitySkillNames, overlayNames);
-    parts.push(rewritePlaceholders(slashRewritten));
+    const wfOutput = rewritePlaceholders(slashRewritten);
 
     // Emit shared gate protocols for every staged overlay whose stages
     // appeared as inline anchors above. Each overlay contributes one
@@ -535,6 +541,9 @@ export function renderCoworkerSpine(
     // `## Gate Protocol` heading. This keeps cross-stage content (3-round
     // protocol, record-verdicts steps, etc.) in one place per coworker
     // instead of repeating it at every anchor.
+    //
+    // Gate Protocol is pushed BEFORE `## Workflows` so the reader sees the
+    // protocol definition before inline `⟐ ... GATE` anchors reference it.
     if (sharedGateState.size > 0) {
       const blocks: string[] = [];
       for (const [overlayName, { leading, shared }] of sharedGateState) {
@@ -548,6 +557,9 @@ export function renderCoworkerSpine(
         parts.push(blocks.join('\n\n'));
       }
     }
+
+    parts.push('## Workflows');
+    parts.push(wfOutput);
   }
 
   // --- Skills ---
