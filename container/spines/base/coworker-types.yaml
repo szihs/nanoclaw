@@ -1,6 +1,8 @@
 # Universal coworker spine. Every project type extends `base-common`.
 # Invariants and context fragments compose into the always-in-context CLAUDE.md.
-# Workflows are progressively disclosed — their bodies load on invocation.
+# Workflow and overlay bodies are embedded verbatim at compose time — the full
+# step/gate text is baked into CLAUDE.md (no runtime slash-command load).
+# Capability skills still load on demand via Claude Code's SKILL.md mechanism.
 #
 # See docs/lego-coworker-workflows.md for the full schema.
 
