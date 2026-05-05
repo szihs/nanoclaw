@@ -1687,17 +1687,19 @@ function updateTimeline() {
       const nanoChanged = prevNano !== undefined && prevNano !== nano;
       const sdkChanged = prevSdk !== undefined && prevSdk !== sdk;
       if (groupChanged || nanoChanged) {
-        // MAJOR: coworker · sess-<id> · container: <status> · last-active Xm ago
+        // MAJOR: coworker · <sess-id> · container: <status> · last-active Xm ago
+        // `nano` already begins with "sess-" (it's the full nanoclaw session id), so do NOT
+        // prepend another "sess-" — that was producing "sess-sess-17773…". Emit the id as-is,
+        // truncated for compactness.
         const cs = meta?.container_status || 'unknown';
         const agoLabel = meta?.last_active ? timeAgo(new Date(meta.last_active).getTime()) : '';
-        const sessLabel = nano ? `sess-${String(nano).slice(0, 10)}` : '(no nanoclaw session)';
-        const last = agoLabel ? ` · last-active ${esc(agoLabel)}` : '';
+        const sessLabel = nano ? String(nano).slice(0, 18) : '(no nanoclaw session)';
         htmlParts.push(`<div class="tl-sep tl-sep-major" style="display:flex;align-items:center;gap:8px;margin:10px 0 4px 0;padding:4px 8px;border-top:1px solid var(--border);color:var(--text-muted);font-size:10px;font-family:'Courier New',monospace">
           <span style="color:${getGroupColor(group)};font-weight:bold">${esc(group)}</span>
           <span>·</span>
           <span style="font-family:monospace">${esc(sessLabel)}</span>
           <span>·</span>
-          <span>container: ${esc(cs)}</span>${last ? `<span>·</span><span>${last}</span>` : ''}
+          <span>container: ${esc(cs)}</span>${agoLabel ? `<span>·</span><span>last-active ${esc(agoLabel)}</span>` : ''}
         </div>`);
       }
       if (groupChanged || nanoChanged || sdkChanged) {
