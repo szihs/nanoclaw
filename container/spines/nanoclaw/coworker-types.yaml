@@ -2,11 +2,11 @@ nanoclaw-common:
   description: "NanoClaw platform spine — identity, contribution invariants, repo layout."
   project: nanoclaw
   extends: base-common
-  identity: container/skills/spine-nanoclaw/identity/engineer.md
+  identity: container/spines/nanoclaw/identity/engineer.md
   invariants:
-    - container/skills/spine-nanoclaw/invariants/public-api.md
+    - container/spines/nanoclaw/invariants/public-api.md
   context:
-    - container/skills/spine-nanoclaw/context/layout.md
+    - container/spines/nanoclaw/context/layout.md
   skills:
     - nanoclaw-build
     - nanoclaw-code-reader
