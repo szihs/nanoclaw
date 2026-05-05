@@ -11,6 +11,14 @@ vi.mock('./log.js', () => ({
   },
 }));
 
+// Force AGENT_RUNTIME=docker in this suite regardless of .env.
+// These tests exercise the Docker path; the local-mode early-return would
+// make them green-by-default which defeats the purpose.
+vi.mock('./config.js', async () => {
+  const actual = await vi.importActual<typeof import('./config.js')>('./config.js');
+  return { ...actual, AGENT_RUNTIME: 'docker' };
+});
+
 // Mock child_process — store the mock fn so tests can configure it
 const mockExecSync = vi.fn();
 vi.mock('child_process', () => ({
