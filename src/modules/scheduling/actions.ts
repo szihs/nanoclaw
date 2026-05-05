@@ -26,13 +26,20 @@ export async function handleScheduleTask(
   const script = content.script as string | null;
   const processAfter = content.processAfter as string;
   const recurrence = (content.recurrence as string) || null;
-  // `new_session: true` tells the poll-loop (see PR #58) to run this task
-  // fire in a fresh Claude session instead of resuming the stored
-  // continuation. Without this flag, recurring heartbeats accumulate
-  // every fire's context into one conversation until the provider
-  // compaction limit is hit — driving up cache-creation + cache-read
-  // token cost and latency indefinitely.
-  const newSession = content.new_session === true;
+  // Scheduled tasks default to fresh-session-per-fire (see the poll-loop's
+  // `isNewSessionBatch` predicate). Only persist the flag when the MCP
+  // caller set an explicit boolean:
+  //   new_session: true  → persist true (redundant with default, but harmless)
+  //   new_session: false → persist false (opt out; reader keeps continuation)
+  //   omitted / non-boolean → store nothing; reader applies the default
+  // Keeping the stored content minimal means the default can evolve without
+  // migrating historical rows.
+  const newSessionField =
+    content.new_session === true
+      ? { new_session: true }
+      : content.new_session === false
+        ? { new_session: false }
+        : ({} as Record<string, boolean>);
 
   insertTask(inDb, {
     id: taskId,
@@ -41,11 +48,14 @@ export async function handleScheduleTask(
     platformId: (content.platformId as string) ?? null,
     channelType: (content.channelType as string) ?? null,
     threadId: (content.threadId as string) ?? null,
-    // Only write the flag when true — keeps stored content minimal and
-    // avoids false-positive matches on any non-boolean upstream value.
-    content: JSON.stringify(newSession ? { prompt, script, new_session: true } : { prompt, script }),
+    content: JSON.stringify({ prompt, script, ...newSessionField }),
   });
-  log.info('Scheduled task created', { taskId, processAfter, recurrence, newSession });
+  log.info('Scheduled task created', {
+    taskId,
+    processAfter,
+    recurrence,
+    newSession: content.new_session === false ? 'explicit-false' : content.new_session === true ? 'explicit-true' : 'default',
+  });
 }
 
 export async function handleCancelTask(

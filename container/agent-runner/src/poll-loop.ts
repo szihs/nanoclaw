@@ -23,29 +23,42 @@ function log(msg: string): void {
 }
 
 /**
- * True iff the message is a scheduled task whose content JSON has
- * `new_session: true`. Centralized so the initial-batch gate and the
- * mid-query follow-up guard stay in lockstep — historically they diverged
- * (PR #58 implemented only the initial-batch check, leaving the follow-up
- * path to push new_session tasks into the active query as resumes; see
- * bug repro on dev 2026-05-05).
+ * True iff the message is a scheduled task that explicitly OPTS OUT of the
+ * fresh-session default by setting `content.new_session === false`. The
+ * default across the system is now fresh-session-on for recurring task
+ * batches (see isNewSessionBatch); tasks that genuinely need the stored
+ * continuation (chained workflows that carry state in conversation memory,
+ * rather than in files) must opt out explicitly.
+ *
+ * Strict `=== false` matters — an absent key or `true` both participate in
+ * the default; only an explicit `false` blocks it. Swallows malformed JSON
+ * rather than throwing.
  */
-export function taskRequestsNewSession(m: { kind: string; content: string }): boolean {
+export function taskOptsOutOfNewSession(m: { kind: string; content: string }): boolean {
   if (m.kind !== 'task') return false;
   try {
-    return Boolean((JSON.parse(m.content) as Record<string, unknown>).new_session);
+    return (JSON.parse(m.content) as Record<string, unknown>).new_session === false;
   } catch {
     return false;
   }
 }
 
 /**
- * True iff the ENTIRE batch is tasks AND at least one has the flag. Mixed
- * batches (any chat present) preserve conversation history and must resume
- * the stored continuation — matches PR #58's original intent.
+ * Default-on fresh-session policy for recurring task batches:
+ *   - Empty batch: false (defensive — no spurious fresh sessions).
+ *   - Any chat in the batch: false (mixed batches preserve chat history).
+ *   - All-tasks AND at least one opts out via `new_session: false`: false
+ *     (safer to preserve continuity than drop it when any task asks).
+ *   - All-tasks AND none opts out: true (the common heartbeat/cron case,
+ *     now the default without any flag needing to be set).
+ *
+ * Historical note: PR #58 introduced opt-in (`new_session: true`); PR #106
+ * fixed the follow-up-push bypass; empirical prod rollout (slang-discord-
+ * support: $0.57 after flip vs $1.00 before, on 11 turns vs 3) confirmed
+ * the delta is real enough to make opt-out the sane default.
  */
 export function isNewSessionBatch(keep: Array<{ kind: string; content: string }>): boolean {
-  return keep.length > 0 && keep.every((m) => m.kind === 'task') && keep.some(taskRequestsNewSession);
+  return keep.length > 0 && keep.every((m) => m.kind === 'task') && !keep.some(taskOptsOutOfNewSession);
 }
 
 function generateId(): string {
@@ -375,25 +388,28 @@ async function processQuery(
       return true;
     });
     if (newMessages.length > 0) {
-      // new_session bypass guard: if any arriving task carries new_session:true,
-      // DO NOT push into the active query — that would resume the stored
-      // continuation and defeat the flag's whole purpose (the cost-growth-
-      // from-accumulated-context problem PR #58 was meant to solve).
+      // new_session bypass guard: if any arriving task defaults to fresh
+      // session (a task kind with no `new_session: false` opt-out), DO NOT
+      // push into the active query — that would resume the stored
+      // continuation and defeat the default (the cost-growth-from-accumulated-
+      // context problem PRs #58/#103/#106 were meant to solve).
       // Instead, end the active query; the next poll iteration's initial-batch
-      // path will pick up the pending rows, `isNewSessionBatch` will detect
-      // the flag, and the provider.query call will run with
-      // continuation: undefined.
+      // path will pick up the pending rows, `isNewSessionBatch` will return
+      // true, and the provider.query call will run with continuation:
+      // undefined.
       //
       // Without this guard, any heartbeat-style recurring task fires within
-      // IDLE_END_MS (10 min) of each other and bypasses the flag — making
+      // IDLE_END_MS (10 min) of each other and bypasses the default — making
       // new_session effectively a no-op for all realistic prod cadences.
-      // Empirically reproduced on dev 2026-05-05 (see the PR description).
+      // Empirically reproduced on dev 2026-05-05 (see PR #106 description).
       //
       // We leave rows as 'pending' (no markProcessing/markCompleted) so the
       // next loop iteration re-reads them fresh.
-      if (newMessages.some(taskRequestsNewSession)) {
+      const wantsFreshSession = (m: { kind: string; content: string }) =>
+        m.kind === 'task' && !taskOptsOutOfNewSession(m);
+      if (newMessages.some(wantsFreshSession)) {
         log(
-          `new_session task arrived mid-query (${newMessages.length} msg) — ending active query to route through fresh-session path`,
+          `fresh-session task arrived mid-query (${newMessages.length} msg) — ending active query to route through fresh-session path`,
         );
         query.end();
         done = true;

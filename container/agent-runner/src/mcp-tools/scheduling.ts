@@ -55,7 +55,7 @@ export const scheduleTask: McpToolDefinition = {
         new_session: {
           type: 'boolean',
           description:
-            'For recurring heartbeat/cron tasks only: when true, each fire runs in a fresh Claude session instead of resuming prior history. Prevents the recurring-task conversation from accumulating every fire\'s context indefinitely (which would otherwise drive repeated compactions and grow cache-read tokens). Use when the task is stateless across fires (state persists via files on disk, not in-conversation memory). Default false.',
+            'Scheduled-task session policy. DEFAULT TRUE for all scheduled tasks — each fire runs in a fresh Claude session so heartbeat/cron conversations do not accumulate prior fires\' context (which drives repeated compactions and growing cache-creation tokens). Set to FALSE explicitly only for multi-fire workflows that rely on in-conversation memory across fires (rare — most state belongs in files on disk). Omit to take the default.',
         },
       },
       required: ['prompt', 'processAfter'],
@@ -79,13 +79,14 @@ export const scheduleTask: McpToolDefinition = {
     const r = routing();
     const recurrence = (args.recurrence as string) || null;
     const script = (args.script as string) || null;
-    const newSession = args.new_session === true;
+    // Tri-state: only persist an explicit boolean. Omission = default (true)
+    // is applied by the poll-loop reader; storing nothing keeps the content
+    // blob minimal and preserves "omitted means default" semantics across
+    // future default changes.
+    const newSessionField =
+      args.new_session === true ? { new_session: true } : args.new_session === false ? { new_session: false } : {};
 
     // Write as a system action — host will insert into inbound.db.
-    // `new_session` is only meaningful for recurring tasks (flat-cost heartbeat
-    // model vs resume-continuation model); the host handler in
-    // src/modules/scheduling/actions.ts writes it into the stored task content
-    // which the poll-loop reads per PR #58.
     writeMessageOut({
       id,
       kind: 'system',
@@ -99,15 +100,17 @@ export const scheduleTask: McpToolDefinition = {
         script,
         processAfter,
         recurrence,
-        ...(newSession ? { new_session: true } : {}),
+        ...newSessionField,
       }),
     });
 
+    const sessionTag =
+      args.new_session === true ? ' [new_session=true]' : args.new_session === false ? ' [new_session=false]' : '';
     log(
-      `schedule_task: ${id} at ${processAfter}${recurrence ? ` (recurring: ${recurrence})` : ''}${newSession ? ' [new_session]' : ''}`,
+      `schedule_task: ${id} at ${processAfter}${recurrence ? ` (recurring: ${recurrence})` : ''}${sessionTag}`,
     );
     return ok(
-      `Task scheduled (id: ${id}, runs at: ${processAfter}${recurrence ? `, recurrence: ${recurrence}` : ''}${newSession ? ', new_session: true' : ''})`,
+      `Task scheduled (id: ${id}, runs at: ${processAfter}${recurrence ? `, recurrence: ${recurrence}` : ''}${sessionTag})`,
     );
   },
 };
@@ -278,7 +281,7 @@ export const updateTask: McpToolDefinition = {
         new_session: {
           type: 'boolean',
           description:
-            'Toggle the new_session flag on the stored task content (optional). true: future fires run in a fresh Claude session. false: strip the flag (future fires resume the stored continuation). See schedule_task docs for when to use.',
+            'Set or clear the new_session flag on the stored task content (optional). true: persist `new_session: true` explicitly. false: persist `new_session: false` as an opt-out (future fires resume the stored continuation). Omit to leave the current stored value unchanged. The system-wide default when no value is stored is true. See schedule_task docs for when to opt out.',
         },
       },
       required: ['taskId'],

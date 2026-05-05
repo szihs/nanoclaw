@@ -58,9 +58,13 @@ export interface TaskUpdate {
   script?: string | null;
   recurrence?: string | null;
   processAfter?: string;
-  // Toggle new_session in the stored content JSON. true writes
-  // `new_session: true`; false strips the key entirely (so the stored
-  // blob stays minimal for legacy tasks).
+  // Explicit set of new_session in the stored content JSON.
+  //   true  → persist `new_session: true`  (redundant w/ default, explicit opt-in)
+  //   false → persist `new_session: false` (opt-out — reader resumes continuation)
+  //   undefined → leave the stored value unchanged (caller-side "no-op").
+  // Rationale: post-PR #107 the default is fresh-session-on; to preserve the
+  // ability to opt out on an existing task, setting false must persist rather
+  // than strip the key.
   newSession?: boolean;
 }
 
@@ -90,7 +94,7 @@ export function updateTask(db: Database.Database, taskId: string, update: TaskUp
         if (update.prompt !== undefined) parsed.prompt = update.prompt;
         if (update.script !== undefined) parsed.script = update.script;
         if (update.newSession === true) parsed.new_session = true;
-        else if (update.newSession === false) delete parsed.new_session;
+        else if (update.newSession === false) parsed.new_session = false;
         content = JSON.stringify(parsed);
       }
 

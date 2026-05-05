@@ -281,11 +281,13 @@ describe('insertRecurrence', () => {
   });
 });
 
-describe('updateTask — new_session toggle', () => {
-  // new_session is a boolean flag in the stored content JSON that the
-  // agent-runner poll-loop reads to decide whether a recurring task fire
-  // resumes the stored continuation or starts a fresh Claude session (PR
-  // #58 reader; this test pins the writer side).
+describe('updateTask — new_session toggle (default-on semantics)', () => {
+  // Post-default-on: the stored content's `new_session` field is tri-state:
+  //   absent  → default (fresh session per fire, applied by reader)
+  //   true    → explicit opt-in (redundant w/ default but persisted verbatim)
+  //   false   → explicit opt-out (reader resumes the stored continuation)
+  // updateTask must PRESERVE the false value rather than strip it, so a
+  // coworker can opt out of the default on an existing task.
   it('setting newSession=true writes new_session:true into content', () => {
     const db = freshDb();
     insertBasicTask(db, 'task-1', '*/5 * * * *');
@@ -298,26 +300,22 @@ describe('updateTask — new_session toggle', () => {
     db.close();
   });
 
-  it('setting newSession=false strips the key from content', () => {
+  it('setting newSession=false PERSISTS new_session:false (opt-out)', () => {
     const db = freshDb();
-    insertTask(db, {
-      id: 'task-2',
-      processAfter: new Date().toISOString(),
-      recurrence: '*/5 * * * *',
-      platformId: null,
-      channelType: null,
-      threadId: null,
-      content: JSON.stringify({ prompt: 'noop', new_session: true }),
-    });
+    insertBasicTask(db, 'task-2', '*/5 * * * *');
     updateTask(db, 'task-2', { newSession: false });
     const row = db.prepare('SELECT content FROM messages_in WHERE id = ?').get('task-2') as { content: string };
     const parsed = JSON.parse(row.content) as Record<string, unknown>;
-    expect('new_session' in parsed).toBe(false);
+    // Post-default-on: false MUST be persisted (not stripped). Reader looks
+    // for === false to decide opt-out; stripping the key would mean the
+    // reader applies the default = fresh-session, silently overriding the
+    // caller's explicit opt-out.
+    expect(parsed.new_session).toBe(false);
     expect(parsed.prompt).toBe('noop');
     db.close();
   });
 
-  it('omitting newSession leaves the existing flag untouched', () => {
+  it('omitting newSession leaves the existing value untouched (true stays true)', () => {
     const db = freshDb();
     insertTask(db, {
       id: 'task-3',
@@ -333,6 +331,25 @@ describe('updateTask — new_session toggle', () => {
     const parsed = JSON.parse(row.content) as Record<string, unknown>;
     expect(parsed.prompt).toBe('new');
     expect(parsed.new_session).toBe(true);
+    db.close();
+  });
+
+  it('omitting newSession leaves the existing value untouched (false stays false)', () => {
+    const db = freshDb();
+    insertTask(db, {
+      id: 'task-4',
+      processAfter: new Date().toISOString(),
+      recurrence: '*/5 * * * *',
+      platformId: null,
+      channelType: null,
+      threadId: null,
+      content: JSON.stringify({ prompt: 'old', new_session: false }),
+    });
+    updateTask(db, 'task-4', { prompt: 'new' });
+    const row = db.prepare('SELECT content FROM messages_in WHERE id = ?').get('task-4') as { content: string };
+    const parsed = JSON.parse(row.content) as Record<string, unknown>;
+    expect(parsed.prompt).toBe('new');
+    expect(parsed.new_session).toBe(false);
     db.close();
   });
 });
