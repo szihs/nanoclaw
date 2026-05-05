@@ -120,17 +120,22 @@ export function initGroupFilesystem(group: AgentGroup, opts?: { instructions?: s
     }
   }
 
-  // 2b. data/v2-sessions/<id>/.claude-shared/agents/ — subagent definitions
+  // 2b. data/v2-sessions/<id>/.claude-shared/agents/ — subagent definitions.
+  // A sibling `agent.md` inside any skill or overlay dir is copied as a
+  // subagent definition. Overlays like `codex-critique` ship both an
+  // OVERLAY.md (compose-time body) and an agent.md (runtime subagent).
   const agentsDst = path.join(claudeDir, 'agents');
   fs.mkdirSync(agentsDst, { recursive: true });
-  if (fs.existsSync(skillsSrc)) {
-    for (const skill of fs.readdirSync(skillsSrc)) {
-      const agentFile = path.join(skillsSrc, skill, 'agent.md');
+  for (const subdir of ['skills', 'overlays']) {
+    const srcRoot = path.join(projectRoot, 'container', subdir);
+    if (!fs.existsSync(srcRoot)) continue;
+    for (const entry of fs.readdirSync(srcRoot)) {
+      const agentFile = path.join(srcRoot, entry, 'agent.md');
       if (fs.existsSync(agentFile)) {
-        const dst = path.join(agentsDst, `${skill}.md`);
+        const dst = path.join(agentsDst, `${entry}.md`);
         if (!fs.existsSync(dst)) {
           fs.copyFileSync(agentFile, dst);
-          initialized.push(`agents/${skill}.md`);
+          initialized.push(`agents/${entry}.md`);
         }
       }
     }
