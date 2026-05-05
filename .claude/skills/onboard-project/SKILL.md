@@ -83,7 +83,7 @@ find {PROJECT_PATH} -maxdepth 3 \( \
 
 **Supplemental: DeepWiki** (for OSS GitHub repos only). Use `mcp__deepwiki__ask_question` with `{owner}/{repo}` for deeper architecture questions that aren't answered by the files on disk. This is optional — the clone has everything needed.
 
-Write the analysis to `/workspace/group/onboard-{project}.md`.
+Write the analysis to `/workspace/agent/onboard-{project}.md`.
 
 ### 1d. Build trait capability map
 
