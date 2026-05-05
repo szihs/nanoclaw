@@ -421,6 +421,106 @@ describe('R12: backticked slash refs in bodies are rewritten by kind', () => {
   });
 });
 
+describe('R15: unbackticked /workflow refs in prose are rewritten to section pointer', () => {
+  it('rewrites `Use /alpha workflow` (no backticks) when alpha is a workflow', () => {
+    const root = makeTempProject();
+    writeSpineBase(root);
+    writeWorkflow(
+      root,
+      'entry',
+      [
+        '# Entry',
+        '',
+        '## Steps',
+        '',
+        '1. **Do** {#do} — Use /alpha workflow for navigation, then continue.',
+      ].join('\n'),
+    );
+    writeWorkflow(root, 'alpha', '# Alpha\n\n## Steps\n\n1. **A** {#a} — x.');
+    writeProjectType(
+      root,
+      'probe:\n  extends: base-common\n  description: "Probe."\n  workflows: [entry, alpha]\n',
+    );
+    const spine = composeCoworkerSpine({ projectRoot: root, coworkerType: 'probe' });
+    // The prose ref is rewritten to a section pointer.
+    expect(spine).toContain('Use the **alpha** workflow section below');
+    // The raw unbackticked `/alpha` in prose is gone. (The "## How to Work"
+    // routing lines intentionally still contain backticked `` `/alpha` ``
+    // because those are positioned at line start without a leading space,
+    // but those don't match the unbackticked boundary regex.)
+    expect(spine).not.toMatch(/\sUse \/alpha workflow/);
+  });
+});
+
+describe('R16: unbackticked /skill refs (capability skills) are left literal', () => {
+  it('does not rewrite /gamma-skill when gamma-skill is a capability skill', () => {
+    const root = makeTempProject();
+    writeSpineBase(root);
+    writeWorkflow(
+      root,
+      'entry',
+      [
+        '# Entry',
+        '',
+        '## Steps',
+        '',
+        '1. **Do** {#do} — Run /gamma-skill to handle the probe.',
+      ].join('\n'),
+    );
+    writeCapabilitySkill(root, 'gamma-skill', 'Do gamma.');
+    writeProjectType(
+      root,
+      [
+        'probe:',
+        '  extends: base-common',
+        '  description: "Probe."',
+        '  workflows: [entry]',
+        '  skills: [gamma-skill]',
+        '  bindings:',
+        '    probe: gamma-skill',
+        '',
+      ].join('\n'),
+    );
+    const spine = composeCoworkerSpine({ projectRoot: root, coworkerType: 'probe' });
+    // Capability skill slash command stays literal in prose.
+    expect(spine).toContain('/gamma-skill');
+    expect(spine).not.toContain('the **gamma-skill** workflow section below');
+    expect(spine).not.toContain('the **gamma-skill** subagent');
+  });
+});
+
+describe('R17: path-like /foo/bar refs in prose are untouched', () => {
+  it('leaves `/workspace/agent/plans/` intact even when it contains a workflow-like token', () => {
+    const root = makeTempProject();
+    writeSpineBase(root);
+    // Define a workflow named `agent` — a path segment `/agent/` must NOT
+    // trigger the rewrite despite the name match, because `/agent` is
+    // preceded by a letter (`s`), not whitespace.
+    writeWorkflow(
+      root,
+      'flow',
+      [
+        '# F',
+        '',
+        '## Steps',
+        '',
+        '1. **Do** {#do} — outputs land in /workspace/agent/plans/ before exit.',
+      ].join('\n'),
+    );
+    writeWorkflow(root, 'agent', '# Agent\n\n## Steps\n\n1. **A** {#a} — x.');
+    writeProjectType(
+      root,
+      'probe:\n  extends: base-common\n  description: "Probe."\n  workflows: [flow, agent]\n',
+    );
+    const spine = composeCoworkerSpine({ projectRoot: root, coworkerType: 'probe' });
+    expect(spine).toContain('/workspace/agent/plans/');
+    // The path must NOT have been rewritten as if `/agent` were a workflow
+    // ref inside the middle of the path.
+    expect(spine).not.toContain('/workspacethe **agent** workflow section below');
+    expect(spine).not.toContain('workspacethe **agent**');
+  });
+});
+
 // --- Repo-state invariants (run against real repo) ---
 
 const REPO_ROOT = process.cwd();
