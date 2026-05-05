@@ -1,15 +1,23 @@
 #!/bin/bash
-# PreToolUse hook (matcher: Edit|Write|Bash): block source code edits until a
-# plan exists, require periodic critique, and detect file writes via Bash.
+# PreToolUse hook (matcher: Edit|Write|MultiEdit|NotebookEdit|mcp__.*): block
+# source code edits until a plan exists, require periodic critique, detect
+# file writes via Bash, and gate external-posting MCP tools (openWorldHint)
+# under the same plan/critique conditions.
 # Stdin: JSON with tool_name, tool_input.file_path or tool_input.command, etc.
 # Exit 0 = allow, exit 2 = deny (stderr shown to agent).
 set -euo pipefail
 
-STATE="/workspace/.claude/workflow-state.json"
-DENIAL_COUNT_FILE="/workspace/.claude/denial-counts.json"
+# Paths are overridable for testing. Container runs use the defaults.
+STATE="${WORKFLOW_STATE_FILE:-/workspace/.claude/workflow-state.json}"
+DENIAL_COUNT_FILE="${DENIAL_COUNT_FILE:-/workspace/.claude/denial-counts.json}"
 INPUT=$(cat)
 
 TOOL=$(echo "$INPUT" | jq -r '.tool_name // empty')
+
+# Track whether this invocation is for an MCP tool — used below to pick
+# between the "EXTERNAL POST BLOCKED" wording and the existing Edit/Write
+# copy. The plan/critique gate logic at the bottom is otherwise identical.
+IS_MCP_TOOL=false
 
 # --- Bash tool: heuristic write-pattern detection ---
 if [ "$TOOL" = "Bash" ]; then
@@ -24,6 +32,25 @@ if [ "$TOOL" = "Bash" ]; then
   fi
 
   [ "$IS_WRITE" = "false" ] && exit 0
+elif [[ "$TOOL" == mcp__* ]]; then
+  # --- MCP tool: gate only if listed in CRITIQUE_GATED_TOOLS ---
+  # PR-1 ships this matcher widened to `mcp__.*` so every MCP call hits
+  # this hook, but only tools whose host-side annotation says
+  # `openWorldHint: true` are actually enforced. Container-runner builds
+  # the list via resolveCritiqueGatedTools() and exports it as an env var.
+  GATED="${CRITIQUE_GATED_TOOLS:-}"
+  [ -z "$GATED" ] && exit 0
+
+  IS_GATED=false
+  IFS=',' read -ra GATED_ARR <<< "$GATED"
+  for t in "${GATED_ARR[@]}"; do
+    if [ "$t" = "$TOOL" ]; then IS_GATED=true; break; fi
+  done
+  [ "$IS_GATED" = "false" ] && exit 0
+
+  IS_MCP_TOOL=true
+  # Fall through to the shared plan/critique gate below. MCP tools don't
+  # have a `file_path`, so the Edit/Write allowlist is not applicable.
 else
   # --- Edit/Write tool: file path checks ---
   FILE=$(echo "$INPUT" | jq -r '.tool_input.file_path // empty')
@@ -73,7 +100,21 @@ if [ "$HAS_PLAN" = "1" ]; then
   # Plan gate: require a plan before any source edits
   if [ ! -f "$STATE" ] || [ "$(jq -r '.plan_written // false' "$STATE")" != "true" ]; then
     N=$(increment_denial "plan_required")
-    if [ "$N" -le 1 ]; then
+    if [ "$IS_MCP_TOOL" = "true" ]; then
+      if [ "$N" -le 1 ]; then
+        cat >&2 << DENIAL
+EXTERNAL POST BLOCKED: Plan required before posting to external systems.
+
+Tool: $TOOL
+HOW TO PROCEED:
+1. Write a plan to /workspace/agent/plans/<target-slug>.md first.
+2. Spawn codex-critique to review the plan (up to 3 rounds).
+3. Record verdict at plan top. Then retry the external post.
+DENIAL
+      else
+        echo "EXTERNAL POST BLOCKED ($TOOL): Plan required before posting. (Repeated denial #$N)" >&2
+      fi
+    elif [ "$N" -le 1 ]; then
       cat >&2 << 'DENIAL'
 PLAN REQUIRED: Write a plan before editing source code.
 
@@ -94,7 +135,9 @@ DENIAL
   if [ "$PLAN_STALE" = "true" ]; then
     EDITS=$(jq '.edits_since_plan // 0' "$STATE")
     N=$(increment_denial "plan_stale")
-    if [ "$N" -le 1 ]; then
+    if [ "$IS_MCP_TOOL" = "true" ]; then
+      echo "EXTERNAL POST BLOCKED ($TOOL): Plan stale — $EDITS edits since last plan. Refresh the plan in /workspace/agent/plans/ before posting. (denial #$N)" >&2
+    elif [ "$N" -le 1 ]; then
       echo "PLAN STALE: $EDITS edits since last plan. Write an updated plan to /workspace/agent/plans/ then continue. Send: mcp__nanoclaw__send_message('📝 Plan refresh — $EDITS edits.')" >&2
     else
       echo "PLAN STALE: Refresh your plan in /workspace/agent/plans/ before continuing. ($EDITS edits, denial #$N)" >&2
@@ -111,7 +154,23 @@ if [ "$CRIT_REQ" = "true" ]; then
   if [ "$ROUNDS" -le "$FLAGGED_AT" ]; then
     EDITS=$(jq '.edits_since_critique // 0' "$STATE")
     N=$(increment_denial "critique_required")
-    if [ "$N" -le 1 ]; then
+    if [ "$IS_MCP_TOOL" = "true" ]; then
+      if [ "$N" -le 1 ]; then
+        cat >&2 << DENIAL
+EXTERNAL POST BLOCKED: Critique required before posting to external systems.
+
+Tool: $TOOL
+$EDITS edits without review. Spawn codex-critique before posting.
+
+HOW TO PROCEED:
+1. Spawn codex-critique with: Problem, Changes, Thoughts.
+2. If must-fix → fix → re-spawn (up to 3 rounds). Escalate after 3.
+3. Once approved, retry the external post.
+DENIAL
+      else
+        echo "EXTERNAL POST BLOCKED ($TOOL): Spawn codex-critique before posting. ($EDITS edits, denial #$N)" >&2
+      fi
+    elif [ "$N" -le 1 ]; then
       cat >&2 << DENIAL
 CRITIQUE REQUIRED: $EDITS edits without review. Spawn codex-critique before further edits.
 

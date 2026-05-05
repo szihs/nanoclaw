@@ -40,7 +40,12 @@ import { getSession } from './db/sessions.js';
 import { initGroupFilesystem } from './group-init.js';
 import { stopTypingRefresh } from './modules/typing/index.js';
 import { log } from './log.js';
-import { registerContainerToken, revokeContainerToken, getDiscoveredToolInventory } from './mcp-auth-proxy.js';
+import {
+  registerContainerToken,
+  revokeContainerToken,
+  getDiscoveredToolInventory,
+  getDiscoveredToolAnnotations,
+} from './mcp-auth-proxy.js';
 import { validateAdditionalMounts } from './modules/mount-security/index.js';
 // Provider host-side config barrel — each provider that needs host-side
 // container setup self-registers on import.
@@ -271,6 +276,36 @@ export function resolveOverlayHookFlags(agentGroup: AgentGroup): { hasPlan: bool
   // applies when the coworker has implement-family workflows.
   const hasPlan = hasCritique && wfManifest.some((w) => w.name.includes('implement'));
   return { hasPlan, hasCritique };
+}
+
+/**
+ * For a given coworker, return the subset of its allowed MCP tools whose MCP
+ * annotations say `openWorldHint: true` — i.e. tools that interact with
+ * external systems (GitHub posting, Discord messaging, etc.). These tools
+ * should be gated by plan-gate.sh under the same conditions as Edit/Write,
+ * so external-facing side effects respect the critique gate.
+ *
+ * Empty when no tools are annotated yet (PR-1 ships as no-op until PR-2
+ * lands annotations on slang-mcp tools).
+ *
+ * Also empty when disable_overlays=1 (no gate, no need to gate anything).
+ *
+ * Exported for test access.
+ */
+export function resolveCritiqueGatedTools(agentGroup: AgentGroup): string[] {
+  const { hasPlan, hasCritique } = resolveOverlayHookFlags(agentGroup);
+  if (!hasPlan && !hasCritique) return [];
+
+  const allowed = resolveAllowedMcpTools(agentGroup);
+  if (allowed.length === 0) return [];
+
+  const annotations = getDiscoveredToolAnnotations();
+  const gated: string[] = [];
+  for (const tool of allowed) {
+    const anno = annotations[tool];
+    if (anno?.openWorldHint === true) gated.push(tool);
+  }
+  return gated;
 }
 
 export function resolveAllowedMcpTools(agentGroup: AgentGroup): string[] {
@@ -735,8 +770,14 @@ function buildMounts(
         // whenever either overlay is active (critique-only types still need
         // the blocking hook for critique_required enforcement).
         if (!hasCmd('PreToolUse', 'plan-gate.sh')) {
+          // Widened matcher includes `mcp__.*` so the hook can gate
+          // external-posting MCP tools (openWorldHint: true) under the
+          // same plan/critique conditions as Edit/Write. The script itself
+          // reads CRITIQUE_GATED_TOOLS and exits 0 for MCP tools that are
+          // not in the gated set, so this is a no-op until PR-2 lands
+          // annotations on slang-mcp tools.
           settings.hooks.PreToolUse.push({
-            matcher: 'Edit|Write|MultiEdit|NotebookEdit',
+            matcher: 'Edit|Write|MultiEdit|NotebookEdit|mcp__.*',
             hooks: [
               {
                 type: 'command',
@@ -757,8 +798,10 @@ function buildMounts(
         // critique-overlay protocol: blocks Edit/Write on source files until
         // the agent has recorded the verdict to /workspace/agent/critiques/.
         if (!hasCmd('PreToolUse', 'critique-record-gate.sh')) {
+          // Matcher widened alongside plan-gate.sh (see above) — the
+          // script itself decides what to do with non-Edit/Write tools.
           settings.hooks.PreToolUse.push({
-            matcher: 'Edit|Write|MultiEdit|NotebookEdit',
+            matcher: 'Edit|Write|MultiEdit|NotebookEdit|mcp__.*',
             hooks: [{ type: 'command', command: 'bash /app/hooks/critique-record-gate.sh', timeout: 5 }],
           });
         }
@@ -870,6 +913,18 @@ async function buildContainerArgs(
     }
   }
 
+  // CRITIQUE_GATED_TOOLS: comma-joined MCP tool names that plan-gate.sh should
+  // block under plan/critique conditions (openWorldHint: true tools that
+  // interact with external systems — GitHub posts, Discord messages, etc.).
+  // Empty until PR-2 lands openWorldHint annotations on slang-mcp tools, at
+  // which point the matcher widened above starts having visible effect.
+  {
+    const gated = resolveCritiqueGatedTools(agentGroup);
+    if (gated.length > 0) {
+      args.push('-e', `CRITIQUE_GATED_TOOLS=${gated.join(',')}`);
+    }
+  }
+
   // Model + API routing + SDK tuning — forward host .env vars so the Claude
   // SDK inside the container talks to the right endpoint with the right model.
   for (const key of [
@@ -966,8 +1021,12 @@ async function buildContainerArgs(
     const sharedCombinedPath = path.join('/tmp', 'onecli-combined-ca.pem');
     let savedCa: Buffer | null = null;
     let savedCombined: Buffer | null = null;
-    try { savedCa = fs.readFileSync(sharedCaPath); } catch {}
-    try { savedCombined = fs.readFileSync(sharedCombinedPath); } catch {}
+    try {
+      savedCa = fs.readFileSync(sharedCaPath);
+    } catch {}
+    try {
+      savedCombined = fs.readFileSync(sharedCombinedPath);
+    } catch {}
 
     const onecliApplied = await onecli.applyContainerConfig(args, { addHostMapping: false, agent: agentIdentifier });
     if (onecliApplied) {

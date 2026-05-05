@@ -25,8 +25,10 @@ vi.mock('./mcp-registry.js', () => ({
 
 import {
   clearDiscoveredTools,
+  getDiscoveredToolAnnotations,
   getDiscoveredToolInventory,
   getMcpManagementToken,
+  parseToolAnnotations,
   registerContainerToken,
   revokeContainerToken,
   setUpstreamPortResolver,
@@ -70,6 +72,170 @@ describe('discovered tool inventory', () => {
 
   it('clearDiscoveredTools for an unknown server is a no-op', () => {
     expect(() => clearDiscoveredTools('never-existed')).not.toThrow();
+  });
+});
+
+describe('parseToolAnnotations', () => {
+  it('returns null when annotations is absent', () => {
+    expect(parseToolAnnotations({})).toBeNull();
+    expect(parseToolAnnotations({ annotations: undefined })).toBeNull();
+  });
+
+  it('returns null when annotations is not an object', () => {
+    expect(parseToolAnnotations({ annotations: 'nope' })).toBeNull();
+    expect(parseToolAnnotations({ annotations: 42 })).toBeNull();
+  });
+
+  it('returns null when annotations object has no recognised fields', () => {
+    expect(parseToolAnnotations({ annotations: {} })).toBeNull();
+    expect(parseToolAnnotations({ annotations: { title: 'Send Message' } })).toBeNull();
+  });
+
+  it('captures only openWorldHint / readOnlyHint / destructiveHint', () => {
+    const result = parseToolAnnotations({
+      annotations: {
+        openWorldHint: true,
+        readOnlyHint: false,
+        destructiveHint: true,
+        title: 'ignored',
+        idempotentHint: true, // not in our allowlist
+      },
+    });
+    expect(result).toEqual({ openWorldHint: true, readOnlyHint: false, destructiveHint: true });
+  });
+
+  it('ignores non-boolean values for the recognised fields', () => {
+    expect(parseToolAnnotations({ annotations: { openWorldHint: 'true' } })).toBeNull();
+    expect(parseToolAnnotations({ annotations: { openWorldHint: 1 } })).toBeNull();
+  });
+
+  it('returns a partial object when only some fields are present', () => {
+    expect(parseToolAnnotations({ annotations: { openWorldHint: true } })).toEqual({
+      openWorldHint: true,
+    });
+  });
+});
+
+describe('getDiscoveredToolAnnotations', () => {
+  beforeEach(() => {
+    clearDiscoveredTools('deepwiki');
+    clearDiscoveredTools('slang-mcp');
+  });
+
+  it('returns an empty map when nothing has been discovered', () => {
+    expect(getDiscoveredToolAnnotations()).toEqual({});
+  });
+
+  it('flattens annotations captured via discoverTools with the mcp__<server>__<tool> prefix', async () => {
+    // The discovery path is exercised end-to-end here by stubbing http so we
+    // hit the real parse loop that writes into the cached annotations map.
+    const http = await import('http');
+    const { discoverTools } = await import('./mcp-auth-proxy.js');
+
+    const srv = http.createServer((req, res) => {
+      const chunks: Buffer[] = [];
+      req.on('data', (c: Buffer) => chunks.push(c));
+      req.on('end', () => {
+        const body = Buffer.concat(chunks).toString();
+        const parsed = JSON.parse(body);
+        if (parsed.method === 'initialize') {
+          res.writeHead(200, { 'Content-Type': 'application/json', 'Mcp-Session-Id': 'sid-1' });
+          res.end(JSON.stringify({ jsonrpc: '2.0', id: parsed.id, result: {} }));
+          return;
+        }
+        if (parsed.method === 'tools/list') {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(
+            JSON.stringify({
+              jsonrpc: '2.0',
+              id: parsed.id,
+              result: {
+                tools: [
+                  // No annotations → absent from map
+                  { name: 'ask_question' },
+                  // Empty annotations → absent from map
+                  { name: 'search', annotations: {} },
+                  // openWorldHint only
+                  { name: 'discord_send_message', annotations: { openWorldHint: true } },
+                  // Full set
+                  {
+                    name: 'github_post_issue_comment',
+                    annotations: {
+                      openWorldHint: true,
+                      readOnlyHint: false,
+                      destructiveHint: true,
+                    },
+                  },
+                ],
+              },
+            }),
+          );
+          return;
+        }
+        res.writeHead(400);
+        res.end();
+      });
+    });
+    await new Promise<void>((resolve) => srv.listen(0, '127.0.0.1', resolve));
+    const port = (srv.address() as { port: number }).port;
+
+    try {
+      await discoverTools('slang-mcp', port);
+      const annotations = getDiscoveredToolAnnotations();
+      expect(annotations).toEqual({
+        'mcp__slang-mcp__discord_send_message': { openWorldHint: true },
+        'mcp__slang-mcp__github_post_issue_comment': {
+          openWorldHint: true,
+          readOnlyHint: false,
+          destructiveHint: true,
+        },
+      });
+      // Tools without annotations should NOT appear in the map.
+      expect(annotations['mcp__slang-mcp__ask_question']).toBeUndefined();
+      expect(annotations['mcp__slang-mcp__search']).toBeUndefined();
+    } finally {
+      clearDiscoveredTools('slang-mcp');
+      await new Promise<void>((resolve) => srv.close(() => resolve()));
+    }
+  });
+
+  it('clearDiscoveredTools also clears the annotation cache for that server', async () => {
+    // Prime the cache via discoverTools again with a single annotated tool,
+    // then verify clearing removes it from getDiscoveredToolAnnotations too.
+    const http = await import('http');
+    const { discoverTools } = await import('./mcp-auth-proxy.js');
+
+    const srv = http.createServer((req, res) => {
+      const chunks: Buffer[] = [];
+      req.on('data', (c: Buffer) => chunks.push(c));
+      req.on('end', () => {
+        const parsed = JSON.parse(Buffer.concat(chunks).toString());
+        if (parsed.method === 'initialize') {
+          res.writeHead(200, { 'Mcp-Session-Id': 'sid' });
+          res.end(JSON.stringify({ jsonrpc: '2.0', id: parsed.id, result: {} }));
+          return;
+        }
+        res.writeHead(200);
+        res.end(
+          JSON.stringify({
+            jsonrpc: '2.0',
+            id: parsed.id,
+            result: { tools: [{ name: 'post', annotations: { openWorldHint: true } }] },
+          }),
+        );
+      });
+    });
+    await new Promise<void>((resolve) => srv.listen(0, '127.0.0.1', resolve));
+    const port = (srv.address() as { port: number }).port;
+
+    try {
+      await discoverTools('deepwiki', port);
+      expect(getDiscoveredToolAnnotations()['mcp__deepwiki__post']).toEqual({ openWorldHint: true });
+      clearDiscoveredTools('deepwiki');
+      expect(getDiscoveredToolAnnotations()['mcp__deepwiki__post']).toBeUndefined();
+    } finally {
+      await new Promise<void>((resolve) => srv.close(() => resolve()));
+    }
   });
 });
 
