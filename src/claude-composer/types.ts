@@ -184,6 +184,11 @@ export interface ComposeCoworkerSpineOptions {
   coworkerType: string;
   extraInstructions?: string | null;
   projectRoot?: string;
+  // When true, strip all overlays before rendering — no `## Gate Protocol`
+  // section, no inline `⟐ ... GATE` blocks inside workflow steps. Used when
+  // the per-coworker `agent_groups.disable_overlays` flag is 1. Workflows and
+  // skills are unaffected.
+  disableOverlays?: boolean;
 }
 
 export interface ComposeLegacyPromptOptions {

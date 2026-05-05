@@ -678,3 +678,46 @@ describe('R18: composing every non-abstract coworker type emits zero "Unknown sl
     expect(unknownSlash, `composer warnings:\n${unknownSlash.join('\n')}`).toEqual([]);
   });
 });
+
+describe('R19: disableOverlays option strips every overlay gate and the Gate Protocol section', () => {
+  // Honors per-coworker `agent_groups.disable_overlays` — when set, the composed
+  // CLAUDE.md must contain no `⟐ ... GATE` inline blocks and no trailing
+  // `## Gate Protocol` section. Workflow bodies and skills are unaffected.
+  it('compose with disableOverlays=true → zero gates, zero Gate Protocol; compose with false → gate renders', () => {
+    const root = makeTempProject();
+    writeSpineBase(root);
+    writeWorkflow(root, 'build', '# Build\n\n## Steps\n\n1. **Do** {#do} — thing.\n');
+    writeOverlay(root, 'guard', 'SENTINEL_GUARD_BODY', {
+      appliesToWorkflows: ['build'],
+      insertAfter: ['do'],
+    });
+    writeProjectType(
+      root,
+      [
+        'probe:',
+        '  extends: base-common',
+        '  description: "Probe."',
+        '  workflows: [build]',
+        '  overlays: [guard]',
+        '',
+      ].join('\n'),
+    );
+
+    // Baseline: overlays enabled — gate renders.
+    const withOverlays = composeCoworkerSpine({ projectRoot: root, coworkerType: 'probe' });
+    expect(withOverlays).toMatch(/⟐ GUARD GATE/);
+    expect(withOverlays).toContain('SENTINEL_GUARD_BODY');
+
+    // Flag on: no gate blocks, no Gate Protocol, and the overlay body is gone.
+    const withoutOverlays = composeCoworkerSpine({
+      projectRoot: root,
+      coworkerType: 'probe',
+      disableOverlays: true,
+    });
+    expect(withoutOverlays).not.toMatch(/⟐/);
+    expect(withoutOverlays).not.toMatch(/^## Gate Protocol$/m);
+    expect(withoutOverlays).not.toContain('SENTINEL_GUARD_BODY');
+    // Workflow body still there (flag only strips overlays, not workflows).
+    expect(withoutOverlays).toMatch(/^### \/build$/m);
+  });
+});
