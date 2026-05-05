@@ -61,8 +61,8 @@ gh issue comment <N> --repo shader-slang/<project> --body "BugSolver (instance: 
 
 1. Clone from **upstream** (always latest code):
    ```bash
-   git clone https://github.com/shader-slang/<project>.git /workspace/group/<project>
-   cd /workspace/group/<project>
+   git clone https://github.com/shader-slang/<project>.git /workspace/agent/<project>
+   cd /workspace/agent/<project>
    ```
 2. Add the fork as a push target:
    ```bash
@@ -330,7 +330,7 @@ Send brief progress updates via `mcp__nanoclaw__send_message` at each major step
 
 After completing work (either phase), save a summary to `memory/`:
 ```bash
-cat > /workspace/group/memory/issue-<N>-summary.md << 'EOF'
+cat > /workspace/agent/memory/issue-<N>-summary.md << 'EOF'
 # Issue #N: <title>
 ## Phase 1
 Root cause: ...
