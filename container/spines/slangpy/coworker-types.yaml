@@ -12,7 +12,6 @@ slangpy-common:
     - slangpy-code-reader
     - slangpy-github
     - deep-research
-    - codex-critique
   workflows: []
   overlays:
     - critique-overlay
