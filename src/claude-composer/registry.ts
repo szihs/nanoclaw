@@ -1,6 +1,17 @@
-// Discovery: read the distributed coworker-type registry and skill catalog
-// from container/skills/<skill>/. Alphabetical merge: later skills can extend
-// or override earlier ones.
+// Discovery: read the distributed coworker-type registry and skill catalog.
+//
+// Layout (post-refactor):
+//   container/skills/<name>/SKILL.md       — capability skills (runtime slash
+//                                              commands). May also contribute
+//                                              coworker-types.yaml additions.
+//   container/workflows/<name>/WORKFLOW.md — workflows (compose-time only;
+//                                              full body embedded into CLAUDE.md).
+//   container/overlays/<name>/OVERLAY.md   — overlays (compose-time only;
+//                                              body inlined at gate anchors).
+//   container/spines/<name>/coworker-types.yaml — spine/project coworker-type
+//                                                  definitions.
+//
+// Alphabetical merge per dir tree: later entries extend or override earlier.
 
 import fs from 'fs';
 import path from 'path';
@@ -9,25 +20,36 @@ import yaml from 'js-yaml';
 
 import type { CoworkerTypeEntry, OverlayMeta, SkillMeta } from './types.js';
 
+// Directories that may contribute coworker-type registrations. Capability
+// skill dirs can add type contributions (e.g. `dashboard-base` appends
+// `context:` to `main`). Spine dirs own the root types.
+const TYPE_SOURCE_DIRS = [
+  ['container', 'spines'],
+  ['container', 'skills'],
+] as const;
+
 export function readCoworkerTypes(projectRoot = process.cwd()): Record<string, CoworkerTypeEntry> {
   const registry: Record<string, CoworkerTypeEntry> = {};
-  const skillsDir = path.join(projectRoot, 'container', 'skills');
-  if (!fs.existsSync(skillsDir)) return registry;
 
-  let dirs: string[];
-  try {
-    dirs = fs.readdirSync(skillsDir).sort();
-  } catch {
-    return registry;
-  }
+  for (const parts of TYPE_SOURCE_DIRS) {
+    const rootDir = path.join(projectRoot, ...parts);
+    if (!fs.existsSync(rootDir)) continue;
 
-  for (const dir of dirs) {
-    const typesFile = path.join(skillsDir, dir, 'coworker-types.yaml');
-    if (!fs.existsSync(typesFile)) continue;
-    const loaded = yaml.load(fs.readFileSync(typesFile, 'utf-8'));
-    if (!loaded || typeof loaded !== 'object') continue;
-    for (const [name, entry] of Object.entries(loaded as Record<string, CoworkerTypeEntry>)) {
-      registry[name] = registry[name] ? mergeTypeEntries(registry[name], entry, name) : entry;
+    let dirs: string[];
+    try {
+      dirs = fs.readdirSync(rootDir).sort();
+    } catch {
+      continue;
+    }
+
+    for (const dir of dirs) {
+      const typesFile = path.join(rootDir, dir, 'coworker-types.yaml');
+      if (!fs.existsSync(typesFile)) continue;
+      const loaded = yaml.load(fs.readFileSync(typesFile, 'utf-8'));
+      if (!loaded || typeof loaded !== 'object') continue;
+      for (const [name, entry] of Object.entries(loaded as Record<string, CoworkerTypeEntry>)) {
+        registry[name] = registry[name] ? mergeTypeEntries(registry[name], entry, name) : entry;
+      }
     }
   }
 
@@ -36,16 +58,12 @@ export function readCoworkerTypes(projectRoot = process.cwd()): Record<string, C
 
 // Merge a later coworker-types.yaml contribution into an earlier one.
 //
-// Discovery order is alphabetical by skill directory. "Later" means "comes
-// later in the sorted list". Semantics:
+// Semantics:
 // - scalars (description, project, extends, flat, identity): leaf-wins when
 //   the later entry sets them; otherwise keep the earlier value
 // - arrays (invariants, context, workflows, skills, overlays): append in
 //   discovery order; dedup happens downstream in `resolveCoworkerManifest`
 // - bindings: shallow merge, later wins per trait key
-//
-// This lets an addon skill extend an existing type (e.g. dashboard-base
-// contributes `context:` to `main`) without owning it.
 function mergeTypeEntries(base: CoworkerTypeEntry, addon: CoworkerTypeEntry, typeName?: string): CoworkerTypeEntry {
   if (typeName && addon.bindings && base.bindings) {
     for (const key of Object.keys(addon.bindings)) {
@@ -72,32 +90,52 @@ function mergeTypeEntries(base: CoworkerTypeEntry, addon: CoworkerTypeEntry, typ
   };
 }
 
+// Each catalog source: directory + filename to scan + forced type.
+// The `forcedType` is the default; SKILL.md in container/skills/ still
+// respects `type:` in its frontmatter (for legacy overlay-typed skills,
+// though none should remain after the refactor).
+interface CatalogSource {
+  subdir: string[];
+  filename: string;
+  forcedType?: SkillMeta['type'];
+}
+
+const CATALOG_SOURCES: CatalogSource[] = [
+  { subdir: ['container', 'skills'], filename: 'SKILL.md' },
+  { subdir: ['container', 'workflows'], filename: 'WORKFLOW.md', forcedType: 'workflow' },
+  { subdir: ['container', 'overlays'], filename: 'OVERLAY.md', forcedType: 'overlay' },
+];
+
 export function readSkillCatalog(projectRoot = process.cwd()): Record<string, SkillMeta> {
   const catalog: Record<string, SkillMeta> = {};
-  const skillsDir = path.join(projectRoot, 'container', 'skills');
-  if (!fs.existsSync(skillsDir)) return catalog;
 
-  let dirs: string[];
-  try {
-    dirs = fs.readdirSync(skillsDir).sort();
-  } catch {
-    return catalog;
-  }
+  for (const source of CATALOG_SOURCES) {
+    const rootDir = path.join(projectRoot, ...source.subdir);
+    if (!fs.existsSync(rootDir)) continue;
 
-  for (const dir of dirs) {
-    const skillFile = path.join(skillsDir, dir, 'SKILL.md');
-    if (!fs.existsSync(skillFile)) continue;
-    const meta = parseSkillMeta(skillFile);
-    if (!meta) continue;
-    if (catalog[meta.name]) {
-      throw new Error(`Duplicate skill name "${meta.name}" at ${skillFile} (also at ${catalog[meta.name].path})`);
+    let dirs: string[];
+    try {
+      dirs = fs.readdirSync(rootDir).sort();
+    } catch {
+      continue;
     }
-    catalog[meta.name] = meta;
+
+    for (const dir of dirs) {
+      const filePath = path.join(rootDir, dir, source.filename);
+      if (!fs.existsSync(filePath)) continue;
+      const meta = parseSkillMeta(filePath, source.forcedType);
+      if (!meta) continue;
+      if (catalog[meta.name]) {
+        throw new Error(`Duplicate skill name "${meta.name}" at ${filePath} (also at ${catalog[meta.name].path})`);
+      }
+      catalog[meta.name] = meta;
+    }
   }
+
   return catalog;
 }
 
-function parseSkillMeta(filePath: string): SkillMeta | null {
+function parseSkillMeta(filePath: string, forcedType?: SkillMeta['type']): SkillMeta | null {
   const text = fs.readFileSync(filePath, 'utf-8');
   const match = text.match(/^---\r?\n([\s\S]*?)\r?\n---/);
   if (!match) return null;
@@ -106,8 +144,9 @@ function parseSkillMeta(filePath: string): SkillMeta | null {
   const fm = raw as Record<string, unknown>;
   const name = typeof fm.name === 'string' ? fm.name.trim() : '';
   if (!name) return null;
-  const type: SkillMeta['type'] =
+  const declaredType: SkillMeta['type'] =
     fm.type === 'workflow' ? 'workflow' : fm.type === 'overlay' ? 'overlay' : 'capability';
+  const type: SkillMeta['type'] = forcedType ?? declaredType;
   const description = typeof fm.description === 'string' ? fm.description.trim() : '';
   const allowedTools = extractAllowedTools(fm['allowed-tools']);
   const usesRaw = fm.uses && typeof fm.uses === 'object' ? (fm.uses as Record<string, unknown>) : {};
@@ -128,10 +167,41 @@ function parseSkillMeta(filePath: string): SkillMeta | null {
   }
 
   const steps: string[] = [];
+  const stepBodies: Record<string, string> = {};
   if (type === 'workflow') {
     const body = text.slice(match[0].length);
-    for (const m of body.matchAll(/\{#([a-z0-9-]+)\}/g)) {
+    // Capture step ids in order.
+    const stepRe = /\{#([a-z0-9-]+)\}/g;
+    const positions: { id: string; index: number }[] = [];
+    for (const m of body.matchAll(stepRe)) {
       steps.push(m[1]);
+      positions.push({ id: m[1], index: m.index ?? 0 });
+    }
+    // Extract per-step body: from the step's list-item start (back up to the
+    // start of the numbered bullet line) until the next step's bullet start.
+    // Pattern: "  1. **Name** {#id} — body...\n...\n\n2. **Next**..." — so we
+    // walk from each {#id} backward to the nearest "^N. " or "N) " or bullet
+    // on the line, then forward until just before the next such anchor.
+    for (let i = 0; i < positions.length; i++) {
+      const cur = positions[i];
+      // Back up to the start of the line containing this marker.
+      let startLine = body.lastIndexOf('\n', cur.index);
+      startLine = startLine === -1 ? 0 : startLine + 1;
+      // End: just before the next step's line start, or EOF.
+      let endLine: number;
+      if (i + 1 < positions.length) {
+        const next = positions[i + 1];
+        let nl = body.lastIndexOf('\n', next.index);
+        nl = nl === -1 ? 0 : nl + 1;
+        // Trim trailing blank lines between current step body and next step.
+        endLine = nl;
+      } else {
+        // Last step: run until the next `## ` heading (e.g. Resumability) or EOF.
+        const tail = body.slice(cur.index);
+        const headingMatch = tail.match(/\n## /);
+        endLine = headingMatch ? cur.index + (headingMatch.index ?? 0) : body.length;
+      }
+      stepBodies[cur.id] = body.slice(startLine, endLine).trim();
     }
   }
 
@@ -160,6 +230,7 @@ function parseSkillMeta(filePath: string): SkillMeta | null {
     path: filePath,
     provides,
     steps,
+    stepBodies,
     requires,
     extendsWorkflow,
     overrides,

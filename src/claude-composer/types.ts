@@ -73,7 +73,8 @@ export interface CoworkerTypeEntry {
   invariants?: string[];
   context?: string[];
 
-  // Skill catalog references (SKILL.md `name` values under container/skills/).
+  // Catalog references by `name`. Workflows live under container/workflows/,
+  // capability skills under container/skills/. See registry.ts.
   workflows?: string[];
   skills?: string[];
 
@@ -129,6 +130,10 @@ export interface SkillMeta {
   // Workflow inheritance — this workflow extends another workflow;
   // step-level `overrides` replace the body under the matching step id.
   steps: string[];
+  // Per-step prose body keyed by step id. Extracted from the workflow markdown
+  // between one `{#step-id}` anchor and the next. Used to embed full workflow
+  // content into CLAUDE.md at compose time (no runtime slash-command loading).
+  stepBodies: Record<string, string>;
   extendsWorkflow?: string;
   overrides: Record<string, string>;
 
@@ -152,7 +157,14 @@ export interface CoworkerManifest {
   identity: string;
   invariants: string[];
   context: string[];
-  workflows: { name: string; description: string; uses: string[]; requires: string[]; steps: string[] }[];
+  workflows: {
+    name: string;
+    description: string;
+    uses: string[];
+    requires: string[];
+    steps: string[];
+    stepBodies: Record<string, string>;
+  }[];
   skills: { name: string; description: string; provides: string[] }[];
   tools: string[];
 
