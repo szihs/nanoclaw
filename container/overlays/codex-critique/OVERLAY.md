@@ -30,7 +30,7 @@ Because of layer 3, codex sees only what you give it via `prompt` + `developer-i
 1. The **original user task / spec** (only lives in your transcript — codex can't pull it from disk).
 2. The **stage** + **specific questions** to answer at this gate.
 
-Everything else (the plan, the diff, source code, invariants, reports, project conventions) — give codex paths and let it `Read` them itself. The whole `/workspace/agent` tree is mounted read-only into codex's process, including the project source, `plans/`, `reports/`, `critiques/`, `corvk/AGENTS.md`, etc.
+Everything else (the plan, the diff, source code, invariants, reports, project conventions) — give codex paths and let it `Read` them itself. The whole `/workspace/agent` tree is mounted read-only into codex's process, including the project source, `plans/`, `reports/`, `critiques/`, project invariants files, etc.
 
 ## Steps
 
@@ -40,7 +40,7 @@ Everything else (the plan, the diff, source code, invariants, reports, project c
    - `prompt`: the structured prompt below — describes WHAT to verify with paths, not full file contents.
    - `sandbox`: `"danger-full-access"` — Docker container is the sandbox; bwrap does not work inside Docker. Read-only enforcement comes from `disallowedTools` on the parent agent.
    - `developer-instructions`: see the template below — establishes role, output format, and the first-principles directive (telling codex it has filesystem access and should use it).
-   - `cwd`: `"/workspace/agent"` — the workspace root. Codex can navigate to `corvk/`, `holohub/`, `plans/`, `reports/`, etc. from here.
+   - `cwd`: `"/workspace/agent"` — the workspace root. Codex can navigate to the project tree, `plans/`, `reports/`, etc. from here.
 
 3. **Capture the `threadId`** from the response. Save it for round 2/3 follow-ups via `mcp__codex__codex-reply`.
 
@@ -68,9 +68,9 @@ REVIEW THESE FILES (read them yourself — full contents are at these paths):
 <for OUTPUT_REVIEW: <path-to-deliverable>>
 
 PROJECT INVARIANTS — read these from disk (do not assume from training data):
-- corvk/AGENTS.md  (the project's non-negotiable invariants)
-- corvk/PLAN.md  (current project plan)
-- Any *.md under corvk/invariants/ if present
+- <project>/AGENTS.md or CLAUDE.md  (the project's non-negotiable invariants)
+- <project>/PLAN.md or docs/PLAN.md  (current project plan, if any)
+- Any *.md under <project>/invariants/ or docs/invariants/ if present
 
 ALSO INSPECT (cross-reference for verification):
 - The actual source files referenced in the artifact (use Read/Grep)
