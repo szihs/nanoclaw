@@ -1,5 +1,6 @@
 ---
 name: nanoclaw-build
+license: MIT
 description: "Clone, build, and test NanoClaw. Use when the repo needs setup, a rebuild, or when tests fail."
 provides: [code.build, test.run, test.gen, ci.inspect]
 allowed-tools: Bash(git:*), Bash(pnpm:*), Bash(npm:*), Bash(bun:*), Bash(vitest:*), Read, Grep, Glob

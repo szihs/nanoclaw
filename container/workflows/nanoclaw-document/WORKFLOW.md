@@ -1,5 +1,6 @@
 ---
 name: nanoclaw-document
+license: MIT
 type: workflow
 description: "Update NanoClaw documentation after a change or for a doc gap."
 extends: document

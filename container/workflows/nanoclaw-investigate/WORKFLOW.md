@@ -1,5 +1,6 @@
 ---
 name: nanoclaw-investigate
+license: MIT
 type: workflow
 description: "Investigate a NanoClaw issue. Specialized steps for the NanoClaw codebase."
 extends: investigate

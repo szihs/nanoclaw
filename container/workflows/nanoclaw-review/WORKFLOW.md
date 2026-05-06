@@ -1,5 +1,6 @@
 ---
 name: nanoclaw-review
+license: MIT
 type: workflow
 description: "Review a NanoClaw change against project conventions."
 extends: review

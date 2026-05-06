@@ -1,5 +1,6 @@
 ---
 name: nanoclaw-implement
+license: MIT
 type: workflow
 description: "Implement a fix or feature in NanoClaw. Specialized build/test/format steps."
 extends: implement

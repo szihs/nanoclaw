@@ -1,5 +1,6 @@
 ---
 name: nanoclaw-code-reader
+license: MIT
 description: "Read-only investigation of the NanoClaw codebase. Navigate source, trace call paths, understand architecture."
 provides: [code.read, doc.read]
 allowed-tools: Bash, Read, Grep, Glob, mcp__deepwiki__ask_question
