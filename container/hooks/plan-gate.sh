@@ -92,6 +92,34 @@ increment_denial() {
   echo "$NEW_COUNT"
 }
 
+# --- MCP-only rule: require ≥1 codex-critique in the current task ---
+#
+# critique_rounds is reset to 0 by workflow-state-reset.sh on each new task
+# (router envelope, workflow invocation, idle >10min). Requiring at least
+# one round before any external post prevents the "post → critique →
+# post addendum" pattern observed on shader-slang/slang#11037, where the
+# agent published the triage report before any review had happened and
+# then had to append a corrections comment when codex-critique flagged
+# must-fix items. Stricter than the shared plan_required/critique_required
+# checks below — those only trigger after N edits, which this path bypasses.
+if [ "$IS_MCP_TOOL" = "true" ]; then
+  ROUNDS=$(jq -r '.critique_rounds // 0' "$STATE" 2>/dev/null || echo 0)
+  if [ "$ROUNDS" -lt 1 ]; then
+    N=$(increment_denial "post_before_critique")
+    if [ "$N" -le 1 ]; then
+      cat >&2 << DENIAL
+EXTERNAL POST BLOCKED ($TOOL): No codex-critique has run in this task.
+
+Run /codex-critique on the deliverable (plan / report / draft) before
+posting externally, then retry. Prevents post-then-addendum patterns.
+DENIAL
+    else
+      echo "EXTERNAL POST BLOCKED ($TOOL): Run codex-critique before the first external post in this task. (denial #$N)" >&2
+    fi
+    exit 2
+  fi
+fi
+
 # --- Shared enforcement checks ---
 
 HAS_PLAN="${OVERLAY_HAS_PLAN:-1}"
