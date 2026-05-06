@@ -1,5 +1,6 @@
 ---
 name: critique-overlay
+license: MIT
 type: overlay
 description: "Stage-aware critique gates across all workflows. Spawns codex-critique with a different ROLE at each gate: PLAN_REVIEW before coding, DIAGNOSIS_REVIEW after investigation, CODE_REVIEW after patch, OUTPUT_REVIEW after docs/review. Same agent, different hard questions."
 applies-to:

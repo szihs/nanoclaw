@@ -1,5 +1,6 @@
 ---
 name: welcome
+license: MIT
 description: Introduce yourself to a newly connected channel. Triggered automatically when a channel is first wired. Send a friendly greeting and brief overview of what you can do.
 ---
 

@@ -1,5 +1,6 @@
 ---
 name: codex-critique
+license: MIT
 description: "Independent second-opinion review by an external Codex (gpt-5.5) reviewer. Direct skill — you (the parent agent) call mcp__codex__codex yourself; there is no Sonnet subagent in the middle. Read-only — produces a structured critique, never modifies files. Trigger after a patch, plan, investigation, or draft. Keywords: critique, review, second opinion, codex."
 provides: [critique.review]
 allowed-tools: Read, Grep, Glob, Bash(git diff:*), mcp__codex__codex, mcp__codex__codex-reply

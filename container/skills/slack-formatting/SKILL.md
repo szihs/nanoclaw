@@ -1,5 +1,6 @@
 ---
 name: slack-formatting
+license: MIT
 description: Format messages for Slack using mrkdwn syntax. Use when responding to Slack channels (folder starts with "slack_" or JID contains slack identifiers).
 ---
 
