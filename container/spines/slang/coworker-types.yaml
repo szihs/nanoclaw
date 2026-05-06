@@ -11,8 +11,6 @@ slang-common:
     - slang-build
     - slang-code-reader
     - slang-github
-    - slang-maintain-release-report
-    - deep-research
   workflows: []
   overlays:
     - critique-overlay
@@ -27,30 +25,35 @@ slang-common:
     code: slang-code-reader
     doc: slang-code-reader
     test: slang-build
-    plan: deep-research
     critique: codex-critique
 
 slang-reader:
-  description: "Read-only Slang coworker — investigate issues, review PRs, research codebase. Cannot edit code or create PRs."
+  description: "Read-only Slang coworker — plan, investigate, review, research. Cannot edit code or create PRs."
   project: slang
   extends: slang-common
   workflows:
-    - slang-investigate
-    - slang-review
+    - plan
 
 slang-writer:
-  description: "Write-capable Slang coworker — investigate, implement, review, document. Can edit code, write tests, create PRs."
+  description: "Write-capable Slang coworker — plan + implement. Can edit code, write tests, create PRs."
   project: slang
   extends: slang-common
   skills:
     - slang-code-writer
     - slang-docs
   workflows:
-    - slang-investigate
+    - plan
     - slang-implement
-    - slang-review
-    - slang-document
   bindings:
     code: slang-code-writer
     test: slang-build
     doc: slang-docs
+
+slang-maintainer:
+  description: "Read-only Slang maintainer — recurring sweeps via /slang-maintain (daily report, release notes, issue prioritization, Slack review). No code changes."
+  project: slang
+  extends: slang-reader
+  skills:
+    - slang-maintainer-tools
+  workflows:
+    - slang-maintain
