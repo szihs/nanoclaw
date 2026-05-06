@@ -2,15 +2,14 @@
 name: implement
 license: MIT
 type: workflow
-description: Turn an investigated issue or spec into code — reproduce, fix, write tests, and submit a PR. Use after investigation confirms the problem, or when given a clear spec. Covers bug fixes, features, and test authoring.
+description: "Execute a plan — make the file change, verify, ship. Use after /plan. Every cycle produces a tested, committed change."
 requires: [code.read, code.edit, test.run, test.gen, repo.pr]
 uses:
   skills: []
-  workflows: [investigate]
+  workflows: [plan]
 params:
-  target: { type: string, required: true, description: "Issue, spec, or investigation report reference." }
-  repo: { type: string, required: true }
-  branch: { type: string, required: false, description: "Branch name; auto-generated if omitted." }
+  target: { type: string, required: true }
+  branch: { type: string, required: false }
 produces:
   - implementation_log: { path: "/workspace/agent/fixes/{{target_slug}}.md" }
   - patch: { path: "git commit on {{branch}}" }
@@ -18,39 +17,19 @@ produces:
 
 # Implement
 
-Reproduce, fix, test, and ship. One branch, one PR.
+Execute a plan. Diagnosis lives in `/plan`; this workflow is pure execution.
 
 ## Invariants
 
-- Always reproduce before patching. No fix without evidence the problem exists.
-- Always add or update tests. No code change ships without a regression guard.
-- Run the full test suite before declaring ready. Partial runs are not sufficient.
-- Do not widen scope. Fix what was asked; surface observations for separate work.
-- Format and lint before committing.
+- Plan first. If non-trivial and no plan exists, run `/plan`. If the plan is stale or wrong, go back to `/plan` — don't re-diagnose here.
+- Evidence first. For bug fixes, write a failing test before the fix.
+- Keep scope narrow. Surface unrelated observations in the log, don't act on them.
+- Tests, format, and lint must pass before ship.
 
 ## Steps
 
-1. **Load context** {#load-context} — read the investigation report for `{{target}}`. If none exists, run `/investigate {{target}}` first. Extract: root cause, affected files, reproduction steps.
-
-2. **Reproduce** {#reproduce} — create a minimal reproduction that demonstrates the problem. For bugs: a failing test case. For features: a skeleton that shows the gap. Commit the reproduction separately so CI shows the delta.
-
-3. **Root-cause** {#root-cause} — trace from the reproduction to the exact code path. Document: file, line, mechanism. If the root cause differs from the investigation's hypothesis, update the report.
-
-4. **Patch** {#patch} — implement the minimum change that fixes the root cause or delivers the spec. Stay inside one subsystem. Follow existing code style.
-
-5. **Test** {#test} — write or update tests that cover:
-   - The specific fix (regression guard).
-   - Edge cases surfaced during investigation.
-   - Do NOT modify existing passing tests unless they test wrong behavior.
-
-6. **Validate** {#validate} — run the full project test suite + format/lint/typecheck. All must pass. If updating an existing PR, address all review feedback before re-running.
-
-7. **Commit & PR** {#commit} — descriptive commit message linking the issue. Push the branch. Create or update the PR with:
-   - Summary of what changed and why.
-   - Link to the issue.
-   - Test plan.
-
-## Resumability
-
-- `{{implementation_log.path}}` tracks progress. Each step appends its outcome.
-- If the session ends mid-work, the log records what's done, what's pending, and any blockers.
+1. **Setup** — load the plan from `/workspace/agent/reports/{{target_slug}}.md`. Branch off and extract the file list + verification plan.
+2. **Reproduce** {#reproduce} — for bug fixes: write a failing test that demonstrates the issue. For features: start with a skeleton that shows the gap. Commit separately so CI shows the delta.
+3. **Change** {#change} — make the minimum edit that matches the plan. Stay in one subsystem. Follow existing style. For doc-only changes, edit existing files before creating new.
+4. **Verify** {#verify} — full test suite + format + lint + typecheck. If updating a PR, address review feedback before re-running.
+5. **Ship** — descriptive commit linking the issue, push branch, open or update PR with summary + test plan.

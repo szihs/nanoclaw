@@ -57,7 +57,7 @@ const learningTools: McpToolDefinition[] = [
         content: [
           {
             type: 'text' as const,
-            text: `Learning "${title}" submitted. It will appear in /workspace/global/learnings/ for all agents.`,
+            text: `Learning "${title}" submitted. It will appear in /workspace/shared/learnings/ for all agents.`,
           },
         ],
       };

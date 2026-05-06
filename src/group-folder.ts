@@ -3,15 +3,32 @@ import path from 'path';
 import { DATA_DIR, GROUPS_DIR } from './config.js';
 
 const GROUP_FOLDER_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
-const RESERVED_FOLDERS = new Set(['global']);
 
-export function isValidGroupFolder(folder: string): boolean {
+// Always reserved — these collide with system paths (groups/templates/ is
+// the lego template tree; global is the retired flat type; shared is the
+// data/shared/ mount namespace that must not also exist as a group dir).
+const RESERVED_FOLDERS = new Set(['global', 'shared', 'templates']);
+
+// Reserved only for non-admin groups. 'main' is the legitimate folder name
+// for the single admin coworker, so `isValidGroupFolder('main', { adminSetup: true })`
+// is allowed. Everywhere else, creating a user-facing folder called 'main'
+// would collide with the admin orchestrator.
+const ADMIN_ONLY_FOLDERS = new Set(['main']);
+
+export interface GroupFolderValidationOptions {
+  /** True when called during admin setup — allows 'main' as the folder name. */
+  adminSetup?: boolean;
+}
+
+export function isValidGroupFolder(folder: string, opts: GroupFolderValidationOptions = {}): boolean {
   if (!folder) return false;
   if (folder !== folder.trim()) return false;
   if (!GROUP_FOLDER_PATTERN.test(folder)) return false;
   if (folder.includes('/') || folder.includes('\\')) return false;
   if (folder.includes('..')) return false;
-  if (RESERVED_FOLDERS.has(folder.toLowerCase())) return false;
+  const lower = folder.toLowerCase();
+  if (RESERVED_FOLDERS.has(lower)) return false;
+  if (ADMIN_ONLY_FOLDERS.has(lower) && !opts.adminSetup) return false;
   return true;
 }
 

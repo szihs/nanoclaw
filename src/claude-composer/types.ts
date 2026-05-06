@@ -62,6 +62,12 @@ export interface CoworkerTypeEntry {
   project?: string;
   description?: string;
 
+  // Display title used as the `# ${title}` heading at the top of the
+  // composed CLAUDE.md. When omitted, the composer humanizes the type
+  // name (e.g. "slang-writer" → "Slang Writer"). Set explicitly when
+  // the humanized type name reads poorly (e.g. "default" → "Coworker").
+  title?: string;
+
   // Flat rendering mode: emit identity + context bodies verbatim with `---`
   // separators, no `## Identity` / `## Invariants` wrappers, no auto-generated
   // title. Used for main/global where the upstream body is a single prose
@@ -192,7 +198,7 @@ export interface ComposeCoworkerSpineOptions {
 }
 
 export interface ComposeLegacyPromptOptions {
-  manifestName: 'main' | 'global' | 'coworker';
+  manifestName: 'main' | 'coworker';
   coworkerType?: string | null;
   extraInstructions?: string | null;
   projectRoot?: string;

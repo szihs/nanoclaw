@@ -18,6 +18,7 @@ import {
 import { enforceStartupBackoff, resetCircuitBreaker } from './circuit-breaker.js';
 import { initDb, getDb } from './db/connection.js';
 import { runMigrations } from './db/migrations/index.js';
+import { runGlobalToSharedMigration } from './migrations/global-to-shared.js';
 import { getMessagingGroupsByChannel, getMessagingGroupAgents } from './db/messaging-groups.js';
 import { ensureContainerRuntimeRunning, cleanupOrphans } from './container-runtime.js';
 import { startActiveDeliveryPoll, startSweepDeliveryPoll, setDeliveryAdapter, stopDeliveryPolls } from './delivery.js';
@@ -107,6 +108,8 @@ async function main(): Promise<void> {
     }
   }
   fs.mkdirSync(DATA_DIR, { recursive: true });
+  fs.mkdirSync(path.join(DATA_DIR, 'shared', 'learnings'), { recursive: true });
+
   fs.writeFileSync(pidfilePath, String(process.pid));
   const cleanPidfile = () => {
     try {
@@ -135,6 +138,16 @@ async function main(): Promise<void> {
   const db = initDb(dbPath);
   runMigrations(db);
   log.info('Central DB ready', { path: dbPath });
+
+  // 1b. One-time filesystem+DB migration: demote groups/global/ to
+  // data/shared/. Idempotent via marker file. Must run AFTER schema
+  // migrations — it UPDATEs/DELETEs rows in agent_groups, so the
+  // table has to exist and be on the latest schema.
+  try {
+    runGlobalToSharedMigration(process.cwd());
+  } catch (err) {
+    log.warn('global-to-shared migration threw', { err: String(err) });
+  }
 
   // 2. Container runtime
   ensureContainerRuntimeRunning();

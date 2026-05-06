@@ -48,10 +48,7 @@ function write(file: string, contents: string): void {
 }
 
 function writeSpineBase(root: string): void {
-  write(
-    path.join(root, 'container', 'spines', 'base', 'invariants', 'safety.md'),
-    '- Do not ship broken code.',
-  );
+  write(path.join(root, 'container', 'spines', 'base', 'invariants', 'safety.md'), '- Do not ship broken code.');
   write(
     path.join(root, 'container', 'spines', 'base', 'coworker-types.yaml'),
     [
@@ -86,12 +83,7 @@ function writeWorkflow(
     '  workflows: []',
     ...(frontmatter.extends ? [`extends: ${frontmatter.extends}`] : []),
     ...(frontmatter.overrides
-      ? [
-          'overrides:',
-          ...Object.entries(frontmatter.overrides).map(
-            ([id, text]) => `  ${id}: ${JSON.stringify(text)}`,
-          ),
-        ]
+      ? ['overrides:', ...Object.entries(frontmatter.overrides).map(([id, text]) => `  ${id}: ${JSON.stringify(text)}`)]
       : []),
     '---',
     '',
@@ -167,10 +159,7 @@ describe('R01: composed CLAUDE.md contains full workflow step body', () => {
         '',
       ].join('\n'),
     );
-    writeProjectType(
-      root,
-      'probe:\n  extends: base-common\n  description: "Probe."\n  workflows: [triage]\n',
-    );
+    writeProjectType(root, 'probe:\n  extends: base-common\n  description: "Probe."\n  workflows: [triage]\n');
     const spine = composeCoworkerSpine({ projectRoot: root, coworkerType: 'probe' });
     expect(spine).toContain('DISTINCTIVE_INGEST_PHRASE');
     expect(spine).toContain('DISTINCTIVE_CLASSIFY_PHRASE');
@@ -225,10 +214,7 @@ describe('R03: extends + overrides replace parent step body', () => {
       extends: 'parent-flow',
       overrides: { patch: 'CHILD_PATCH_OVERRIDE.' },
     });
-    writeProjectType(
-      root,
-      'probe:\n  extends: base-common\n  description: "Probe."\n  workflows: [child-flow]\n',
-    );
+    writeProjectType(root, 'probe:\n  extends: base-common\n  description: "Probe."\n  workflows: [child-flow]\n');
     const spine = composeCoworkerSpine({ projectRoot: root, coworkerType: 'probe' });
     expect(spine).toContain('PARENT_REPRODUCE_BODY');
     expect(spine).toContain('CHILD_PATCH_OVERRIDE');
@@ -241,10 +227,7 @@ describe('R07: rebuild idempotency', () => {
     const root = makeTempProject();
     writeSpineBase(root);
     writeWorkflow(root, 'flow', '# F\n\n## Steps\n\n1. **A** {#a} — hi.');
-    writeProjectType(
-      root,
-      'probe:\n  extends: base-common\n  description: "Probe."\n  workflows: [flow]\n',
-    );
+    writeProjectType(root, 'probe:\n  extends: base-common\n  description: "Probe."\n  workflows: [flow]\n');
     const a = composeCoworkerSpine({ projectRoot: root, coworkerType: 'probe' });
     const b = composeCoworkerSpine({ projectRoot: root, coworkerType: 'probe' });
     expect(a).toBe(b);
@@ -256,12 +239,10 @@ describe('R08: overlay body headings demoted below gate header', () => {
     const root = makeTempProject();
     writeSpineBase(root);
     writeWorkflow(root, 'flow', '# F\n\n## Steps\n\n1. **A** {#a} — hi.');
-    writeOverlay(
-      root,
-      'guard',
-      ['BODY_PREAMBLE.', '', '## Subheading One', '', 'Subheading body.'].join('\n'),
-      { appliesToWorkflows: ['flow'], insertAfter: ['a'] },
-    );
+    writeOverlay(root, 'guard', ['BODY_PREAMBLE.', '', '## Subheading One', '', 'Subheading body.'].join('\n'), {
+      appliesToWorkflows: ['flow'],
+      insertAfter: ['a'],
+    });
     writeProjectType(
       root,
       [
@@ -412,10 +393,7 @@ describe('R12: backticked slash refs in bodies are rewritten by kind', () => {
         '```',
       ].join('\n'),
     );
-    writeProjectType(
-      root,
-      'probe:\n  extends: base-common\n  description: "Probe."\n  workflows: [alpha]\n',
-    );
+    writeProjectType(root, 'probe:\n  extends: base-common\n  description: "Probe."\n  workflows: [alpha]\n');
     const spine = composeCoworkerSpine({ projectRoot: root, coworkerType: 'probe' });
     expect(spine).toContain('/workspace/agent/plans');
   });
@@ -436,10 +414,7 @@ describe('R13: unresolved template placeholders rewritten to angle-bracket form'
         '1. **Ingest** {#ingest} — read {{target}} and open {{report.path}} (slug {{target_slug}}).',
       ].join('\n'),
     );
-    writeProjectType(
-      root,
-      'probe:\n  extends: base-common\n  description: "Probe."\n  workflows: [research]\n',
-    );
+    writeProjectType(root, 'probe:\n  extends: base-common\n  description: "Probe."\n  workflows: [research]\n');
     const spine = composeCoworkerSpine({ projectRoot: root, coworkerType: 'probe' });
     expect(spine).toContain('<target>');
     expect(spine).toContain('<report.path>');
@@ -470,10 +445,7 @@ describe('R14: placeholders inside fenced code blocks are left untouched', () =>
         '```',
       ].join('\n'),
     );
-    writeProjectType(
-      root,
-      'probe:\n  extends: base-common\n  description: "Probe."\n  workflows: [flow]\n',
-    );
+    writeProjectType(root, 'probe:\n  extends: base-common\n  description: "Probe."\n  workflows: [flow]\n');
     const spine = composeCoworkerSpine({ projectRoot: root, coworkerType: 'probe' });
     expect(spine).toContain('{{NOT_A_TEMPLATE}}');
     expect(spine).not.toContain('<NOT_A_TEMPLATE>');
@@ -487,19 +459,12 @@ describe('R15: unbackticked /workflow refs in prose are rewritten to section poi
     writeWorkflow(
       root,
       'entry',
-      [
-        '# Entry',
-        '',
-        '## Steps',
-        '',
-        '1. **Do** {#do} — Use /alpha workflow for navigation, then continue.',
-      ].join('\n'),
+      ['# Entry', '', '## Steps', '', '1. **Do** {#do} — Use /alpha workflow for navigation, then continue.'].join(
+        '\n',
+      ),
     );
     writeWorkflow(root, 'alpha', '# Alpha\n\n## Steps\n\n1. **A** {#a} — x.');
-    writeProjectType(
-      root,
-      'probe:\n  extends: base-common\n  description: "Probe."\n  workflows: [entry, alpha]\n',
-    );
+    writeProjectType(root, 'probe:\n  extends: base-common\n  description: "Probe."\n  workflows: [entry, alpha]\n');
     const spine = composeCoworkerSpine({ projectRoot: root, coworkerType: 'probe' });
     expect(spine).toContain('Use the **alpha** workflow section below');
     expect(spine).not.toMatch(/\sUse \/alpha workflow/);
@@ -513,13 +478,7 @@ describe('R16: unbackticked /skill refs (capability skills) are left literal', (
     writeWorkflow(
       root,
       'entry',
-      [
-        '# Entry',
-        '',
-        '## Steps',
-        '',
-        '1. **Do** {#do} — Run /gamma-skill to handle the probe.',
-      ].join('\n'),
+      ['# Entry', '', '## Steps', '', '1. **Do** {#do} — Run /gamma-skill to handle the probe.'].join('\n'),
     );
     writeCapabilitySkill(root, 'gamma-skill', 'Do gamma.');
     writeProjectType(
@@ -549,19 +508,10 @@ describe('R17: path-like /foo/bar refs in prose are untouched', () => {
     writeWorkflow(
       root,
       'flow',
-      [
-        '# F',
-        '',
-        '## Steps',
-        '',
-        '1. **Do** {#do} — outputs land in /workspace/agent/plans/ before exit.',
-      ].join('\n'),
+      ['# F', '', '## Steps', '', '1. **Do** {#do} — outputs land in /workspace/agent/plans/ before exit.'].join('\n'),
     );
     writeWorkflow(root, 'agent', '# Agent\n\n## Steps\n\n1. **A** {#a} — x.');
-    writeProjectType(
-      root,
-      'probe:\n  extends: base-common\n  description: "Probe."\n  workflows: [flow, agent]\n',
-    );
+    writeProjectType(root, 'probe:\n  extends: base-common\n  description: "Probe."\n  workflows: [flow, agent]\n');
     const spine = composeCoworkerSpine({ projectRoot: root, coworkerType: 'probe' });
     expect(spine).toContain('/workspace/agent/plans/');
     expect(spine).not.toContain('/workspacethe **agent** workflow section below');

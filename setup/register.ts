@@ -138,7 +138,7 @@ export async function run(args: string[]): Promise<void> {
     process.exit(4);
   }
 
-  if (!isValidGroupFolder(parsed.folder)) {
+  if (!isValidGroupFolder(parsed.folder, { adminSetup: !!parsed.isAdmin })) {
     emitStatus('REGISTER_CHANNEL', {
       STATUS: 'failed',
       ERROR: 'invalid_folder',

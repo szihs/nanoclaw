@@ -4,9 +4,12 @@
 // skills still load on demand via Claude Code's SKILL.md slash-command
 // mechanism.
 
+import fs from 'fs';
+import path from 'path';
+
 import { readCoworkerTypes, readSkillCatalog } from './registry.js';
 import { resolveCoworkerManifest } from './resolve.js';
-import type { CoworkerManifest, SkillMeta } from './types.js';
+import type { CoworkerManifest, CoworkerTypeEntry, SkillMeta } from './types.js';
 
 function indentBlock(text: string, spaces: number): string {
   const pad = ' '.repeat(spaces);
@@ -50,15 +53,19 @@ function extractStepTitle(body: string | undefined, stepId: string): string {
 // the body's bullet prefix).
 function renderStepBlock(n: number, stepId: string, rawBody: string, title: string): string {
   const header = `#### ${n}. ${title}`;
-  const cleaned = stripStepAnchors(rawBody).trim();
+  // Step bodies render under `## Workflows → ### /workflow → #### N. Step`.
+  // Any H1 (`# Foo`) inside the raw step body would break the section
+  // hierarchy (top-level heading collision with `# Coworker`). Demote H1
+  // to H5 so it stays within the step's sub-structure. H2/H3 may be
+  // intentional sub-structure in a long step body — leave them.
+  const demotedBody = rawBody.replace(/^# /gm, '##### ');
+  const cleaned = stripStepAnchors(demotedBody).trim();
   if (!cleaned) return header;
   const lines = cleaned.split('\n');
   // Remove "N. " source numbering (we own the count) AND the bolded title
   // repeat. Accept optional "— " / "- " separators between title and body.
   const first = lines[0];
-  const prefixMatch = first.match(
-    /^\s*\d+[.)]\s+(?:\*\*[^*\n]+\*\*\s*(?:\{#[^}]+\})?\s*[—-]?\s*)?(.*)$/,
-  );
+  const prefixMatch = first.match(/^\s*\d+[.)]\s+(?:\*\*[^*\n]+\*\*\s*(?:\{#[^}]+\})?\s*[—-]?\s*)?(.*)$/);
   let body: string;
   if (prefixMatch) {
     const remainder = prefixMatch[1].trim();
@@ -141,7 +148,11 @@ function parseStagedOverlay(body: string): StagedOverlay | null {
     sawStaged = true;
     const stageName = m[1];
     const position = m[2];
-    const body = `**${stageName}** — ${s.heading}\n\n${s.body.join('\n').trimEnd()}`.trim();
+    // Emit stage header as `**STAGE_NAME**` only — the gate anchor line
+    // (rendered by emitGate) already carries the `(before|after \`step\`)`
+    // context, so repeating the full heading here produces the stutter
+    // `**DIAGNOSIS_REVIEW** — DIAGNOSIS_REVIEW (after \`diagnose\`)`.
+    const body = `**${stageName}**\n\n${s.body.join('\n').trimEnd()}`.trim();
     stagesByAnchor.set(`${position}:${m[3]}`, body);
     if (m[4]) stagesByAnchor.set(`${position}:${m[4]}`, body);
   }
@@ -198,6 +209,10 @@ function rewritePlaceholders(md: string): string {
       continue;
     }
     if (inCodeFence) continue;
+    // Render `{{target}}` as `<target>` — the agent reads this as a
+    // placeholder to fill from the user's request at runtime. Backticks
+    // were considered but break file paths (`/workspace/plans/`target`.md`),
+    // angle brackets render cleanly inline and inside paths.
     lines[i] = line.replace(/\{\{\s*([a-zA-Z_][a-zA-Z0-9_.]*)\s*\}\}/g, (_m, name) => `<${name}>`);
   }
   return lines.join('\n');
@@ -271,14 +286,11 @@ function rewriteSlashRefs(
     // workflow headings as `### /name` and those must stay as-is for the
     // reader to recognize the section.
     if (!/^\s*#{1,6}\s/.test(rewritten)) {
-      rewritten = rewritten.replace(
-        /(^|[\s(])\/([a-z][a-z0-9-]*)(?=[\s.,;:!?)]|$)/g,
-        (m, prefix, name) => {
-          const replacement = resolve(name);
-          if (replacement === null) return m;
-          return `${prefix}${replacement}`;
-        },
-      );
+      rewritten = rewritten.replace(/(^|[\s(])\/([a-z][a-z0-9-]*)(?=[\s.,;:!?)]|$)/g, (m, prefix, name) => {
+        const replacement = resolve(name);
+        if (replacement === null) return m;
+        return `${prefix}${replacement}`;
+      });
     }
 
     lines[i] = rewritten;
@@ -364,6 +376,109 @@ function renderCategorizedList<T>(entries: T[], traitsOf: (e: T) => readonly str
   return blocks.join('\n\n');
 }
 
+/**
+ * Auto-emit a "Projects available" block for Main by scanning the coworker
+ * registry for entries that declare `project: <name>`. Groups entries by
+ * project slug and renders one `### <project>` section per discovered
+ * project listing the leaf coworker types (non-flat, non-`*-common`).
+ *
+ * Returns an empty string if no projects are registered. No project name
+ * is hardcoded — adding a new spine at `container/spines/<name>/` with
+ * `project: <name>` in its yaml causes that project to appear in Main
+ * automatically on the next compose.
+ */
+/**
+ * Extract a short lead-in from a spine's `identity` file — the first
+ * complete sentence, capped at ~200 chars. Returns undefined if the
+ * file isn't present or is empty. Used to enrich Main's project block
+ * with the spine's actual role description (usually a richer statement
+ * than the type's one-line `description:`).
+ */
+function readIdentityLeadIn(identityPath: string | undefined, projectRoot: string): string | undefined {
+  if (!identityPath) return undefined;
+  const full = path.join(projectRoot, identityPath);
+  let body: string;
+  try {
+    body = fs.readFileSync(full, 'utf-8').trim();
+  } catch {
+    return undefined;
+  }
+  if (!body) return undefined;
+  // Strip leading headings — identity files typically start with a
+  // paragraph, but be defensive.
+  const prose = body.replace(/^(#{1,6}\s+.*\n+)+/m, '').trim();
+  // Take the first paragraph (up to blank line) and truncate at a
+  // sentence boundary under ~280 chars. One-sentence identities produce
+  // a useless one-liner; multi-sentence identities carry the actual
+  // project context we want Main to see.
+  const firstPara = prose
+    .split(/\n\s*\n/)[0]
+    .replace(/\n/g, ' ')
+    .trim();
+  if (!firstPara) return undefined;
+  const cap = 280;
+  if (firstPara.length <= cap) return firstPara;
+  // Over cap — truncate at the last sentence boundary that fits.
+  const slice = firstPara.slice(0, cap);
+  const lastSentenceEnd = Math.max(slice.lastIndexOf('. '), slice.lastIndexOf('! '), slice.lastIndexOf('? '));
+  if (lastSentenceEnd > 100) return slice.slice(0, lastSentenceEnd + 1);
+  return slice + '...';
+}
+
+function emitDiscoveredProjectFragments(types: Record<string, CoworkerTypeEntry>, projectRoot: string): string {
+  // Group type names by their `project:` field.
+  const byProject = new Map<string, string[]>();
+  for (const [typeName, entry] of Object.entries(types)) {
+    const project = entry.project;
+    if (!project) continue;
+    if (!byProject.has(project)) byProject.set(project, []);
+    byProject.get(project)!.push(typeName);
+  }
+  if (byProject.size === 0) return '';
+
+  // Per project, emit:
+  //   ### <project>
+  //   <identity lead-in OR description fallback>
+  //   - Types: `<reader>` (routing), `<writer>` (routing), ...
+  //   - Workflows: <workflow names from root spine>
+  //
+  // Source: spine metadata only. Adding a new spine with a `project:`
+  // field produces a block automatically; no per-project hardcoding
+  // anywhere in the composer.
+  const lines: string[] = ['## Projects available', ''];
+  const projectNames = [...byProject.keys()].sort();
+  for (let i = 0; i < projectNames.length; i++) {
+    const project = projectNames[i];
+    const typeNames = byProject.get(project)!.sort();
+    const commonName = typeNames.find((n) => n === `${project}-common`) ?? typeNames[0];
+    const common = types[commonName];
+    const leaves = typeNames.filter((n) => n !== commonName && !types[n].flat).sort();
+
+    lines.push(`### ${project}`);
+    // Prefer the identity file's first sentence (richer role statement);
+    // fall back to the type's description if identity is absent.
+    const leadIn = readIdentityLeadIn(common?.identity, projectRoot) ?? common?.description;
+    if (leadIn) lines.push(leadIn);
+    if (leaves.length > 0) lines.push(`- Types: ${leaves.map((n) => `\`${n}\``).join(', ')}`);
+    // Union of workflows across the leaf types — tells Main what a
+    // coworker of this project can actually do.
+    const workflowSet = new Set<string>();
+    for (const leaf of leaves) {
+      for (const wf of types[leaf]?.workflows ?? []) workflowSet.add(wf);
+    }
+    if (workflowSet.size > 0) {
+      lines.push(
+        `- Workflows: ${[...workflowSet]
+          .sort()
+          .map((w) => `\`${w}\``)
+          .join(', ')}`,
+      );
+    }
+    if (i < projectNames.length - 1) lines.push('');
+  }
+  return lines.join('\n');
+}
+
 export function renderCoworkerSpine(
   projectRoot: string,
   coworkerType: string,
@@ -383,10 +498,20 @@ export function renderCoworkerSpine(
   }
 
   if (manifest.flat) {
-    // Flat mode: emit identity (e.g. upstream body) and context fragments
-    // verbatim, separated by horizontal rules. No auto-generated title, no
-    // structured section headings — the body files own their own formatting.
+    // Flat mode: emit identity (body file) + context fragments (skill
+    // contributions via `context:` in their coworker-types.yaml), verbatim,
+    // separated by horizontal rules.
+    //
+    // For the 'main' type, additionally auto-emit a per-project "Projects
+    // available" block summarizing any project spines present in the
+    // install. This is pure discovery — no project is hardcoded anywhere.
+    // Adding a new project (e.g. container/spines/nv-graphics/ with
+    // `project: graphics` in its yaml) automatically shows up here.
     const bodies = [manifest.identity, ...manifest.context].map((b) => b.trim()).filter(Boolean);
+    if (coworkerType === 'main') {
+      const projectsBlock = emitDiscoveredProjectFragments(types, projectRoot);
+      if (projectsBlock) bodies.push(projectsBlock);
+    }
     const extra = extraInstructions?.trim();
     if (extra) bodies.push(extra);
     return bodies.join('\n\n---\n\n').trimEnd() + '\n';
@@ -509,7 +634,16 @@ export function renderCoworkerSpine(
           // BEFORE gates.
           for (const gate of gatesBefore.get(stepId) || []) {
             chunks.push(
-              emitGate(emittedOverlay, stagedCache, sharedGateState, gate.overlayName, gate.body, 'BEFORE', stepId, w.name),
+              emitGate(
+                emittedOverlay,
+                stagedCache,
+                sharedGateState,
+                gate.overlayName,
+                gate.body,
+                'BEFORE',
+                stepId,
+                w.name,
+              ),
             );
           }
 
@@ -526,7 +660,16 @@ export function renderCoworkerSpine(
           // AFTER gates.
           for (const gate of gatesAfter.get(stepId) || []) {
             chunks.push(
-              emitGate(emittedOverlay, stagedCache, sharedGateState, gate.overlayName, gate.body, 'AFTER', stepId, w.name),
+              emitGate(
+                emittedOverlay,
+                stagedCache,
+                sharedGateState,
+                gate.overlayName,
+                gate.body,
+                'AFTER',
+                stepId,
+                w.name,
+              ),
             );
           }
         }
@@ -559,7 +702,10 @@ export function renderCoworkerSpine(
         const title = overlayName.toUpperCase().replaceAll('-', ' ');
         const pieces = [leading, shared].filter(Boolean).join('\n\n').trim();
         if (!pieces) continue;
-        blocks.push(`### ${title} Gate Protocol\n\n${demoteHeadings(pieces, 3)}`);
+        // Demote by 2: overlay body `## Foo` → `#### Foo`, sitting one
+        // level below the `### Gate Protocol` wrapper. Previously demoted
+        // by 3 (→ `##### Foo`) which skipped h4 and left a visual gap.
+        blocks.push(`### ${title} Gate Protocol\n\n${demoteHeadings(pieces, 2)}`);
       }
       if (blocks.length > 0) {
         parts.push('## Gate Protocol');
@@ -572,11 +718,18 @@ export function renderCoworkerSpine(
   }
 
   // --- Skills ---
-  if (manifest.skills.length > 0) {
+  // Filter to only skills that are trait-bound in this type's manifest.
+  // Skills declared in the `skills:` list but never bound to any trait are
+  // not referenced by embedded workflows — hide them. Claude Code's
+  // progressive skill discovery will surface them if an agent invokes
+  // them ad-hoc.
+  const boundSkillNames = new Set(Object.values(manifest.bindings));
+  const visibleSkills = manifest.skills.filter((s) => boundSkillNames.has(s.name));
+  if (visibleSkills.length > 0) {
     parts.push('## Skills Available');
     parts.push(
       renderCategorizedList(
-        manifest.skills,
+        visibleSkills,
         (s) => s.provides,
         (s) => `- \`/${s.name}\` — ${s.description}`,
       ),

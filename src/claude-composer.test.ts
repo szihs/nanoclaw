@@ -352,6 +352,8 @@ slang-triage:
   description: "triage"
   workflows:
     - slang-triage
+  bindings:
+    repo: slang-github
 `,
       );
       return root;
@@ -375,9 +377,11 @@ slang-triage:
       expect(out).toContain('### /slang-triage');
       expect(out).toContain('Triage a Slang issue.');
       expect(out).toContain('## Skills Available');
-      expect(out).toContain('- `/base-nanoclaw` — Host tools.');
       expect(out).toContain('- `/slang-github` — Fetch Slang issues.');
-      expect(out).not.toContain('Skill bodies load on demand.');  // footer dropped — invocation.md covers this
+      // base-nanoclaw is declared but not trait-bound; filter drops it.
+      // Claude Code's progressive skill discovery surfaces it on demand.
+      expect(out).not.toContain('- `/base-nanoclaw` — Host tools.');
+      expect(out).not.toContain('Skill bodies load on demand.'); // footer dropped — invocation.md covers this
 
       // The 6-section headings must NOT appear — this is the spine model.
       expect(out).not.toContain('## Capabilities');
@@ -408,38 +412,20 @@ slang-triage:
     });
   });
 
-  describe('flat mode (main/global upstream parity)', () => {
-    // Pin the invariant: with ONLY nanoclaw-base installed, main and global
-    // CLAUDE.md equal upstream/v2 byte-for-byte. The fixture files are
-    // checked-in captures of the upstream repo's main/global prompts.
-    it('emits upstream main/global verbatim when only nanoclaw-base is in container/skills', () => {
+  describe('flat mode (main body + additive fragments)', () => {
+    // Post-refactor: only 'main' is flat. 'global' was retired as a coworker
+    // type (demoted to data/shared/ directory mount). No upstream-v2 drift
+    // pinning — the shipped main-body is deliberately divergent from upstream.
+    it('emits the body file verbatim in a plain install (no additive skills)', () => {
       const root = makeTempProject();
-
-      const mainFixture = fs.readFileSync(path.join(process.cwd(), 'test-fixtures', 'upstream-v2', 'main.md'), 'utf-8');
-      const globalFixture = fs.readFileSync(
-        path.join(process.cwd(), 'test-fixtures', 'upstream-v2', 'global.md'),
-        'utf-8',
-      );
-
-      writeFile(path.join(root, 'container/skills/nanoclaw-base/prompts/main-body.md'), mainFixture);
-      writeFile(path.join(root, 'container/skills/nanoclaw-base/prompts/global-body.md'), globalFixture);
+      writeFile(path.join(root, 'container/skills/nanoclaw-base/prompts/main-body.md'), '# Main\n\nSlim.\n');
       writeTypes(
         root,
         'nanoclaw-base',
-        `
-main:
-  flat: true
-  description: "upstream main"
-  identity: container/skills/nanoclaw-base/prompts/main-body.md
-global:
-  flat: true
-  description: "upstream global"
-  identity: container/skills/nanoclaw-base/prompts/global-body.md
-`,
+        `main:\n  flat: true\n  description: "base"\n  identity: container/skills/nanoclaw-base/prompts/main-body.md\n`,
       );
-
-      expect(composeCoworkerSpine({ projectRoot: root, coworkerType: 'main' })).toBe(mainFixture);
-      expect(composeCoworkerSpine({ projectRoot: root, coworkerType: 'global' })).toBe(globalFixture);
+      const out = composeCoworkerSpine({ projectRoot: root, coworkerType: 'main' });
+      expect(out).toBe('# Main\n\nSlim.\n');
     });
 
     it('appends additive context fragments under --- when addon skills contribute to the same type', () => {
@@ -482,13 +468,19 @@ global:
   });
 
   describe('resolveTypeChain', () => {
-    it('stops inheritance walk on cycles', () => {
+    it('throws on cycles in the extends chain', () => {
       const types: Record<string, CoworkerTypeEntry> = {
         alpha: { extends: ['beta'], description: 'a' },
         beta: { extends: ['alpha'], description: 'b' },
       };
-      const chain = resolveTypeChain(types, 'alpha');
-      expect(chain).toHaveLength(2);
+      expect(() => resolveTypeChain(types, 'alpha')).toThrow(/Cycle in coworker-type extends chain/);
+    });
+
+    it('throws on unknown parent (catches yaml typos)', () => {
+      const types: Record<string, CoworkerTypeEntry> = {
+        'slang-writer': { extends: ['base-commmon'], description: 'typo' },
+      };
+      expect(() => resolveTypeChain(types, 'slang-writer')).toThrow(/Unknown coworker type "base-commmon"/);
     });
   });
 

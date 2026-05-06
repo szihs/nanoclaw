@@ -78,6 +78,7 @@ function mergeTypeEntries(base: CoworkerTypeEntry, addon: CoworkerTypeEntry, typ
     extends: addon.extends ?? base.extends,
     project: addon.project ?? base.project,
     description: addon.description ?? base.description,
+    title: addon.title ?? base.title,
     flat: addon.flat ?? base.flat,
     identity: addon.identity ?? base.identity,
     invariants: [...(base.invariants || []), ...(addon.invariants || [])],
@@ -170,12 +171,35 @@ function parseSkillMeta(filePath: string, forcedType?: SkillMeta['type']): Skill
   const stepBodies: Record<string, string> = {};
   if (type === 'workflow') {
     const body = text.slice(match[0].length);
-    // Capture step ids in order.
-    const stepRe = /\{#([a-z0-9-]+)\}/g;
+    // Capture step ids in order. We match every numbered-list step
+    // `N. **Title** [{#id}] — body…` and either use the explicit {#id}
+    // or synthesize one from the title. Synthesized ids let workflows
+    // skip anchors when no overlay/override needs to target the step,
+    // without losing the step's prose from the rendered output.
+    const stepHeaderRe = /^(\s*\d+\.\s+\*\*([^*]+)\*\*)(?:\s*\{#([a-z0-9-]+)\})?/gm;
     const positions: { id: string; index: number }[] = [];
-    for (const m of body.matchAll(stepRe)) {
-      steps.push(m[1]);
-      positions.push({ id: m[1], index: m.index ?? 0 });
+    const usedIds = new Set<string>();
+    for (const m of body.matchAll(stepHeaderRe)) {
+      const explicit = m[3];
+      const title = m[2].trim();
+      let id = explicit;
+      if (!id) {
+        const base =
+          title
+            .toLowerCase()
+            .replace(/[^a-z0-9]+/g, '-')
+            .replace(/^-+|-+$/g, '') || 'step';
+        id = base;
+        let n = 2;
+        while (usedIds.has(id)) {
+          id = `${base}-${n++}`;
+        }
+      }
+      usedIds.add(id);
+      steps.push(id);
+      // Anchor at the start of the header match so per-step body extraction
+      // below slices from the numbered-bullet line as before.
+      positions.push({ id, index: m.index ?? 0 });
     }
     // Extract per-step body: from the step's list-item start (back up to the
     // start of the numbered bullet line) until the next step's bullet start.

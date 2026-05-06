@@ -30,19 +30,34 @@ export function resolveTypeChain(types: Record<string, CoworkerTypeEntry>, typeN
   const chain: CoworkerTypeEntry[] = [];
   const seen = new Set<string>();
   const visiting = new Set<string>();
+  const stack: string[] = [];
 
   function visit(current: string): void {
-    if (seen.has(current) || visiting.has(current)) return;
+    if (seen.has(current)) return;
+    if (visiting.has(current)) {
+      // Cycle detected — fail loudly. Silent skip would produce a partial,
+      // plausible-looking merged manifest that's missing half its ancestors.
+      const cycle = [...stack.slice(stack.indexOf(current)), current].join(' → ');
+      throw new Error(`Cycle in coworker-type extends chain: ${cycle}`);
+    }
     visiting.add(current);
+    stack.push(current);
     const entry = types[current];
     if (!entry) {
-      visiting.delete(current);
-      return;
+      // Unknown parent — fail loudly. This catches yaml typos like
+      // `extends: base-commmon` that would otherwise render a coworker
+      // with missing invariants/context/skills.
+      const available = Object.keys(types).slice(0, 8).join(', ');
+      throw new Error(
+        `Unknown coworker type "${current}" referenced via extends (path: ${stack.join(' → ')}). ` +
+          `Available: ${available}${Object.keys(types).length > 8 ? ', …' : ''}`,
+      );
     }
     for (const parent of normalizeList(entry.extends)) {
       visit(parent);
     }
     chain.push(entry);
+    stack.pop();
     visiting.delete(current);
     seen.add(current);
   }
@@ -141,7 +156,8 @@ export function resolveCoworkerManifest(
   if (flat) {
     const identity = readFragments(dedupRelative(identityParts, projectRoot), projectRoot).join('\n\n').trim();
     const context = readFragments(dedupRelative(contextFiles, projectRoot), projectRoot);
-    const title = humanize(roles[roles.length - 1]);
+    const leafEntry = types[typeName];
+    const title = leafEntry?.title ?? humanize(roles[roles.length - 1]);
     return {
       typeName,
       title,
@@ -410,7 +426,8 @@ export function resolveCoworkerManifest(
   for (const skillName of Object.values(resolvedBindings)) collectTools(skillName);
   for (const overlayName of uniqueOverlayNames) collectTools(overlayName);
 
-  const title = humanize(roles[roles.length - 1]);
+  const leafEntry = types[typeName];
+  const title = leafEntry?.title ?? humanize(roles[roles.length - 1]);
 
   return {
     typeName,

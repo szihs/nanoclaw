@@ -180,8 +180,11 @@ function composeCoworkerClaudeMd(agentGroup: AgentGroup): void {
   }
 
   if (!agentGroup.coworker_type) {
-    // Untyped coworker: compose via the 'global' flat type + .instructions.md
-    // This goes through the same composer pipeline as typed coworkers.
+    // Untyped coworker: compose via the 'default' typed leaf + .instructions.md.
+    // 'default' extends base-common with no project skills, so it's the bare
+    // spine — minimum operational guidance for a coworker that needs no
+    // project-specific knowledge. This goes through the same composer
+    // pipeline as typed coworkers.
     try {
       let extraInstructions: string | null = null;
       try {
@@ -191,13 +194,13 @@ function composeCoworkerClaudeMd(agentGroup: AgentGroup): void {
       }
 
       const composed = composeCoworkerSpine({
-        coworkerType: 'global',
+        coworkerType: 'default',
         extraInstructions,
         disableOverlays: agentGroup.disable_overlays === 1,
       });
       fs.mkdirSync(groupDir, { recursive: true });
       fs.writeFileSync(claudeMdPath, composed);
-      log.debug('CLAUDE.md composed for untyped coworker via global type', { folder: agentGroup.folder });
+      log.debug('CLAUDE.md composed for untyped coworker via default type', { folder: agentGroup.folder });
     } catch (err) {
       log.warn('Failed to compose CLAUDE.md for untyped coworker', { folder: agentGroup.folder, err });
     }
@@ -233,10 +236,13 @@ function resolveTypeManifest(agentGroup: AgentGroup): {
   overlayNames: string[];
   workflows: { name: string; description: string }[];
 } {
-  if (!agentGroup.coworker_type) return { tools: [], mcpServers: {}, overlayNames: [], workflows: [] };
+  // Untyped coworker → resolve as 'default' so it gets the same tool
+  // allowlist, MCP servers, and overlays as its composed CLAUDE.md
+  // (composeCoworkerClaudeMd above also renders via 'default').
+  const effectiveType = agentGroup.coworker_type || 'default';
   try {
     const { types, catalog } = loadRegistry();
-    const manifest = resolveCoworkerManifest(types, agentGroup.coworker_type, catalog, process.cwd());
+    const manifest = resolveCoworkerManifest(types, effectiveType, catalog, process.cwd());
     const overlayNames = [
       ...new Set(
         manifest.customizations.filter((c) => c.kind === 'overlay' && c.overlayName).map((c) => c.overlayName!),
@@ -249,7 +255,7 @@ function resolveTypeManifest(agentGroup: AgentGroup): {
       workflows: manifest.workflows.map((w) => ({ name: w.name, description: w.description })),
     };
   } catch (err) {
-    log.warn('Failed to resolve coworker manifest', { coworkerType: agentGroup.coworker_type, err });
+    log.warn('Failed to resolve coworker manifest', { coworkerType: effectiveType, err });
     return { tools: [], mcpServers: {}, overlayNames: [], workflows: [] };
   }
 }
@@ -516,7 +522,7 @@ export function recomposeAndUpdateHash(sessionId: string): void {
   // Hash must match what detectStaleContainers computes: composeCoworkerSpine output,
   // NOT the file on disk (which may have @-import prefixes for flat types).
   try {
-    const coworkerType = ag.coworker_type || 'global';
+    const coworkerType = ag.coworker_type || 'default';
     let extra: string | null = null;
     try {
       extra = fs.readFileSync(path.join(GROUPS_DIR, ag.folder, '.instructions.md'), 'utf-8');
@@ -550,7 +556,7 @@ export function detectStaleContainers(): Array<{ sessionId: string; agentGroupId
     const spawnHash = spawnedClaudeMdHash.get(sessionId);
     if (!spawnHash) continue;
 
-    const coworkerType = ag.coworker_type || 'global';
+    const coworkerType = ag.coworker_type || 'default';
     let extra: string | null = null;
     try {
       extra = fs.readFileSync(path.join(GROUPS_DIR, ag.folder, '.instructions.md'), 'utf-8');
@@ -576,7 +582,11 @@ function resolveProviderContribution(
   session: Session,
   agentGroup: AgentGroup,
 ): { provider: string; contribution: ProviderContainerContribution } {
-  const provider = resolveProviderName(session.agent_provider, agentGroup.agent_provider, undefined);
+  // Precedence: session provider > agent_group provider > container.json > default.
+  // Previously passed undefined for container-config, making `provider:` in
+  // groups/<folder>/container.json dead config.
+  const containerConfigProvider = readContainerConfig(agentGroup.folder).provider ?? null;
+  const provider = resolveProviderName(session.agent_provider, agentGroup.agent_provider, containerConfigProvider);
   const fn = getProviderContainerConfig(provider);
   const contribution = fn
     ? fn({
@@ -629,11 +639,17 @@ function buildMounts(
   // Agent group folder at /workspace/agent
   mounts.push({ hostPath: groupDir, containerPath: '/workspace/agent', readonly: false });
 
-  // Global memory directory — always read-only. Edits to global config
-  // happen through the approval flow, not by handing one workspace RW.
-  const globalDir = path.join(GROUPS_DIR, 'global');
-  if (fs.existsSync(globalDir)) {
-    mounts.push({ hostPath: globalDir, containerPath: '/workspace/global', readonly: true });
+  // Shared directory (learnings + cross-group facts) — mounted read-only
+  // for coworkers, read-write for Main. Main is the only agent allowed to
+  // edit the shared bucket; coworkers write via mcp__nanoclaw__append_learning
+  // which the host processes through the approval flow.
+  const sharedDir = path.join(DATA_DIR, 'shared');
+  if (fs.existsSync(sharedDir)) {
+    // Admin (Main) gets write access. Trust ONLY is_admin — not
+    // coworker_type. A malicious import that set coworker_type='main'
+    // on a non-admin group must not get write access.
+    const isAdmin = agentGroup.is_admin === 1;
+    mounts.push({ hostPath: sharedDir, containerPath: '/workspace/shared', readonly: !isAdmin });
   }
 
   // Per-group .claude-shared at /home/node/.claude (Claude state, settings,

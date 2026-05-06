@@ -68,13 +68,11 @@ export function resolveClaudeImports(content: string, baseDir: string, seen: Set
 }
 
 function readAgentAndGlobalClaudeMd(): string | undefined {
-  // Per-group CLAUDE.md is responsible for pulling in the global instructions
-  // if the group wants them (the default scaffold starts with
-  // `@./.claude-global.md` which resolveClaudeImports inlines). Appending
-  // `/workspace/global/CLAUDE.md` explicitly here would double-inline the
-  // global content for any non-main group, wasting context tokens and
-  // risking contradictory instructions. Groups that don't import global
-  // intentionally don't get it — same as Claude-backed agents.
+  // Per-group CLAUDE.md is composed by the host on every wake with all
+  // operational content already included (spine fragments for typed
+  // coworkers, slim manager body + per-project fragments for Main). No
+  // separate global-body appending is needed. The /workspace/shared/
+  // mount is for cross-group facts (learnings), not prompt content.
   const groupDir = '/workspace/agent';
   const groupPath = `${groupDir}/CLAUDE.md`;
   const localPath = `${groupDir}/CLAUDE.local.md`;
