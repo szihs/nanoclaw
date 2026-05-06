@@ -4845,6 +4845,9 @@ function renderAdminInfra() {
     </div>
 
     <h4 style="font-size:11px;margin:10px 0 6px">MCP Servers</h4>
+    ${d.mcpAuthProxy?.status && d.mcpAuthProxy.status !== 'running'
+      ? `<p style="font-size:10px;color:var(--red);margin:0 0 6px">Proxy ${esc(d.mcpAuthProxy.status)}${d.mcpAuthProxy.statusCode ? ` (HTTP ${d.mcpAuthProxy.statusCode})` : ''} — check that the main service is running and data/.mcp-management-token matches the proxy process</p>`
+      : ''}
     <table class="admin-table">
       <tr><th>Server</th><th>Type</th><th>Details</th><th></th></tr>
       ${localServers}${remoteServers}
