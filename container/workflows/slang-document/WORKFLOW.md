@@ -1,5 +1,6 @@
 ---
 name: slang-document
+license: MIT
 type: workflow
 description: "Update Slang compiler documentation after a change or for a doc gap."
 extends: document

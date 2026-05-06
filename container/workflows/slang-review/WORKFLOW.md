@@ -1,5 +1,6 @@
 ---
 name: slang-review
+license: MIT
 type: workflow
 description: "Review a Slang compiler change against project conventions and compiler-specific concerns."
 extends: review

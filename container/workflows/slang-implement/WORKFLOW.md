@@ -1,5 +1,6 @@
 ---
 name: slang-implement
+license: MIT
 type: workflow
 description: "Implement a fix or feature in the Slang compiler. Specialized build/test/format steps."
 extends: implement

@@ -1,5 +1,6 @@
 ---
 name: slang-investigate
+license: MIT
 type: workflow
 description: "Investigate a Slang compiler issue. Specialized steps for the Slang codebase."
 extends: investigate

@@ -1,32 +1,9 @@
 ---
 name: slang-maintain-release-report
+license: MIT
 description: "Daily reports, release notes, SPIRV updates, GitLab rebase. Use when preparing releases or generating reports. Keywords: daily report, release, SPIRV, GitLab, MCP, changelog, nv-master."
 argument-hint: "[task: daily-report|release-notes|update-spirv|update-gitlab|full-release] [time-range: 5m|24h|48h|7d|30d] [output: file|terminal|both]"
-allowed-tools:
-  - Bash
-  - Read
-  - Write
-  - Edit
-  - Grep
-  - Glob
-  - AskUserQuestion
-  - WebFetch
-  - mcp__slang-mcp__github_get_issue
-  - mcp__slang-mcp__github_list_issues
-  - mcp__slang-mcp__github_search_issues
-  - mcp__slang-mcp__github_list_pull_requests
-  - mcp__slang-mcp__github_get_pull_request
-  - mcp__slang-mcp__github_get_pull_request_comments
-  - mcp__slang-mcp__github_get_pull_request_reviews
-  - mcp__slang-mcp__github_get_discussions
-  - mcp__slang-mcp__gitlab_list_issues
-  - mcp__slang-mcp__gitlab_list_merge_requests
-  - mcp__slang-mcp__gitlab_get_file_contents
-  - mcp__slang-mcp__discord_read_messages
-  - mcp__slang-mcp__slack_post_message
-  - mcp__slang-mcp__slack_get_channel_history
-  - mcp__slang-mcp__slack_reply_to_thread
-  - mcp__slang-mcp__slack_get_user_profile
+allowed-tools: Bash Read Write Edit Grep Glob AskUserQuestion WebFetch mcp__slang-mcp__github_get_issue mcp__slang-mcp__github_list_issues mcp__slang-mcp__github_search_issues mcp__slang-mcp__github_list_pull_requests mcp__slang-mcp__github_get_pull_request mcp__slang-mcp__github_get_pull_request_comments mcp__slang-mcp__github_get_pull_request_reviews mcp__slang-mcp__github_get_discussions mcp__slang-mcp__gitlab_list_issues mcp__slang-mcp__gitlab_list_merge_requests mcp__slang-mcp__gitlab_get_file_contents mcp__slang-mcp__discord_read_messages mcp__slang-mcp__slack_post_message mcp__slang-mcp__slack_get_channel_history mcp__slang-mcp__slack_reply_to_thread mcp__slang-mcp__slack_get_user_profile
 ---
 
 # Slang Maintainer Workflow

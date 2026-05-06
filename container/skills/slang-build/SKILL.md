@@ -1,5 +1,6 @@
 ---
 name: slang-build
+license: MIT
 description: "Build and test the Slang compiler. Configure CMake, compile, run slang-test, inspect CI."
 provides: [code.build, test.run, test.gen, ci.inspect]
 allowed-tools: Bash(git:*), Bash(cmake:*), Bash(python:*), Bash(ninja:*), Read, Grep, Glob
