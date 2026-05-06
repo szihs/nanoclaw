@@ -42,5 +42,5 @@ cd container/mcp-servers/slang-mcp && uv sync  # MCP server Python deps
 ## Common issues
 
 - `bun install --frozen-lockfile` fails with EEXIST → non-critical symlink issue, safe to ignore
-- `rebuild:claude` fails with ENOENT → `mkdir -p groups/global groups/main` first
+- `rebuild:claude` fails with ENOENT → `mkdir -p groups/main` first (the only target the script rebuilds; `groups/global/` is retired)
 - Container build uses `--no-cache` but COPY steps still cached → `docker buildx prune -f` then rebuild

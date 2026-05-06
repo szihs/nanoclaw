@@ -11,7 +11,6 @@ nanoclaw-common:
     - nanoclaw-build
     - nanoclaw-code-reader
     - nanoclaw-github
-    - deep-research
   workflows: []
   overlays:
     - critique-overlay
@@ -25,29 +24,25 @@ nanoclaw-common:
     code: nanoclaw-code-reader
     doc: nanoclaw-code-reader
     test: nanoclaw-build
-    plan: deep-research
     critique: codex-critique
 
 nanoclaw-reader:
-  description: "Read-only NanoClaw coworker — investigate issues, review PRs, research codebase. Cannot edit code or create PRs."
+  description: "Read-only NanoClaw coworker — plan, investigate, review, research. Cannot edit code or create PRs."
   project: nanoclaw
   extends: nanoclaw-common
   workflows:
-    - nanoclaw-investigate
-    - nanoclaw-review
+    - plan
 
 nanoclaw-writer:
-  description: "Write-capable NanoClaw coworker — investigate, implement, review, document. Can edit code, write tests, create PRs."
+  description: "Write-capable NanoClaw coworker — plan + implement. Can edit code, write tests, create PRs."
   project: nanoclaw
   extends: nanoclaw-common
   skills:
     - nanoclaw-code-writer
     - nanoclaw-docs
   workflows:
-    - nanoclaw-investigate
+    - plan
     - nanoclaw-implement
-    - nanoclaw-review
-    - nanoclaw-document
   bindings:
     code: nanoclaw-code-writer
     test: nanoclaw-build
