@@ -90,6 +90,28 @@ function getLogsDir(): string {
 function getCoworkerTypesPath(): string {
   return join(getGroupsDir(), 'coworker-types.json');
 }
+
+/**
+ * Sanitize an imported folder name to the same constraints enforced by
+ * src/group-folder.ts#isValidGroupFolder. Mirrors its rules inline rather
+ * than crossing the dashboard/src compile boundary: strip invalid chars,
+ * force non-empty leading alnum, reject reserved names (`global`, `shared`,
+ * `templates`, `main`). Reserved/empty names get `_imported` suffixed so
+ * the follow-up collision loop can resolve them to `_imported-2`, etc.
+ */
+const RESERVED_GROUP_FOLDERS_DASHBOARD = new Set(['global', 'shared', 'templates', 'main']);
+function sanitizeImportedFolder(raw: string): string {
+  let folder = (raw || '').replace(/[^a-zA-Z0-9_-]/g, '-');
+  // Folder must start with alnum (match GROUP_FOLDER_PATTERN)
+  if (!/^[A-Za-z0-9]/.test(folder)) folder = `group${folder}`;
+  // Truncate to 64 chars (pattern max)
+  if (folder.length > 64) folder = folder.slice(0, 64);
+  // Reject reserved names by appending a suffix (collision loop will finish the job)
+  if (!folder || RESERVED_GROUP_FOLDERS_DASHBOARD.has(folder.toLowerCase())) {
+    folder = `${folder || 'group'}_imported`;
+  }
+  return folder;
+}
 /**
  * Post-import group filesystem init. Mirrors the critical steps from
  * src/group-init.ts so that imported groups are immediately ready —
@@ -100,31 +122,33 @@ function postImportGroupInit(
   agentGroupId: string,
   folder: string,
   warnings: string[],
+  containerConfig?: unknown,
 ): void {
   const projectRoot = getProjectRoot();
   const groupDir = join(getGroupsDir(), folder);
   const claudeSharedDir = join(getDataDir(), 'v2-sessions', agentGroupId, '.claude-shared');
 
-  // 1. .claude-global.md symlink (dangling on host — resolves inside container)
-  //    Skip for typed coworkers — they use composed spines instead.
-  const isTyped = (() => { try {
-    const wdb = new Database(getDbPath(), { readonly: true });
-    const row = wdb.prepare('SELECT coworker_type FROM agent_groups WHERE id = ?').get(agentGroupId) as any;
-    wdb.close();
-    return !!row?.coworker_type;
-  } catch { return false; } })();
-  if (!isTyped) {
-    const globalLinkPath = join(groupDir, '.claude-global.md');
-    let linkExists = false;
-    try { lstatSync(globalLinkPath); linkExists = true; } catch { /* missing */ }
-    if (!linkExists) {
-      try {
-        symlinkSync('/workspace/global/CLAUDE.md', globalLinkPath);
-      } catch (e: any) {
-        warnings.push(`Global symlink failed: ${e.message}`);
+  // 0. Materialize container.json — the runtime (src/container-config.ts#readContainerConfig)
+  //    reads groups/<folder>/container.json, NOT the agent_groups.container_config DB column.
+  //    Without this write, imported provider/mount/MCP/package/image settings are dead: the DB
+  //    column holds them but nothing reads it at wake time.
+  if (containerConfig && typeof containerConfig === 'object') {
+    try {
+      mkdirSync(groupDir, { recursive: true });
+      const containerJson = join(groupDir, 'container.json');
+      if (!existsSync(containerJson)) {
+        writeFileSync(containerJson, JSON.stringify(containerConfig, null, 2) + '\n');
       }
+    } catch (e: any) {
+      warnings.push(`container.json materialize failed: ${e.message}`);
     }
   }
+
+  // 1. (removed) .claude-global.md symlink — the flat-global @-import pattern
+  //    is retired. Main's CLAUDE.md is composed on every wake with all
+  //    content baked in; no runtime import symlink is needed. Legacy
+  //    symlinks from older installs are cleaned up by
+  //    scripts/migrate-global-to-shared.ts.
 
   // 2. settings.json
   mkdirSync(claudeSharedDir, { recursive: true });
@@ -150,6 +174,28 @@ function postImportGroupInit(
       if (!existsSync(dst)) {
         try { cpSync(join(skillsSrc, skill), dst, { recursive: true }); } catch (e: any) {
           warnings.push(`Skill copy '${skill}' failed: ${e.message}`);
+        }
+      }
+    }
+  }
+
+  // 3b. Subagent definitions — mirror src/group-init.ts:85-104. Any
+  //     skill or overlay directory with a sibling `agent.md` contributes
+  //     a subagent; without this, imported coworkers couldn't invoke
+  //     codex-critique and other overlay-backed subagents.
+  const agentsDst = join(claudeSharedDir, 'agents');
+  mkdirSync(agentsDst, { recursive: true });
+  for (const subdir of ['skills', 'overlays']) {
+    const srcRoot = join(projectRoot, 'container', subdir);
+    if (!existsSync(srcRoot)) continue;
+    for (const entry of readdirSync(srcRoot)) {
+      const agentFile = join(srcRoot, entry, 'agent.md');
+      if (existsSync(agentFile)) {
+        const dst = join(agentsDst, `${entry}.md`);
+        if (!existsSync(dst)) {
+          try { copyFileSync(agentFile, dst); } catch (e: any) {
+            warnings.push(`Subagent copy '${entry}' failed: ${e.message}`);
+          }
         }
       }
     }
@@ -1906,7 +1952,8 @@ function getState(): DashboardState {
     }
 
     for (const folder of folders) {
-      // Skip non-instance folders: global (shared memory)
+      // Skip legacy 'global' folder if present on pre-migration installs —
+      // it's retired as an agent group; the migration cleans it up.
       if (folder === 'global') continue;
       // Skip folders not registered in the DB (deleted coworkers leave stale folders)
       if (!registeredFolders.has(folder)) continue;
@@ -1964,7 +2011,7 @@ function getState(): DashboardState {
         }
       }
 
-      // Skip non-coworker folders
+      // Skip legacy 'global' folder (retired; migration cleans it up).
       if (folder === 'global') continue;
 
       // Determine status from IPC and task state
@@ -2735,10 +2782,10 @@ async function packageV1Archive(
   }
 
   // 2. Extract custom instructions from CLAUDE.md.
-  // V1 composed CLAUDE.md = base (groups/global/CLAUDE.md) + sections
-  // (templates/sections/*.md) + optional role templates (typed coworkers).
-  // V2 recomposes from its own base + sections + .instructions.md, so we
-  // must extract only the custom delta — not the shared boilerplate.
+  // V1 composed CLAUDE.md = base (groups/global/CLAUDE.md, retired in v2)
+  // + sections (templates/sections/*.md) + optional role templates (typed
+  // coworkers). V2 recomposes from its own base + sections + .instructions.md,
+  // so we must extract only the custom delta — not the shared boilerplate.
   //
   // Algorithm:
   //   a) Compose the v1 base from the v1 instance's own template files.
@@ -4385,9 +4432,16 @@ export async function handleRequest(
         res.end('{"error":"invalid folder name (alphanumeric, hyphens, underscores, 1-64 chars)"}');
         return;
       }
+      // Reserved folders that collide with system namespaces. 'main' is reserved
+      // except for the first-admin bootstrap (when no admin exists yet).
+      // Mirrors RESERVED_FOLDERS + ADMIN_ONLY_FOLDERS in src/group-folder.ts —
+      // dashboard can't cross the tsc boundary, so the authoritative list is
+      // duplicated here and in sanitizeImportedFolder().
       {
         const hasAdmin = getWriteDb()?.prepare('SELECT 1 FROM agent_groups WHERE is_admin = 1 LIMIT 1').get();
-        if ((folder === 'global' || folder === 'main') && hasAdmin) {
+        const lower = folder.toLowerCase();
+        const reserved = new Set(['global', 'shared', 'templates']);
+        if (reserved.has(lower) || (lower === 'main' && hasAdmin)) {
           res.writeHead(400, { 'Content-Type': 'application/json' });
           res.end('{"error":"reserved folder name"}');
           return;
@@ -4406,41 +4460,18 @@ export async function handleRequest(
         return;
       }
 
-      // Resolve coworkerType: single type, or composite from multiple
+      // Resolve coworkerType: single type, or composite (`a+b`) from multiple.
+      // The lego composer splits on `+` natively in resolveCoworkerManifest
+      // (src/claude-composer/resolve.ts), so a composite is just a type-name
+      // string — no need to persist a synthetic entry. The pre-lego path
+      // here used to write a legacy template/focusFiles/extends dict to
+      // coworker-types.json, which the composer never read — dead write
+      // that could leave the dashboard display out of sync with what the
+      // runner actually composed.
       const selectedTypes: string[] = types || (type ? [type] : []);
       let coworkerType: string | null = null;
-      if (selectedTypes.length === 1) {
-        coworkerType = selectedTypes[0];
-      } else if (selectedTypes.length > 1) {
-        // Create composite entry in coworker-types.json
-        const allTypes = getCoworkerTypes();
-        const compositeKey = selectedTypes.join('+');
-        if (!allTypes[compositeKey]) {
-          const templates: string[] = [];
-          const focusFiles: string[] = [];
-          const descriptions: string[] = [];
-          const mcpToolsSet = new Set<string>();
-          for (const t of selectedTypes) {
-            const entry = allTypes[t];
-            if (entry) {
-              const tpls = Array.isArray(entry.template) ? entry.template : [entry.template];
-              templates.push(...tpls);
-              if (entry.focusFiles) focusFiles.push(...entry.focusFiles);
-              if (entry.allowedMcpTools) entry.allowedMcpTools.forEach((tool: string) => mcpToolsSet.add(tool));
-              descriptions.push(entry.description || t);
-            }
-          }
-          allTypes[compositeKey] = {
-            description: descriptions.join(' + '),
-            template: templates,
-            extends: 'slang-build',
-            focusFiles,
-            allowedMcpTools: [...mcpToolsSet],
-          };
-          writeFileSync(getCoworkerTypesPath(), JSON.stringify(allTypes, null, 2) + '\n');
-          cachedTypes = null; // invalidate cache
-        }
-        coworkerType = compositeKey;
+      if (selectedTypes.length >= 1) {
+        coworkerType = selectedTypes.join('+');
       }
 
       const groupDir = join(getGroupsDir(), folder);
@@ -4457,7 +4488,16 @@ export async function handleRequest(
       const agId = `ag-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
       const hasAdmin = wdb.prepare('SELECT 1 FROM agent_groups WHERE is_admin = 1 LIMIT 1').get();
       const isAdmin = hasAdmin ? 0 : 1;
-      if (!coworkerType) coworkerType = isAdmin ? 'main' : 'global';
+      if (!coworkerType) coworkerType = isAdmin ? 'main' : 'default';
+      // Privilege guard: coworker_type='main' must never be assigned to a
+      // non-admin group. Admin = the one-per-install orchestrator row;
+      // non-admin groups that claim 'main' would trigger Main-only runtime
+      // privileges in container-runner.
+      if (coworkerType === 'main' && !isAdmin) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end('{"error":"coworker_type=main is reserved for the admin orchestrator"}');
+        return;
+      }
       wdb
         .prepare(
           'INSERT INTO agent_groups (id, name, folder, is_admin, agent_provider, container_config, coworker_type, allowed_mcp_tools, routing, created_at) VALUES (?, ?, ?, ?, ?, NULL, ?, ?, ?, ?)',
@@ -5008,7 +5048,7 @@ export async function handleRequest(
 
         const triggerCandidate = manifest.trigger || `@${agent.name.replace(/\s+/g, '')}`;
         const trigger = getUniqueTrigger(wdb, triggerCandidate);
-        let folder = agent.folder.replace(/[^a-zA-Z0-9_-]/g, '-');
+        let folder = sanitizeImportedFolder(agent.folder);
         { // Unique folder allocator
           const baseFolder = folder;
           let suffix = 2;
@@ -5044,8 +5084,16 @@ export async function handleRequest(
           for (const [archivePath, buf] of files) {
             if (!archivePath.startsWith('group-files/')) continue;
             const rel = archivePath.slice('group-files/'.length);
-            if (!rel || rel.includes('..')) continue;
+            if (!rel) continue;
+            // Defense in depth: reject absolute paths, `..`, and anything
+            // that normalizes to a destination outside stagingDir. A bare
+            // `.includes('..')` missed things like `foo/../../etc/passwd`
+            // after join resolves the segments.
             const dst = join(stagingDir, rel);
+            if (isAbsolute(rel) || !isInsideDir(stagingDir, dst)) {
+              warnings.push(`rejected archive entry escaping staging dir: ${archivePath}`);
+              continue;
+            }
             mkdirSync(dirname(dst), { recursive: true });
             writeFileSync(dst, buf);
           }
@@ -5062,8 +5110,12 @@ export async function handleRequest(
           for (const [archivePath, buf] of files) {
             if (!archivePath.startsWith('claude-shared/')) continue;
             const rel = archivePath.slice('claude-shared/'.length);
-            if (!rel || rel.includes('..')) continue;
+            if (!rel) continue;
             const dst = join(claudeSharedDir, rel);
+            if (isAbsolute(rel) || !isInsideDir(claudeSharedDir, dst)) {
+              warnings.push(`rejected archive entry escaping claude-shared dir: ${archivePath}`);
+              continue;
+            }
             mkdirSync(dirname(dst), { recursive: true });
             writeFileSync(dst, buf);
           }
@@ -5211,13 +5263,15 @@ export async function handleRequest(
         try {
           wdb.exec('BEGIN TRANSACTION');
           const importRouting: 'direct' | 'internal' = agent.routing === 'internal' ? 'internal' : 'direct';
+          // Privilege guard: never import a non-admin group with coworker_type='main'.
+          const importedType = agent.coworkerType === 'main' ? null : agent.coworkerType;
           wdb.prepare(
             'INSERT INTO agent_groups (id, name, folder, is_admin, agent_provider, container_config, coworker_type, allowed_mcp_tools, routing, created_at) VALUES (?, ?, ?, 0, ?, ?, ?, ?, ?, ?)'
           ).run(
             newAgId, agent.name, folder,
             agent.agentProvider || null,
             agent.containerConfig ? JSON.stringify(agent.containerConfig) : null,
-            agent.coworkerType || null,
+            importedType || null,
             agent.allowedMcpTools ? JSON.stringify(agent.allowedMcpTools) : null,
             importRouting,
             now,
@@ -5313,7 +5367,7 @@ export async function handleRequest(
           warnings.push(`File copy partial: ${copyErr.message}`);
         }
 
-        postImportGroupInit(newAgId, folder, warnings);
+        postImportGroupInit(newAgId, folder, warnings, agent.containerConfig);
 
         for (const u of unresolvedDests) {
           warnings.push(`Unresolved destination: ${u}`);
@@ -5374,7 +5428,7 @@ export async function handleRequest(
 
       const triggerCandidate = isV3 ? (data.trigger || `@${agent.name.replace(/\s+/g, '')}`) : (agent.trigger || `@${agent.name.replace(/\s+/g, '')}`);
       const trigger = getUniqueTrigger(wdb, triggerCandidate);
-      let folder = agent.folder.replace(/[^a-zA-Z0-9_-]/g, '-');
+      let folder = sanitizeImportedFolder(agent.folder);
       // Unique folder allocator — suffix with -2, -3, etc. on collision
       {
         const baseFolder = folder;
@@ -5420,7 +5474,7 @@ export async function handleRequest(
         // Write files — reject any hidden path component (starts with .)
         const bundleFiles = data.files || {};
         for (const [relPath, content] of Object.entries(bundleFiles)) {
-          if (relPath.includes('..') || relPath.startsWith('/')) continue;
+          if (!relPath) continue;
           // Reject any path component that starts with . (hidden files/dirs)
           const hasHiddenComponent = relPath.split('/').some(part => part.startsWith('.'));
           if (hasHiddenComponent) {
@@ -5428,6 +5482,14 @@ export async function handleRequest(
             continue;
           }
           const fullPath = join(stagingDir, relPath);
+          // Normalize + contain within stagingDir. A bare `.includes('..')`
+          // is both over- and under-broad: blocks valid filenames like
+          // `release-notes-vs-..-prev.md` and misses `foo/../../escape`
+          // after join() resolves segments.
+          if (isAbsolute(relPath) || !isInsideDir(stagingDir, fullPath)) {
+            warnings.push(`Blocked file: "${relPath}" (escapes staging dir)`);
+            continue;
+          }
           mkdirSync(join(fullPath, '..'), { recursive: true });
           writeFileSync(fullPath, content as string);
           filesWritten++;
@@ -5444,13 +5506,15 @@ export async function handleRequest(
       try {
         wdb.exec('BEGIN TRANSACTION');
         const stdRouting: 'direct' | 'internal' = agent.routing === 'internal' ? 'internal' : 'direct';
+        // Privilege guard: never import a non-admin group with coworker_type='main'.
+        const safeType = agent.coworkerType === 'main' ? null : agent.coworkerType;
         wdb.prepare(
           'INSERT INTO agent_groups (id, name, folder, is_admin, agent_provider, container_config, coworker_type, allowed_mcp_tools, routing, created_at) VALUES (?, ?, ?, 0, ?, ?, ?, ?, ?, ?)'
         ).run(
           agId, agent.name, folder,
           agent.agentProvider || null,
           agent.containerConfig ? JSON.stringify(agent.containerConfig) : null,
-          agent.coworkerType || null,
+          safeType || null,
           agent.allowedMcpTools ? JSON.stringify(agent.allowedMcpTools) : null,
           stdRouting,
           now,
@@ -5556,7 +5620,7 @@ export async function handleRequest(
         return;
       }
 
-      postImportGroupInit(agId, folder, warnings);
+      postImportGroupInit(agId, folder, warnings, agent.containerConfig);
 
       // 7. Restore agent memory files if present in the bundle
       let memoriesRestored = 0;
@@ -5684,7 +5748,7 @@ export async function handleRequest(
       const warnings: string[] = [];
       const triggerCandidate = manifest.trigger || `@${agent.name.replace(/\s+/g, '')}`;
       const trigger = getUniqueTrigger(wdb, triggerCandidate);
-      let importFolder = agent.folder.replace(/[^a-zA-Z0-9_-]/g, '-');
+      let importFolder = sanitizeImportedFolder(agent.folder);
       { // Unique folder allocator
         const baseFolder = importFolder;
         let suffix = 2;
@@ -5720,8 +5784,12 @@ export async function handleRequest(
         for (const [archivePath, buf] of files) {
           if (!archivePath.startsWith('group-files/')) continue;
           const rel = archivePath.slice('group-files/'.length);
-          if (!rel || rel.includes('..')) continue;
+          if (!rel) continue;
           const dst = join(stagingDir, rel);
+          if (isAbsolute(rel) || !isInsideDir(stagingDir, dst)) {
+            warnings.push(`rejected archive entry escaping staging dir: ${archivePath}`);
+            continue;
+          }
           mkdirSync(dirname(dst), { recursive: true });
           writeFileSync(dst, buf);
         }
@@ -5755,8 +5823,12 @@ export async function handleRequest(
         for (const [archivePath, buf] of files) {
           if (!archivePath.startsWith('claude-shared/')) continue;
           const rel = archivePath.slice('claude-shared/'.length);
-          if (!rel || rel.includes('..')) continue;
+          if (!rel) continue;
           const dst = join(claudeSharedDir, rel);
+          if (isAbsolute(rel) || !isInsideDir(claudeSharedDir, dst)) {
+            warnings.push(`rejected archive entry escaping claude-shared dir: ${archivePath}`);
+            continue;
+          }
           mkdirSync(dirname(dst), { recursive: true });
           writeFileSync(dst, buf);
         }
@@ -5855,11 +5927,13 @@ export async function handleRequest(
       let destsCreated = 0;
       try {
         wdb.exec('BEGIN TRANSACTION');
+        // Privilege guard: never import a non-admin group with coworker_type='main'.
+        const legacyImportedType = agent.coworkerType === 'main' ? null : agent.coworkerType;
         wdb.prepare(
           'INSERT INTO agent_groups (id, name, folder, is_admin, agent_provider, container_config, coworker_type, allowed_mcp_tools, created_at) VALUES (?, ?, ?, 0, ?, ?, ?, ?, ?)'
         ).run(newAgId, agent.name, importFolder, agent.agentProvider || null,
           agent.containerConfig ? JSON.stringify(agent.containerConfig) : null,
-          agent.coworkerType || null,
+          legacyImportedType || null,
           agent.allowedMcpTools ? JSON.stringify(agent.allowedMcpTools) : null, now);
 
         for (const ms of manifestSessions) {
@@ -5904,13 +5978,13 @@ export async function handleRequest(
         warnings.push(`File copy partial: ${copyErr.message}`);
       }
 
-      postImportGroupInit(newAgId, importFolder, warnings);
+      postImportGroupInit(newAgId, importFolder, warnings, agent.containerConfig);
 
-      // Migrate V1 global learnings → V2 groups/global/learnings/
+      // Migrate V1 global learnings → V2 data/shared/learnings/
       try {
         const v1LearningsDir = join(resolvedV1Path, 'groups', 'global', 'learnings');
         if (existsSync(v1LearningsDir)) {
-          const v2LearningsDir = join(getGroupsDir(), 'global', 'learnings');
+          const v2LearningsDir = join(getDataDir(), 'shared', 'learnings');
           mkdirSync(v2LearningsDir, { recursive: true });
           let copied = 0;
           for (const f of readdirSync(v1LearningsDir)) {
