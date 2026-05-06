@@ -56,7 +56,10 @@ describe('Scenario 4: typed coworker (slang-reader)', () => {
     expect(spine).toContain('## Identity');
     expect(spine).toContain('## Invariants');
     expect(spine).toContain('## Workflows');
-    expect(spine).toContain('`/slang-investigate`');
+    // slang-reader uses the consolidated `/plan` workflow (subsumes
+    // investigate/review/research); project-specific investigate/review
+    // workflows were retired.
+    expect(spine).toContain('`/plan`');
   });
 
   it('resolves all workflow and skill references through the catalog', () => {
@@ -113,14 +116,14 @@ describe('Scenario 4: typed coworker (slang-reader)', () => {
     }
 
     const workflows = section('Workflows');
-    // slang-reader workflows (investigate, review, slang-investigate) all fall
-    // into similar categories, so sub-headers may be suppressed. Check content.
-    expect(workflows).toContain('/slang-investigate');
-    expect(workflows).toContain('/slang-review');
+    // slang-reader uses the unified `/plan` workflow.
+    expect(workflows).toContain('/plan');
 
     const skills = section('Skills Available');
+    // Skills Available is now filtered to trait-bound skills only. base-nanoclaw
+    // has no trait binding so it's dropped (progressive disclosure); **Other**
+    // category no longer appears.
     expect(skills).toContain('**Repo**');
-    expect(skills).toContain('**Other**'); // base-nanoclaw has no categorizable trait.
-    expect(skills.indexOf('**Repo**')).toBeLessThan(skills.indexOf('**Other**'));
+    expect(skills).toContain('**Code**');
   });
 });
