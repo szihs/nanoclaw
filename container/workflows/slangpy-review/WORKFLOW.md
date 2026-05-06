@@ -1,5 +1,6 @@
 ---
 name: slangpy-review
+license: MIT
 type: workflow
 description: "Review a SlangPy change against project conventions and codebase-specific invariants."
 extends: review

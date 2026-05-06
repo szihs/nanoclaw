@@ -1,5 +1,6 @@
 ---
 name: slangpy-docs
+license: MIT
 description: "Read and write SlangPy documentation."
 provides: [doc.read, doc.write]
 allowed-tools: Read, Grep, Glob, Edit, Write, Bash(git add:*), Bash(git commit:*), Bash(python:*), Bash(sphinx:*), Bash(pre-commit:*)

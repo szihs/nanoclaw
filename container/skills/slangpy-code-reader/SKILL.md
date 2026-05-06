@@ -1,5 +1,6 @@
 ---
 name: slangpy-code-reader
+license: MIT
 description: "Read-only investigation of the SlangPy codebase. Navigate source, trace the functional API call path, understand architecture, apply review lenses."
 provides: [code.read, doc.read]
 allowed-tools: Bash, Read, Grep, Glob, mcp__deepwiki__ask_question

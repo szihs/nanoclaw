@@ -1,5 +1,6 @@
 ---
 name: slangpy-investigate
+license: MIT
 type: workflow
 description: "Investigate a SlangPy issue. Specialized steps for the SlangPy codebase."
 extends: investigate

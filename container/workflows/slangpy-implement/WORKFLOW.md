@@ -1,5 +1,6 @@
 ---
 name: slangpy-implement
+license: MIT
 type: workflow
 description: "Implement a fix or feature in SlangPy. Specialized build/test/format steps."
 extends: implement
