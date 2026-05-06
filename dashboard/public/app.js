@@ -4794,9 +4794,18 @@ function renderAdminInfra() {
   const onecliOk = d.onecli?.status === 'running';
   const netOk = d.network?.status === 'active';
 
-  // Local MCP servers (auto-discovered) with stop/restart controls
-  const localServers = (d.mcpAuthProxy?.servers || []).map(s => `
-    <tr><td>${esc(s)}</td><td>Local (stdio)</td><td>${d.mcpAuthProxy?.toolCount || 0} tools</td>
+  // Local MCP servers (auto-discovered) with stop/restart controls. Server-side now
+  // emits per-server tool counts as Record<name, count>; the flat `toolCount` is
+  // still used for the top "Discovered Tools" stat card. Before this, every row
+  // read the global sum — with slang-mcp (12) and slang-pr-knowledge (7) the table
+  // showed "19 tools" on both rows. Accept the legacy `string[]` shape too so a
+  // newer client against an older server doesn't regress.
+  const serverMap = d.mcpAuthProxy?.servers;
+  const serverEntries = Array.isArray(serverMap)
+    ? serverMap.map((name) => [name, d.mcpAuthProxy?.toolCount || 0])
+    : Object.entries(serverMap || {});
+  const localServers = serverEntries.map(([s, count]) => `
+    <tr><td>${esc(s)}</td><td>Local (stdio)</td><td>${count} tools</td>
     <td><span class="admin-chip active">Running</span>
     <button class="admin-action-btn" style="font-size:9px;padding:1px 6px;margin-left:4px" onclick="restartMcp('${esc(s)}')">Restart</button>
     <button class="admin-action-btn danger" style="font-size:9px;padding:1px 6px" onclick="stopMcp('${esc(s)}')">Stop</button></td></tr>`).join('');

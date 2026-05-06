@@ -6400,9 +6400,11 @@ export async function handleRequest(
         const serverEntries = Object.entries(tools).filter(
           (e): e is [string, string[]] => Array.isArray(e[1]),
         );
-        const serverNames = serverEntries.map(([k]) => k);
+        // Per-server counts so the MCP Servers table can show the right number per row.
+        // The flat `toolCount` is kept for the top "Discovered Tools" stat card.
+        const servers = Object.fromEntries(serverEntries.map(([k, v]) => [k, v.length]));
         const toolCount = serverEntries.reduce((sum, [, t]) => sum + t.length, 0);
-        checks.mcpAuthProxy = { status: 'running', servers: serverNames, toolCount };
+        checks.mcpAuthProxy = { status: 'running', servers, toolCount };
       })
       .catch(() => {
         checks.mcpAuthProxy = { status: 'unreachable' };
