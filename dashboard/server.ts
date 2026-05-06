@@ -1159,17 +1159,25 @@ function normalizeCodexEntry(raw: Record<string, unknown>): CcusageDayEntry {
   };
 }
 
-function runCodexCcusage(since?: string): Promise<CcusageDayEntry[]> {
+// Scoped to a specific CODEX_HOME so we can attribute Codex usage to the coworker that
+// produced it. Each NanoClaw session that used the codex provider has its own codex dir
+// (src/providers/codex.ts mounts <sessionDir>/codex → /home/node/.codex inside the
+// container), so we point @ccusage/codex at that dir and get just that session's rows.
+function runCodexCcusage(codexHome: string, since?: string): Promise<CcusageDayEntry[]> {
   return new Promise((resolve) => {
     const args = ['@ccusage/codex', 'daily', '--json', '--offline'];
     if (since) args.push('--since', since);
-    exec(`npx ${args.join(' ')}`, { timeout: 30000, maxBuffer: 10 * 1024 * 1024 }, (err, stdout) => {
-      if (err) { resolve([]); return; }
-      try {
-        const parsed = JSON.parse(stdout);
-        resolve((parsed.daily || []).map(normalizeCodexEntry));
-      } catch { resolve([]); }
-    });
+    exec(
+      `npx ${args.join(' ')}`,
+      { timeout: 30000, maxBuffer: 10 * 1024 * 1024, env: { ...process.env, CODEX_HOME: codexHome } },
+      (err, stdout) => {
+        if (err) { resolve([]); return; }
+        try {
+          const parsed = JSON.parse(stdout);
+          resolve((parsed.daily || []).map(normalizeCodexEntry));
+        } catch { resolve([]); }
+      },
+    );
   });
 }
 
@@ -1237,40 +1245,64 @@ async function refreshCcusageCache(): Promise<void> {
 
   for (const agDir of agDirs) {
     const claudeShared = join(sessionsDir, agDir, '.claude-shared');
-    if (!existsSync(join(claudeShared, 'projects'))) continue;
+    const hasClaude = existsSync(join(claudeShared, 'projects'));
     const groupName = nameMap.get(agDir) || agDir;
 
-    const [d1, d7, d30, all] = await Promise.all([
-      runCcusage(claudeShared, today),
-      runCcusage(claudeShared, week),
-      runCcusage(claudeShared, month),
-      runCcusage(claudeShared),
-    ]);
+    // --- Claude side (per-group via CLAUDE_CONFIG_DIR) ---
+    const [c1, c7, c30, cAll] = hasClaude
+      ? await Promise.all([
+          runCcusage(claudeShared, today),
+          runCcusage(claudeShared, week),
+          runCcusage(claudeShared, month),
+          runCcusage(claudeShared),
+        ])
+      : [[], [], [], []] as CcusageDayEntry[][];
 
-    allByPeriod['1d'].push(d1);
-    allByPeriod['7d'].push(d7);
-    allByPeriod['30d'].push(d30);
-    allByPeriod.all.push(all);
+    // --- Codex side (per-session-dir via CODEX_HOME) ---
+    // Every session under this agent-group that used the codex provider has
+    // <agDir>/<sessId>/codex/ — sum across all of them so a coworker that switched
+    // between Claude and Codex, or is Codex-only, gets one merged row.
+    const codexHomes: string[] = [];
+    try {
+      for (const sessId of readdirSync(join(sessionsDir, agDir))) {
+        if (!sessId.startsWith('sess-')) continue;
+        const cxHome = join(sessionsDir, agDir, sessId, 'codex');
+        if (existsSync(cxHome)) codexHomes.push(cxHome);
+      }
+    } catch { /* ag-dir removed mid-scan — ignore */ }
 
-    for (const [period, data] of [['1d', d1], ['7d', d7], ['30d', d30], ['all', all]] as const) {
-      result[period].byGroup.push({ groupId: agDir, groupName, daily: data });
+    const cxByPeriod: Record<'1d' | '7d' | '30d' | 'all', CcusageDayEntry[][]> = {
+      '1d': [], '7d': [], '30d': [], all: [],
+    };
+    for (const cxHome of codexHomes) {
+      const [cx1, cx7, cx30, cxAll] = await Promise.all([
+        runCodexCcusage(cxHome, today),
+        runCodexCcusage(cxHome, week),
+        runCodexCcusage(cxHome, month),
+        runCodexCcusage(cxHome),
+      ]);
+      cxByPeriod['1d'].push(cx1);
+      cxByPeriod['7d'].push(cx7);
+      cxByPeriod['30d'].push(cx30);
+      cxByPeriod.all.push(cxAll);
     }
-  }
 
-  // Codex (OpenAI) usage is process-wide, not per-agent-group — run once and add to combined.
-  const [cx1, cx7, cx30, cxAll] = await Promise.all([
-    runCodexCcusage(today),
-    runCodexCcusage(week),
-    runCodexCcusage(month),
-    runCodexCcusage(),
-  ]);
-  if (cxAll.length > 0) {
-    allByPeriod['1d'].push(cx1);
-    allByPeriod['7d'].push(cx7);
-    allByPeriod['30d'].push(cx30);
-    allByPeriod.all.push(cxAll);
-    for (const [period, data] of [['1d', cx1], ['7d', cx7], ['30d', cx30], ['all', cxAll]] as const) {
-      result[period].byGroup.push({ groupId: 'codex', groupName: 'Codex (OpenAI)', daily: data });
+    // --- Merge Claude + Codex into one row per period, drop the group entirely if silent. ---
+    const merged = {
+      '1d': mergeDailyEntries([c1, ...cxByPeriod['1d']]),
+      '7d': mergeDailyEntries([c7, ...cxByPeriod['7d']]),
+      '30d': mergeDailyEntries([c30, ...cxByPeriod['30d']]),
+      all: mergeDailyEntries([cAll, ...cxByPeriod.all]),
+    };
+    if (merged.all.length === 0) continue; // no activity at all — skip silent coworkers
+
+    allByPeriod['1d'].push(merged['1d']);
+    allByPeriod['7d'].push(merged['7d']);
+    allByPeriod['30d'].push(merged['30d']);
+    allByPeriod.all.push(merged.all);
+
+    for (const period of ['1d', '7d', '30d', 'all'] as const) {
+      result[period].byGroup.push({ groupId: agDir, groupName, daily: merged[period] });
     }
   }
 
@@ -6354,10 +6386,22 @@ export async function handleRequest(
       .catch(() =>
         fetch(`http://127.0.0.1:${mcpPort}/tools`, { signal: AbortSignal.timeout(3000), headers: mcpHeaders }),
       )
-      .then((r) => r.json())
-      .then((tools: Record<string, string[]>) => {
-        const serverNames = Object.keys(tools);
-        const toolCount = Object.values(tools).reduce((sum, t) => sum + t.length, 0);
+      .then(async (r) => {
+        // A 401 from the proxy returns `{"error":"Unauthorized"}` — if we parsed that
+        // as a tools map the UI rendered a phantom server named "error" with
+        // "12 tools" (Object.keys → ["error"], then "Unauthorized".length = 12 through
+        // the reduce). Guard status + per-value array-shape before treating as a
+        // tools registry.
+        if (!r.ok) {
+          checks.mcpAuthProxy = { status: 'unauthorized', statusCode: r.status };
+          return;
+        }
+        const tools = (await r.json()) as Record<string, unknown>;
+        const serverEntries = Object.entries(tools).filter(
+          (e): e is [string, string[]] => Array.isArray(e[1]),
+        );
+        const serverNames = serverEntries.map(([k]) => k);
+        const toolCount = serverEntries.reduce((sum, [, t]) => sum + t.length, 0);
         checks.mcpAuthProxy = { status: 'running', servers: serverNames, toolCount };
       })
       .catch(() => {
