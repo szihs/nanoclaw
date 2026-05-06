@@ -1,5 +1,6 @@
 ---
 name: deep-research
+license: MIT
 description: "Deep external research against public repositories, docs, and linked knowledge. Trigger when you need background on a library, standard, or unfamiliar codebase before making a call. Keywords: research, look up, what is, how does X work, deepwiki."
 provides: [plan.research, doc.read]
 allowed-tools: Read, Grep, Glob, mcp__deepwiki__ask_question, mcp__deepwiki__read_wiki_contents, mcp__deepwiki__read_wiki_structure

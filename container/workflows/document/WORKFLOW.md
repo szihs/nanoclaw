@@ -1,5 +1,6 @@
 ---
 name: document
+license: MIT
 type: workflow
 description: Turn a code change, new feature, or stale doc into refreshed, linked, and verified project documentation. Use after a feature lands, when a doc gap is reported, or as part of a release-prep pass. Not for building the feature itself.
 requires: [code.read, doc.read, doc.write, repo.pr]

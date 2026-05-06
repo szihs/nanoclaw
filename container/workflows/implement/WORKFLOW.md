@@ -1,5 +1,6 @@
 ---
 name: implement
+license: MIT
 type: workflow
 description: Turn an investigated issue or spec into code — reproduce, fix, write tests, and submit a PR. Use after investigation confirms the problem, or when given a clear spec. Covers bug fixes, features, and test authoring.
 requires: [code.read, code.edit, test.run, test.gen, repo.pr]

@@ -1,5 +1,6 @@
 ---
 name: plan
+license: MIT
 description: "Create a structured plan before solving. Take a requirement, research the problem space, identify approaches, evaluate trade-offs, and produce an actionable plan. Use before any non-trivial implementation — never jump straight to code without a plan."
 provides: [plan.research]
 allowed-tools: Read, Grep, Glob, WebSearch, WebFetch, Bash(find:*), Bash(git log:*), Bash(git show:*)

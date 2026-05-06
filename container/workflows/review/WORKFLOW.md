@@ -1,5 +1,6 @@
 ---
 name: review
+license: MIT
 type: workflow
 description: Review a proposed change (PR, diff, or patch) against project conventions and produce actionable feedback. Use when asked to review, critique, or approve a change.
 requires: [repo.read, code.read, doc.read]
