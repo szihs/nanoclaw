@@ -1,0 +1,54 @@
+nanoclaw-common:
+  description: "NanoClaw platform spine — identity, contribution invariants, repo layout."
+  project: nanoclaw
+  extends: base-common
+  identity: container/spines/nanoclaw/identity/engineer.md
+  invariants:
+    - container/spines/nanoclaw/invariants/public-api.md
+  context:
+    - container/spines/nanoclaw/context/layout.md
+  skills:
+    - nanoclaw-build
+    - nanoclaw-code-reader
+    - nanoclaw-github
+    - deep-research
+  workflows: []
+  overlays:
+    - critique-overlay
+  mcpServers:
+    deepwiki:
+      type: http
+      url: https://mcp.deepwiki.com/mcp
+  bindings:
+    repo: nanoclaw-github
+    issues: nanoclaw-github
+    code: nanoclaw-code-reader
+    doc: nanoclaw-code-reader
+    test: nanoclaw-build
+    plan: deep-research
+    critique: codex-critique
+
+nanoclaw-reader:
+  description: "Read-only NanoClaw coworker — investigate issues, review PRs, research codebase. Cannot edit code or create PRs."
+  project: nanoclaw
+  extends: nanoclaw-common
+  workflows:
+    - nanoclaw-investigate
+    - nanoclaw-review
+
+nanoclaw-writer:
+  description: "Write-capable NanoClaw coworker — investigate, implement, review, document. Can edit code, write tests, create PRs."
+  project: nanoclaw
+  extends: nanoclaw-common
+  skills:
+    - nanoclaw-code-writer
+    - nanoclaw-docs
+  workflows:
+    - nanoclaw-investigate
+    - nanoclaw-implement
+    - nanoclaw-review
+    - nanoclaw-document
+  bindings:
+    code: nanoclaw-code-writer
+    test: nanoclaw-build
+    doc: nanoclaw-docs
