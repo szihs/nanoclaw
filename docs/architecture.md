@@ -333,10 +333,6 @@ In both cases, the approval and action execution happen on the host side, not th
 
 **Approval routing:** Privilege is a user-level concept. `user_roles` records `owner` (global only — first user to pair becomes owner) and `admin` (global or scoped to a specific `agent_group_id`). When an action requires approval, `pickApprover(agentGroupId)` returns candidates in order: scoped admins for that agent group → global admins → owners (deduplicated). `pickApprovalDelivery` then takes the first candidate reachable via `ensureUserDm` (with a same-channel-kind tie-break so a Discord approval request prefers a Discord-using approver). The approval card lands in the approver's DM messaging group, not the origin chat. Delivery is resolved through the Chat SDK's `openDM` for resolution-required channels (Discord/Slack/…) or the user's handle directly for direct-addressable channels (Telegram/WhatsApp/…), and the mapping is cached in `user_dms` for subsequent requests. See `src/access.ts`, `src/user-dm.ts`.
 
-**Editing a sent message:**
-
-Agent calls an `edit_message` tool with the message ID and new content. Agent-runner writes messages_out with an edit operation. Host calls `adapter.editMessage()`. Messages in the agent's context include integer IDs so the agent can reference them.
-
 **Reactions:**
 
 Agent calls `add_reaction` tool with message ID and emoji. Agent-runner writes messages_out with a reaction operation. Host calls `adapter.addReaction()`.
@@ -349,9 +345,6 @@ Agent calls `add_reaction` tool with message ID and emoji. Agent-runner writes m
 
 // Interactive card
 { "operation": "ask_question", "title": "Deploy", "question": "Approve deployment?", "options": ["Yes", "No", "Defer"] }
-
-// Edit existing message
-{ "operation": "edit", "messageId": "3", "text": "Updated: LGTM with minor comments" }
 
 // Reaction
 { "operation": "reaction", "messageId": "5", "emoji": "thumbs_up" }
@@ -449,8 +442,6 @@ The central DB session row creation is the serialization point. No Claude SDK se
 ### Output Delivery
 
 NanoClaw does not stream tokens to users. The Claude Agent SDK's `query()` yields complete results. The agent-runner writes one complete message to messages_out per result. The host delivers complete messages to channels.
-
-Message editing is supported as an explicit operation (agent calls an `edit_message` tool), not as a streaming mechanism.
 
 Typing indicators: host sets typing when a container is active for a session, clears when the container exits or a response appears in messages_out.
 
@@ -843,7 +834,6 @@ MCP tools write directly to the session DB.
 | Tool | What it does |
 |------|-------------|
 | `ask_user_question` | Write `messages_out` with question card. Hold tool call open, poll `messages_in` for response matching `questionId`. Return selection as tool result. |
-| `edit_message` | Write `messages_out` with `operation: 'edit'` |
 | `add_reaction` | Write `messages_out` with `operation: 'reaction'` |
 | `send_to_agent` | Write `messages_out` with `channel_type: 'agent'`, `platform_id: '{target}'` |
 | `send_card` | Write `messages_out` with card structure |

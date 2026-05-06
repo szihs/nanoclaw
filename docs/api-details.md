@@ -131,10 +131,7 @@ function createChatSdkBridge(
       const tid = threadId ?? platformId;
       if (message.kind === 'chat-sdk') {
         const content = message.content as Record<string, unknown>;
-        if (content.operation === 'edit') {
-          await adapter.editMessage(tid, content.messageId as string, 
-            { markdown: content.text as string });
-        } else if (content.operation === 'reaction') {
+        if (content.operation === 'reaction') {
           await adapter.addReaction(tid, content.messageId as string, 
             content.emoji as string);
         } else {

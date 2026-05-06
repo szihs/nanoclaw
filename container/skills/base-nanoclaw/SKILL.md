@@ -21,8 +21,12 @@ Cross-cutting tools every coworker can use for status updates, scheduling, elici
 | `mcp__nanoclaw__send_card` | Structured status panel clearer than prose |
 | `mcp__nanoclaw__append_learning` | Durable discovery that future coworkers should reuse |
 
-## Conventions
+## Nuance beyond the MCP schemas
 
-- Keep `send_message` updates to meaningful milestones. Do not narrate every tool call.
-- Use `<internal>...</internal>` for scratchpad reasoning that should not be shipped to the user.
-- For `append_learning`, include a one-line summary, the evidence, and the file/path that proves it.
+- **send_message pacing.** Short turn (1-2 tool calls): don't narrate. Longer turn: send a one-line acknowledgment early. Long-running: periodic updates at meaningful transitions (not every tool call), especially before slow operations.
+- **send_file** (`mcp__nanoclaw__send_file({ path, text?, filename?, to? })`) — deliver a file from your workspace. `path` is absolute or relative to `/workspace/agent/`. Use for artifacts (charts, PDFs, reports) instead of dumping contents into chat.
+- **add_reaction** (`{ messageId, emoji }`) — `messageId` is the numeric `#N` (integer, not string). `emoji` is the shortcode name (`thumbs_up`, `heart`, `eyes`).
+- **ask_user_question vs send_card.** `ask_user_question` **blocks** your turn until the user picks an option (default 300s timeout) — use only when you genuinely cannot proceed without the decision. `send_card` **returns immediately** — use for structured status panels or read-only info. For free-text input, send a normal message and wait for their reply.
+- **schedule_task script gate.** For frequent recurring tasks (more than a few a day), attach a bash `script` that prints `{ wakeAgent: true|false, data: {...} }`. The agent only wakes when the script returns `true`, saving API credits.
+- **schedule_task `new_session`.** Default is `true` — each fire runs in a fresh session (cached system prompt reused, conversation history discarded). Opt out (`false`) ONLY when a multi-fire workflow genuinely needs in-conversation memory across fires.
+- **append_learning.** Include a one-line summary, the evidence, and the file/path that proves it.

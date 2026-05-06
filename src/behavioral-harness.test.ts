@@ -111,7 +111,7 @@ describe('SC02: scheduled task pause stays paused past fire time', () => {
 
     // Explicit cross-check: the row still exists (not deleted) and its
     // status is 'paused' — so resume would pick it back up.
-    const row = db.prepare("SELECT status FROM messages_in WHERE id = ?").get('task-sc02') as {
+    const row = db.prepare('SELECT status FROM messages_in WHERE id = ?').get('task-sc02') as {
       status: string;
     };
     expect(row.status).toBe('paused');
@@ -135,7 +135,7 @@ describe('SC04: scheduled task cancel stays cancelled past fire time', () => {
     // Cancelled → status='completed' → not due.
     expect(countDueMessages(db)).toBe(0);
 
-    const row = db.prepare("SELECT status, recurrence FROM messages_in WHERE id = ?").get('task-sc04') as {
+    const row = db.prepare('SELECT status, recurrence FROM messages_in WHERE id = ?').get('task-sc04') as {
       status: string;
       recurrence: string | null;
     };
@@ -164,9 +164,10 @@ describe('SC04: scheduled task cancel stays cancelled past fire time', () => {
     cancelTask(db, 'task-sc04r');
 
     expect(countDueMessages(db)).toBe(0);
-    const follow = db
-      .prepare("SELECT status, recurrence FROM messages_in WHERE id = 'task-sc04r-next'")
-      .get() as { status: string; recurrence: string | null };
+    const follow = db.prepare("SELECT status, recurrence FROM messages_in WHERE id = 'task-sc04r-next'").get() as {
+      status: string;
+      recurrence: string | null;
+    };
     expect(follow.status).toBe('completed');
     expect(follow.recurrence).toBeNull();
     db.close();
@@ -336,15 +337,11 @@ describe('MG01: migrations are idempotent', () => {
     db.pragma('journal_mode = DELETE');
     runMigrations(db);
 
-    const before = db
-      .prepare("SELECT name, type, sql FROM sqlite_master WHERE type = 'table' ORDER BY name")
-      .all();
+    const before = db.prepare("SELECT name, type, sql FROM sqlite_master WHERE type = 'table' ORDER BY name").all();
 
     runMigrations(db);
 
-    const after = db
-      .prepare("SELECT name, type, sql FROM sqlite_master WHERE type = 'table' ORDER BY name")
-      .all();
+    const after = db.prepare("SELECT name, type, sql FROM sqlite_master WHERE type = 'table' ORDER BY name").all();
     expect(after).toEqual(before);
 
     // agent_groups.disable_overlays should exist exactly once.

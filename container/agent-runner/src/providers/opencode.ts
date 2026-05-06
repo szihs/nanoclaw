@@ -63,18 +63,17 @@ function spawnOpencodeServer(config: Record<string, unknown>, timeoutMs = 10_000
 }
 
 function readClaudeMdForPrompt(): string | undefined {
+  // Coworker CLAUDE.md is composed by the host (composeCoworkerSpine) with
+  // all operational content — spine invariants, context fragments, skills,
+  // workflows, overlays — baked in. Main's CLAUDE.md similarly contains the
+  // manager body plus any project fragments. No separate "global" body
+  // needs to be appended; the shared bucket at /workspace/shared/ is for
+  // cross-group facts (learnings), not prompt content.
   const groupPath = '/workspace/agent/CLAUDE.md';
-  const globalPath = '/workspace/global/CLAUDE.md';
-  let content = '';
   if (fs.existsSync(groupPath)) {
-    content += fs.readFileSync(groupPath, 'utf-8');
+    return fs.readFileSync(groupPath, 'utf-8');
   }
-  const isMain = process.env.NANOCLAW_IS_MAIN === '1';
-  if (!isMain && fs.existsSync(globalPath)) {
-    if (content) content += '\n\n---\n\n';
-    content += fs.readFileSync(globalPath, 'utf-8');
-  }
-  return content || undefined;
+  return undefined;
 }
 
 function wrapPromptWithContext(text: string, systemInstructions?: string): string {

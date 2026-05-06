@@ -54,7 +54,8 @@ export async function handleScheduleTask(
     taskId,
     processAfter,
     recurrence,
-    newSession: content.new_session === false ? 'explicit-false' : content.new_session === true ? 'explicit-true' : 'default',
+    newSession:
+      content.new_session === false ? 'explicit-false' : content.new_session === true ? 'explicit-true' : 'default',
   });
 }
 

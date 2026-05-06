@@ -27,6 +27,7 @@ import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 
+import { loadConfig } from './config.js';
 import { buildSystemPromptAddendum } from './destinations.js';
 // Providers barrel — each enabled provider self-registers on import.
 // Provider skills append imports to providers/index.ts.
@@ -43,6 +44,11 @@ function log(msg: string): void {
 const CWD = '/workspace/agent';
 
 async function main(): Promise<void> {
+  // Load /workspace/agent/container.json once at startup. Without this call,
+  // getConfig() throws on first read, leaving features like maxMessagesPerPrompt
+  // stuck on the hardcoded fallback. Safe to call multiple times (memoized).
+  loadConfig();
+
   const providerName = (process.env.AGENT_PROVIDER || 'claude').toLowerCase() as ProviderName;
   const assistantName = process.env.NANOCLAW_ASSISTANT_NAME;
   const adminUserIds = new Set(

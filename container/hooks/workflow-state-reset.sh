@@ -5,7 +5,7 @@
 #
 # Detection strategy (ordered by reliability):
 # 1. Router envelope (<context> + <message>) — always a new routed task → full reset
-# 2. Workflow invocation (/implement, /investigate, /document, /review) → full reset
+# 2. Workflow invocation (/plan, /implement, or project variants like /slang-implement) → full reset
 # 3. Idle timer (>10min since last activity) → full reset
 # 4. Otherwise — follow-up message within same task → no reset
 set -euo pipefail
@@ -35,8 +35,12 @@ if echo "$PROMPT" | grep -q '<context' && echo "$PROMPT" | grep -q '<message'; t
   do_reset
 fi
 
-# Signal 2: Workflow invocation at the start of the prompt
-if echo "$PROMPT" | grep -qP '^\s*/(implement|investigate|document|review)\b'; then
+# Signal 2: Workflow invocation at the start of the prompt. Matches the base
+# workflows (/plan, /implement) and any project-specific variant whose name
+# ends in one of those suffixes. The `[a-z0-9-]*-` prefix is non-capturing
+# and allows multi-segment names like /nv-graphics-implement, not just the
+# single-prefix /slang-implement.
+if echo "$PROMPT" | grep -qP '^\s*/([a-z0-9-]+-)?(plan|implement)\b'; then
   do_reset
 fi
 

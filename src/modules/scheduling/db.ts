@@ -83,8 +83,7 @@ export function updateTask(db: Database.Database, taskId: string, update: TaskUp
 
   const setProcessAfter = update.processAfter !== undefined;
   const setRecurrence = update.recurrence !== undefined;
-  const mergeContent =
-    update.prompt !== undefined || update.script !== undefined || update.newSession !== undefined;
+  const mergeContent = update.prompt !== undefined || update.script !== undefined || update.newSession !== undefined;
 
   const tx = db.transaction(() => {
     for (const row of rows) {
