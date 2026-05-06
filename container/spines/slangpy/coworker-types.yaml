@@ -1,0 +1,55 @@
+slangpy-common:
+  description: "SlangPy spine -- identity, API invariants, repo layout."
+  project: slangpy
+  extends: base-common
+  identity: container/spines/slangpy/identity/engineer.md
+  invariants:
+    - container/spines/slangpy/invariants/public-api.md
+  context:
+    - container/spines/slangpy/context/layout.md
+  skills:
+    - slangpy-build
+    - slangpy-code-reader
+    - slangpy-github
+    - deep-research
+  workflows: []
+  overlays:
+    - critique-overlay
+  mcpServers:
+    deepwiki:
+      type: http
+      url: https://mcp.deepwiki.com/mcp
+  bindings:
+    repo: slangpy-github
+    issues: slangpy-github
+    code: slangpy-code-reader
+    doc: slangpy-code-reader
+    test: slangpy-build
+    ci: slangpy-build
+    plan: deep-research
+    critique: codex-critique
+
+slangpy-reader:
+  description: "Read-only SlangPy coworker -- investigate issues, review PRs, research codebase. Cannot edit code or create PRs."
+  project: slangpy
+  extends: slangpy-common
+  workflows:
+    - slangpy-investigate
+    - slangpy-review
+
+slangpy-writer:
+  description: "Write-capable SlangPy coworker -- investigate, implement, review, document. Can edit code, write tests, create PRs."
+  project: slangpy
+  extends: slangpy-common
+  skills:
+    - slangpy-code-writer
+    - slangpy-docs
+  workflows:
+    - slangpy-investigate
+    - slangpy-implement
+    - slangpy-review
+    - slangpy-document
+  bindings:
+    code: slangpy-code-writer
+    test: slangpy-build
+    doc: slangpy-docs
