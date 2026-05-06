@@ -89,13 +89,15 @@ describe('plan-gate.sh — MCP tool gating (PR-1)', () => {
   it('exits 0 for gated MCP tool when workflow-state.json has no active conditions', () => {
     // An empty state file is the post-reset prod state — workflow-state-reset.sh
     // zeroes the JSON before the container runs any user input. No plan
-    // requirement active AND no critique requirement set → no block.
+    // requirement active, no critique_required set, AND ≥1 critique round
+    // completed in this task → no block.
     fs.writeFileSync(
       stateFile,
       JSON.stringify({
         plan_written: true,
         plan_stale: false,
         critique_required: false,
+        critique_rounds: 1,
       }),
     );
     const result = runPlanGate(
@@ -108,13 +110,16 @@ describe('plan-gate.sh — MCP tool gating (PR-1)', () => {
   });
 
   it('blocks gated MCP tool with EXTERNAL POST BLOCKED when critique_required=true', () => {
+    // critique_rounds=1 satisfies the "one critique per task" gate (added
+    // after PR-1) so we reach and exercise the critique_required branch —
+    // which kicks in once edits_since_critique crosses the threshold.
     fs.writeFileSync(
       stateFile,
       JSON.stringify({
         plan_written: true,
         critique_required: true,
-        critique_rounds: 0,
-        critique_round_at_flag: 0,
+        critique_rounds: 1,
+        critique_round_at_flag: 1,
         edits_since_critique: 7,
       }),
     );
@@ -127,6 +132,32 @@ describe('plan-gate.sh — MCP tool gating (PR-1)', () => {
     expect(result.status).toBe(2);
     expect(result.stderr).toContain('EXTERNAL POST BLOCKED');
     expect(result.stderr).toContain('mcp__slang-mcp__discord_send_message');
+  });
+
+  it('blocks gated MCP tool when no critique has run in this task (critique_rounds=0)', () => {
+    // This is the core of the per-task rule: even with plan_written=true
+    // and critique_required=false, a fresh task (critique_rounds=0) must
+    // have ≥1 codex-critique round before any external post. Stops the
+    // #11037 "post-then-addendum" pattern where the agent published
+    // before any review had happened.
+    fs.writeFileSync(
+      stateFile,
+      JSON.stringify({
+        plan_written: true,
+        plan_stale: false,
+        critique_required: false,
+        critique_rounds: 0,
+      }),
+    );
+    const result = runPlanGate(
+      { tool_name: 'mcp__slang-mcp__discord_send_message', tool_input: {} },
+      envOverride({
+        CRITIQUE_GATED_TOOLS: 'mcp__slang-mcp__discord_send_message',
+      }),
+    );
+    expect(result.status).toBe(2);
+    expect(result.stderr).toContain('EXTERNAL POST BLOCKED');
+    expect(result.stderr).toContain('No codex-critique');
   });
 
   it('blocks gated MCP tool when plan_written is missing and OVERLAY_HAS_PLAN=1', () => {
