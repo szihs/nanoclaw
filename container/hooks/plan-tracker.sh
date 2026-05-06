@@ -10,10 +10,11 @@ FILE=$(echo "$INPUT" | jq -r '.tool_input.file_path // empty')
 [ -z "$FILE" ] && exit 0
 
 # Tracks two kinds of writes:
-#   /workspace/agent/plans/*    → marks plan_written, resets edits_since_plan
+#   /workspace/agent/reports/*   → marks plan_written, resets edits_since_plan
+#     (the /plan workflow's `produces` path; `plans/` kept as a legacy alias)
 #   /workspace/agent/critiques/* → marks the active critique round as recorded
 case "$FILE" in
-  /workspace/agent/plans/*)
+  /workspace/agent/reports/*|/workspace/agent/plans/*)
     mkdir -p "$(dirname "$STATE")"
     if [ -f "$STATE" ]; then
       jq --arg path "$FILE" \

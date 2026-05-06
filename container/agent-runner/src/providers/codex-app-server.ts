@@ -315,7 +315,7 @@ export function attachCodexAutoApproval(server: AppServer, hookConfig?: HookConf
             log(`[hooks] Plan gate: blocking edit to ${filePath} — no plan written`);
             sendCodexResponse(server, req.id, {
               decision: 'reject',
-              reason: 'Write a plan to /workspace/agent/plans/ before editing source files.',
+              reason: 'Write a plan to /workspace/agent/reports/ before editing source files.',
             });
             return;
           }
@@ -323,7 +323,7 @@ export function attachCodexAutoApproval(server: AppServer, hookConfig?: HookConf
             log(`[hooks] Plan gate: blocking edit to ${filePath} — plan stale (${state.edits_since_plan} edits)`);
             sendCodexResponse(server, req.id, {
               decision: 'reject',
-              reason: `Plan is stale (${state.edits_since_plan} edits since last plan). Write an updated plan to /workspace/agent/plans/ before continuing.`,
+              reason: `Plan is stale (${state.edits_since_plan} edits since last plan). Write an updated plan to /workspace/agent/reports/ before continuing.`,
             });
             return;
           }
@@ -391,8 +391,8 @@ export function attachCodexAutoApproval(server: AppServer, hookConfig?: HookConf
       if (item.type === 'fileChange' || item.type === 'applyPatch') {
         const filePath = item.path || '';
 
-        // Plan tracker: writing to plans/ sets plan_written
-        if (filePath.includes('/workspace/agent/plans/')) {
+        // Plan tracker: writing to reports/ (new canonical) or plans/ (legacy) sets plan_written
+        if (filePath.includes('/workspace/agent/reports/') || filePath.includes('/workspace/agent/plans/')) {
           state.plan_written = true;
           state.plan_stale = false;
           state.edits_since_plan = 0;

@@ -9,8 +9,10 @@ const projectRoot = path.resolve(__dirname, '..');
 
 const checkMode = process.argv.includes('--check');
 
+// Only groups/main/CLAUDE.md is rebuilt here. The retired 'global' flat
+// type is gone; typed coworkers' CLAUDE.md is composed at container spawn
+// time, not tracked on disk.
 const targets: { rel: string; coworkerType: string }[] = [
-  { rel: 'groups/global/CLAUDE.md', coworkerType: 'global' },
   { rel: 'groups/main/CLAUDE.md', coworkerType: 'main' },
 ];
 

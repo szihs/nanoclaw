@@ -1,13 +1,15 @@
 /**
  * `append_learning` delivery-action handler.
  *
- * Persists a shared learning to the global learnings directory and rebuilds
- * the INDEX.md file. Any agent can contribute learnings.
+ * Persists a shared learning to the shared learnings directory
+ * (data/shared/learnings/) and rebuilds the INDEX.md file. Any agent
+ * can contribute learnings via the MCP tool; the file is mounted at
+ * /workspace/shared/learnings/ inside the container.
  */
 import fs from 'fs';
 import path from 'path';
 
-import { GROUPS_DIR } from '../../config.js';
+import { SHARED_DIR } from '../../config.js';
 import { getSession } from '../../db/sessions.js';
 import { wakeContainer } from '../../container-runner.js';
 import { log } from '../../log.js';
@@ -37,8 +39,8 @@ export async function handleAppendLearning(content: Record<string, unknown>, ses
     notifyAgent(session, 'append_learning failed: title and content are required.');
     return;
   }
-  const globalDir = path.join(GROUPS_DIR, 'global', 'learnings');
-  fs.mkdirSync(globalDir, { recursive: true });
+  const sharedDir = path.join(SHARED_DIR, 'learnings');
+  fs.mkdirSync(sharedDir, { recursive: true });
 
   const slug = title
     .toLowerCase()
@@ -46,11 +48,11 @@ export async function handleAppendLearning(content: Record<string, unknown>, ses
     .replace(/^-+|-+$/g, '')
     .slice(0, 50);
   const filename = `${Date.now()}-${slug}.md`;
-  fs.writeFileSync(path.join(globalDir, filename), `# ${title}\n\n${body}\n`);
+  fs.writeFileSync(path.join(sharedDir, filename), `# ${title}\n\n${body}\n`);
 
   // Rebuild INDEX.md
   const files = fs
-    .readdirSync(globalDir)
+    .readdirSync(sharedDir)
     .filter((f) => f.endsWith('.md') && f !== 'INDEX.md')
     .sort();
   const indexLines = ['# Shared Learnings Index\n'];
@@ -58,7 +60,7 @@ export async function handleAppendLearning(content: Record<string, unknown>, ses
     const displayName = f.replace(/^\d+-/, '').replace(/\.md$/, '').replace(/-/g, ' ');
     indexLines.push(`- [${displayName}](${f})`);
   }
-  fs.writeFileSync(path.join(globalDir, 'INDEX.md'), indexLines.join('\n') + '\n');
+  fs.writeFileSync(path.join(sharedDir, 'INDEX.md'), indexLines.join('\n') + '\n');
 
   notifyAgent(session, `Learning saved: ${title}`);
   log.info('Shared learning appended', { title, filename });

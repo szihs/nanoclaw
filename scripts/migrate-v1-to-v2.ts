@@ -34,11 +34,14 @@ import { extractLegacyCustomInstructions, recomposeLegacyTemplate } from '../src
 
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(SCRIPT_DIR, '..');
-// If the dashboard skill is installed in this v2 target, the generated
+// If the dashboard is installed in this v2 target, the generated
 // migration summary includes a curl snippet for the dashboard's bulk
 // import API. Gating at runtime here means project branches don't need
-// to edit this script to contribute their own summary content.
-const HAS_DASHBOARD = fs.existsSync(path.join(REPO_ROOT, 'container/skills/dashboard-base'));
+// to edit this script to contribute their own summary content. The
+// earlier `container/skills/dashboard-base/` check was retired when the
+// dashboard was promoted out of the skill tree — the live dir is
+// `dashboard/` at repo root.
+const HAS_DASHBOARD = fs.existsSync(path.join(REPO_ROOT, 'dashboard/server.ts'));
 
 // --- Args ---
 const args = process.argv.slice(2);

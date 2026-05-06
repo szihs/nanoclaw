@@ -25,6 +25,7 @@ import {
 import { getSession } from '../../db/sessions.js';
 import { wakeContainer } from '../../container-runner.js';
 import { initGroupFilesystem } from '../../group-init.js';
+import { isValidGroupFolder } from '../../group-folder.js';
 import { log } from '../../log.js';
 import { writeSessionMessage } from '../../session-manager.js';
 import type { AgentGroup, Session } from '../../types.js';
@@ -72,11 +73,25 @@ export async function handleCreateAgent(content: Record<string, unknown>, sessio
     return;
   }
 
-  // Derive a safe folder name, deduplicated globally across agent_groups.folder
+  // Derive a safe folder name, deduplicated globally across agent_groups.folder.
+  // Route through isValidGroupFolder so reserved names (main/global/shared/templates)
+  // and pattern violations are rejected at the single source of truth.
   let folder = localName;
+  if (!isValidGroupFolder(folder)) {
+    // normalizeName can produce reserved names (e.g. name: "Main" → "main").
+    // Prefix with `coworker-` to push them out of the reserved set; the
+    // collision loop below dedupes from there.
+    folder = `coworker-${folder}`;
+    if (!isValidGroupFolder(folder)) {
+      notifyAgent(session, `Cannot create agent "${name}": derived folder "${folder}" is invalid.`);
+      log.error('create_agent: invalid derived folder', { name, localName, folder });
+      return;
+    }
+  }
+  const baseFolder = folder;
   let suffix = 2;
   while (getAgentGroupByFolder(folder)) {
-    folder = `${localName}-${suffix}`;
+    folder = `${baseFolder}-${suffix}`;
     suffix++;
   }
 
@@ -102,12 +117,12 @@ export async function handleCreateAgent(content: Record<string, unknown>, sessio
   if (!requestedCoworkerType) {
     // List available leaf types so the creation note tells the caller what's available
     const knownTypes = readCoworkerTypes();
-    const SKIP = new Set(['main', 'global', 'base-common']);
+    const SKIP = new Set(['main', 'base-common']);
     const leafTypes = Object.keys(knownTypes).filter(
       (name) => !SKIP.has(name) && !(knownTypes[name] as Record<string, unknown>).flat,
     );
     if (leafTypes.length > 0) {
-      creationNote = `No coworkerType specified — created as untyped. Available types: ${leafTypes.join(', ')}. The agent will use the global base prompt. To get project-specific skills, traits, and MCP tools, recreate with a coworkerType.`;
+      creationNote = `No coworkerType specified — created as untyped (default leaf type, base spine only). Available typed options: ${leafTypes.filter((t) => t !== 'default').join(', ')}. To get project-specific skills, traits, and MCP tools, recreate with a coworkerType.`;
       log.info('create_agent: no coworkerType, available types', { leafTypes });
     }
   }

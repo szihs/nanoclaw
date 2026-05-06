@@ -41,6 +41,10 @@ function resolveBasePath(projectRoot: string, base: string): string {
       break;
     }
     case 'upstream-global': {
+      // Legacy: v1 installs carry manifests with `base: upstream-global`.
+      // The global flat type is retired in v2 but v1→v2 migration still
+      // needs to load the old template to extract custom user content.
+      // Kept for migration compatibility only.
       const resolved = resolveOptionalTemplatePath(baseDir, 'global');
       if (resolved) return resolved;
       break;
@@ -60,8 +64,6 @@ function createPromptDocument(title: string): PromptDocument {
 
 function defaultDocumentTitle(manifestName: ComposeLegacyPromptOptions['manifestName']): string {
   switch (manifestName) {
-    case 'global':
-      return 'Global';
     case 'main':
       return 'Main';
     case 'coworker':

@@ -1,5 +1,5 @@
 /**
- * Core MCP tools: send_message, send_file, edit_message, add_reaction.
+ * Core MCP tools: send_message, send_file, add_reaction.
  *
  * All outbound tools resolve destinations via the local destination map
  * (see destinations.ts). Agents reference destinations by name; the map
@@ -177,47 +177,6 @@ export const sendFile: McpToolDefinition = {
   },
 };
 
-export const editMessage: McpToolDefinition = {
-  tool: {
-    name: 'edit_message',
-    description: 'Edit a previously sent message. Targets the same destination the original message was sent to.',
-    inputSchema: {
-      type: 'object' as const,
-      properties: {
-        messageId: { type: 'integer', description: 'Message ID (the numeric id shown in messages)' },
-        text: { type: 'string', description: 'New message content' },
-      },
-      required: ['messageId', 'text'],
-    },
-  },
-  async handler(args) {
-    const seq = Number(args.messageId);
-    const text = args.text as string;
-    if (!seq || !text) return err('messageId and text are required');
-
-    const platformId = getMessageIdBySeq(seq);
-    if (!platformId) return err(`Message #${seq} not found`);
-
-    const routing = getRoutingBySeq(seq);
-    if (!routing || !routing.channel_type || !routing.platform_id) {
-      return err(`Cannot determine destination for message #${seq}`);
-    }
-
-    const id = generateId();
-    writeMessageOut({
-      id,
-      kind: 'chat',
-      platform_id: routing.platform_id,
-      channel_type: routing.channel_type,
-      thread_id: routing.thread_id,
-      content: JSON.stringify({ operation: 'edit', messageId: platformId, text }),
-    });
-
-    log(`edit_message: #${seq} → ${platformId}`);
-    return ok(`Message edit queued for #${seq}`);
-  },
-};
-
 export const addReaction: McpToolDefinition = {
   tool: {
     name: 'add_reaction',
@@ -259,4 +218,4 @@ export const addReaction: McpToolDefinition = {
   },
 };
 
-registerTools([sendMessage, sendFile, editMessage, addReaction]);
+registerTools([sendMessage, sendFile, addReaction]);

@@ -92,12 +92,12 @@ What it generates:
 |----------|-------|------|
 | Spine fragments | 3 | `identity/`, `invariants/`, `context/` |
 | Capability skills | 5 | `{project}-build`, `{project}-code-reader`, `{project}-code-writer`, `{project}-docs`, `{project}-github` |
-| Workflow extensions | 4 | `{project}-investigate`, `{project}-implement`, `{project}-review`, `{project}-document` |
+| Workflow extensions | 1 | `{project}-implement` (extends base `/implement` with project-specific reproduce/change/verify overrides) |
 | Coworker types | 3+ | `{project}-common`, `{project}-reader`, `{project}-writer` (plus specialized types if skill clusters warrant it) |
 
 ### Two-step flow
 
-1. **`/onboard-project <repo>`** — analyzes the codebase (clones it, reads existing AI config files, CI workflows, build scripts) and generates the full skeleton in `container/spines/{project}/`. Reuses existing base skills (`deep-research`, `codex-critique`, `investigate`, `implement`, `review`, `document`) — no duplication.
+1. **`/onboard-project <repo>`** — analyzes the codebase (clones it, reads existing AI config files, CI workflows, build scripts) and generates the full skeleton in `container/spines/{project}/`. Reuses existing base workflows (`/plan`, `/implement`) and the `codex-critique` skill — no duplication.
 2. **`/onboard-coworker`** — selects a bundle or type from the registry and creates a running coworker instance.
 
 After running `/onboard-project`, the new types (`{project}-reader`, `{project}-writer`) are immediately available in the lego registry for coworker creation.
@@ -210,8 +210,8 @@ Types are defined in `container/{spines,skills}/*/coworker-types.yaml`. The exte
 |------|------|---------|
 | `base-common` | Universal spine (safety, truth, scope) | — |
 | `slang-common` | Slang compiler spine (identity, invariants) | `base-common` |
-| `slang-reader` | Read-only: investigate issues, review PRs, research | `slang-common` |
-| `slang-writer` | Write-capable: investigate, implement, review | `slang-common` |
+| `slang-reader` | Read-only: plan / investigate / review / research via `/plan` | `slang-common` |
+| `slang-writer` | Write-capable: `/plan` + `/slang-implement` | `slang-common` |
 | 
 | 
 | `main` / `global` | Flat admin + shared assistants | — (verbatim body, no spine) |
@@ -263,12 +263,16 @@ API keys are managed by OneCLI Agent Vault. Containers reach the gateway at `172
 
 ### Flat vs. Typed Coworker Initialization
 
-| Aspect | Flat (`main`, `global`) | Typed (e.g. `slang-writer`) |
-|--------|------------------------|--------------------------|
-| CLAUDE.md | `@./.claude-global.md` import directive | Composed from lego spine on every wake |
-| Symlink | `.claude-global.md` → `/workspace/global/CLAUDE.md` | No symlink |
-| Spine | No spine — verbatim upstream body | Full spine: identity + invariants + context + index |
-| Runtime | `composeCoworkerClaudeMd` skips (`is_admin`) | `composeCoworkerClaudeMd` renders spine |
+| Aspect | Flat (`main`) | Typed (e.g. `slang-writer`, `default`) |
+|--------|--------------|----------------------------------------|
+| CLAUDE.md | Slim admin-orchestrator body + auto-discovered project fragments | Composed from lego spine on every wake |
+| Identity | `container/skills/nanoclaw-base/prompts/main-body.md` | From spine: `*-common.identity` |
+| Projects | Auto-emitted by composer from spine `project:` metadata | N/A |
+| Spine | No spine — verbatim body | Full spine: identity + invariants + context + workflows + bindings |
+| Shared mount | `/workspace/shared` (read-write — Main only) | `/workspace/shared` (read-only) |
+| Runtime | `composeCoworkerClaudeMd` renders flat body + fragments | `composeCoworkerClaudeMd` renders spine |
+
+The pre-lego `@./.claude-global.md` @-import pattern is retired. All coworker content is composed on every wake; there is no runtime symlink machinery.
 
 ### Coworker YAML Bundle Format (v3)
 
@@ -318,7 +322,7 @@ Sessions are created lazily on first message. The dashboard API eagerly creates 
 - **Flat type detection** — `FLAT_COWORKER_TYPES` set ensures `main`/`global` agents get their CLAUDE.md + symlink even when `coworker_type` is set.
 - **Container env forwarding** — `ANTHROPIC_MODEL`, `CODEX_*`, caching, and effort-level vars passed into containers.
 - **Drift detection tests** — `claude-composer-scenarios.test.ts` compares `groups/*/CLAUDE.md` against `composeCoworkerSpine()` output.
-- **Onboard-project skill** — generates a complete lego project skeleton (spine, 5 capability skills, 4 workflow extensions, 3+ coworker types) for any GitHub repo or local path. Analyzes existing AI config, CI, and build files; reuses base skills where possible.
+- **Onboard-project skill** — generates a complete lego project skeleton (spine, 5 capability skills, a `{project}-implement` workflow extension, 3+ coworker types) for any GitHub repo or local path. Analyzes existing AI config, CI, and build files; reuses base skills where possible.
 - **Onboard-coworker skill** — scans YAML bundles + lego registry, creates agents via dashboard API or `create_agent` MCP tool.
 - **Split-commit skill** — interactive skill for splitting mixed-concern commits into per-bucket branches with independent topology support.
 
@@ -333,7 +337,7 @@ Sessions are created lazily on first message. The dashboard API eagerly creates 
 ### Slang Support (nv-slang)
 
 - **Slang MCP server** — Python-based MCP server with 14 tools for GitHub, Discord, Slack, and GitLab integration.
-- **Coworker types — `slang-reader` (investigate + review, read-only) and `slang-writer` (implement + document, full write) with lego spine composition.
+- **Coworker types — `slang-reader` (`/plan` only, read-only) and `slang-writer` (`/plan` + `/slang-implement`, full write) with lego spine composition.
 - **Container skills** — explore, build, fix, maintain, and CI health workflows for the Slang compiler repo.
 - **Pre-packaged bundles** — 4 YAML bundles in `coworkers/` for one-click coworker creation via `/onboard-coworker`.
 - **Scheduled tasks** — triage (weekday 9am), maintainer sweep (every 10 min) imported from bundles.

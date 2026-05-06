@@ -20,10 +20,17 @@ describe('v2 architecture alignment', () => {
     }
   });
 
-  it('nanoclaw-base skill provides the main + global bodies', () => {
-    const skillDir = path.join(process.cwd(), 'container', 'skills', 'nanoclaw-base');
-    for (const rel of ['coworker-types.yaml', 'prompts/main-body.md', 'prompts/global-body.md']) {
-      expect(fs.existsSync(path.join(skillDir, rel)), `missing ${rel} in nanoclaw-base`).toBe(true);
+  it('base spine provides the main body + default identity + types', () => {
+    const spineDir = path.join(process.cwd(), 'container', 'spines', 'base');
+    for (const rel of ['coworker-types.yaml', 'identity/main-body.md', 'identity/default-identity.md']) {
+      expect(fs.existsSync(path.join(spineDir, rel)), `missing ${rel} in spines/base`).toBe(true);
     }
+    // global-body.md was retired in favor of /workspace/shared/. And the
+    // old container/skills/nanoclaw-base/ directory has been folded into
+    // container/spines/base/ — assert nothing lives at the old location.
+    expect(
+      fs.existsSync(path.join(process.cwd(), 'container/skills/nanoclaw-base')),
+      'container/skills/nanoclaw-base/ should be gone — moved to container/spines/base/',
+    ).toBe(false);
   });
 });

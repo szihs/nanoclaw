@@ -5,20 +5,6 @@ import { DATA_DIR, GROUPS_DIR } from './config.js';
 import { log } from './log.js';
 import type { AgentGroup } from './types.js';
 
-// Container path where groups/global is mounted. The symlink we drop
-// into each group's dir resolves to this target inside the container.
-// It's a dangling symlink on the host — that's fine, host tools don't
-// follow it and the container mount makes it valid at read time.
-const GLOBAL_MEMORY_CONTAINER_PATH = '/workspace/global/CLAUDE.md';
-
-const FLAT_COWORKER_TYPES = new Set(['main', 'global']);
-
-// Symlink name inside the group's dir. Claude Code's @-import only
-// follows paths inside cwd, so we can't reference /workspace/global
-// directly — we symlink into the group dir and import the symlink.
-export const GLOBAL_MEMORY_LINK_NAME = '.claude-global.md';
-export const GLOBAL_CLAUDE_IMPORT = `@./${GLOBAL_MEMORY_LINK_NAME}`;
-
 const DEFAULT_SETTINGS_JSON =
   JSON.stringify(
     {
@@ -55,36 +41,12 @@ export function initGroupFilesystem(group: AgentGroup, opts?: { instructions?: s
     initialized.push('groupDir');
   }
 
-  // groups/<folder>/.claude-global.md — symlink so Claude Code's @-import
-  // can follow it. Only flat types (main/global) use the @import line in
-  // their CLAUDE.md. Typed coworkers get operational content through
-  // base-common context fragments instead, so skip the symlink for them.
-  const needsFlatSetup = !group.coworker_type || FLAT_COWORKER_TYPES.has(group.coworker_type);
-  if (needsFlatSetup) {
-    const globalLinkPath = path.join(groupDir, GLOBAL_MEMORY_LINK_NAME);
-    let linkExists = false;
-    try {
-      fs.lstatSync(globalLinkPath);
-      linkExists = true;
-    } catch {
-      /* missing — recreate */
-    }
-    if (!linkExists) {
-      fs.symlinkSync(GLOBAL_MEMORY_CONTAINER_PATH, globalLinkPath);
-      initialized.push('.claude-global.md');
-    }
-  }
-
-  // groups/<folder>/CLAUDE.md — for flat (untyped) groups, write the @import
-  // directive that pulls in the global body. Typed coworkers get their CLAUDE.md
-  // composed by composeCoworkerClaudeMd in container-runner.ts on every wake.
-  if (needsFlatSetup) {
-    const claudeMdPath = path.join(groupDir, 'CLAUDE.md');
-    if (!fs.existsSync(claudeMdPath)) {
-      fs.writeFileSync(claudeMdPath, '@./.claude-global.md\n');
-      initialized.push('CLAUDE.md');
-    }
-  }
+  // groups/<folder>/CLAUDE.md is composed by composeCoworkerClaudeMd in
+  // container-runner.ts on every wake — for both 'main' (flat body +
+  // additive fragments) and typed coworkers (full spine). The host never
+  // hand-writes the file here. The pre-lego '.claude-global.md' symlink
+  // and '@./.claude-global.md' @-import are retired; if any install still
+  // has them, scripts/migrate-global-to-shared.ts cleans them up.
 
   // groups/<folder>/.instructions.md — user-owned instructions.
   // CLAUDE.md is system-composed from templates + .instructions.md on every wake.

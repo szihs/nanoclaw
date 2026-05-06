@@ -55,7 +55,8 @@ A personal Claude assistant with multi-channel support, persistent memory per co
 │  │  Working directory: /workspace/agent (mounted from host)       │    │
 │  │  Volume mounts:                                                │    │
 │  │    • groups/{name}/ → /workspace/agent                         │    │
-│  │    • groups/global/ → /workspace/global/ (non-main only)       │    │
+│  │    • data/shared/  → /workspace/shared/                        │    │
+│  │        (read-write for Main, read-only for coworkers)          │    │
 │  │    • data/sessions/{group}/.claude/ → /home/node/.claude/      │    │
 │  │    • Additional dirs → /workspace/extra/*                      │    │
 │  │                                                                │    │

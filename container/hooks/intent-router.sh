@@ -27,7 +27,7 @@ UNWRAPPED=$(echo "$PROMPT" | perl -0777 -ne 'print $1 if /<message[^>]*>(.*?)<\/
 [ -n "$UNWRAPPED" ] && PROMPT="$UNWRAPPED"
 
 # Available workflows are injected by container-runner.ts as an env var.
-# Format: "investigate:Investigation/triage;implement:Code change/fix;document:Doc update;review:Review"
+# Format: "plan:Any text deliverable;implement:Code/doc change;slang-implement:..."
 WORKFLOWS="${OVERLAY_WORKFLOWS:-}"
 [ -z "$WORKFLOWS" ] && exit 0
 
@@ -42,12 +42,10 @@ $(echo "$WORKFLOWS" | tr ';' '\n' | while IFS=: read -r name desc; do
 done)
 
 Rules:
-- If the user asks to fix, implement, or change code → the implement workflow
-- If the user asks to investigate, triage, research, or understand → the investigate workflow
-- If the user asks to update docs or write documentation → the document workflow
-- If the user asks to review a PR/MR or code change → the review workflow
-- If the user asks a simple question or chats → \"none\"
-- If the task requires investigation BEFORE implementation, route to investigate first
+- If the user asks to investigate, triage, review a PR, research a topic, write a plan, or just understand something → the /plan workflow (output is text: a report, review, or plan).
+- If the user asks to fix, implement, change code, update docs, or ship a PR → the implement workflow (or its project-specific variant like /slang-implement if available). Output is file changes.
+- If the task requires understanding BEFORE making a change, route to /plan first — the agent will then invoke implement after the plan is approved.
+- If the user asks a simple question, chats, or requests a one-liner that doesn't warrant a structured workflow → \"none\".
 
 User message:
 $PROMPT
@@ -85,8 +83,8 @@ TEXT=$(echo "$TEXT" | sed -E 's/^[[:space:]]*```(json)?[[:space:]]*//; s/```[[:s
 WORKFLOW=$(echo "$TEXT" | jq -r '.workflow // "none"' 2>/dev/null || true)
 REASON=$(echo "$TEXT" | jq -r '.reason // empty' 2>/dev/null || true)
 
-# Strip a leading slash if Haiku returned `/investigate` instead of `investigate`,
-# so the AUTO-ROUTE template doesn't end up with `Start with //investigate`.
+# Strip a leading slash if Haiku returned `/plan` instead of `plan`,
+# so the AUTO-ROUTE template doesn't end up with `Start with //plan`.
 WORKFLOW="${WORKFLOW#/}"
 
 [ "$WORKFLOW" = "none" ] && exit 0
@@ -99,7 +97,7 @@ jq -n \
   '{
     hookSpecificOutput: {
       hookEventName: "UserPromptSubmit",
-      additionalContext: ("AUTO-ROUTE: Start with /" + $wf + ". Reason: " + $reason + ". Invoke Skill(/" + $wf + ") before using Edit/Write/Bash on source files.")
+      additionalContext: ("AUTO-ROUTE: Follow the /" + $wf + " workflow (already embedded in your CLAUDE.md). Reason: " + $reason + ". Walk its Steps in order before using Edit/Write/Bash on source files.")
     }
   }'
 

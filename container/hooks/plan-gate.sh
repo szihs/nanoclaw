@@ -110,7 +110,7 @@ if [ "$IS_MCP_TOOL" = "true" ]; then
       cat >&2 << DENIAL
 EXTERNAL POST BLOCKED ($TOOL): No codex-critique has run in this task.
 
-Run /codex-critique on the deliverable (plan / report / draft) before
+Run /codex-critique on the deliverable (your /plan output) before
 posting externally, then retry. Prevents post-then-addendum patterns.
 DENIAL
     else
@@ -135,7 +135,7 @@ EXTERNAL POST BLOCKED: Plan required before posting to external systems.
 
 Tool: $TOOL
 HOW TO PROCEED:
-1. Write a plan to /workspace/agent/plans/<target-slug>.md first.
+1. Write a plan to /workspace/agent/reports/<target-slug>.md first.
 2. Spawn codex-critique to review the plan (up to 3 rounds).
 3. Record verdict at plan top. Then retry the external post.
 DENIAL
@@ -148,12 +148,12 @@ PLAN REQUIRED: Write a plan before editing source code.
 
 HOW TO PROCEED:
 1. Send: mcp__nanoclaw__send_message("🟡 Plan gate — writing plan.")
-2. Write plan to /workspace/agent/plans/<target-slug>.md (files, approach, verification).
+2. Write plan to /workspace/agent/reports/<target-slug>.md (files, approach, verification).
 3. Spawn codex-critique to review the plan (up to 3 rounds).
 4. Record verdict at plan top. Then edit source code following the plan.
 DENIAL
     else
-      echo "PLAN REQUIRED: Write a plan to /workspace/agent/plans/ before editing. (Repeated denial #$N)" >&2
+      echo "PLAN REQUIRED: Write a plan to /workspace/agent/reports/ before editing. (Repeated denial #$N)" >&2
     fi
     exit 2
   fi
@@ -164,11 +164,11 @@ DENIAL
     EDITS=$(jq '.edits_since_plan // 0' "$STATE")
     N=$(increment_denial "plan_stale")
     if [ "$IS_MCP_TOOL" = "true" ]; then
-      echo "EXTERNAL POST BLOCKED ($TOOL): Plan stale — $EDITS edits since last plan. Refresh the plan in /workspace/agent/plans/ before posting. (denial #$N)" >&2
+      echo "EXTERNAL POST BLOCKED ($TOOL): Plan stale — $EDITS edits since last plan. Refresh the plan in /workspace/agent/reports/ before posting. (denial #$N)" >&2
     elif [ "$N" -le 1 ]; then
-      echo "PLAN STALE: $EDITS edits since last plan. Write an updated plan to /workspace/agent/plans/ then continue. Send: mcp__nanoclaw__send_message('📝 Plan refresh — $EDITS edits.')" >&2
+      echo "PLAN STALE: $EDITS edits since last plan. Write an updated plan to /workspace/agent/reports/ then continue. Send: mcp__nanoclaw__send_message('📝 Plan refresh — $EDITS edits.')" >&2
     else
-      echo "PLAN STALE: Refresh your plan in /workspace/agent/plans/ before continuing. ($EDITS edits, denial #$N)" >&2
+      echo "PLAN STALE: Refresh your plan in /workspace/agent/reports/ before continuing. ($EDITS edits, denial #$N)" >&2
     fi
     exit 2
   fi
