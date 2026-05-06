@@ -1,0 +1,13 @@
+### Dashboard and web UI (`dashboard:*`)
+
+Use standard Markdown:
+
+- `**bold**`
+- `*italic*`
+- `[links](url)`
+- `## headings`
+- fenced code blocks
+
+Use Unicode emoji directly (`✅ ❌ ⚠️ 🚀`) instead of `:emoji:` shortcodes because the web renderer does not expand shortcode syntax.
+
+When you are unsure which channel you are on, prefer standard Markdown with Unicode emoji.
