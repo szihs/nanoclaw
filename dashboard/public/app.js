@@ -231,9 +231,18 @@ function renderActiveSessionBlock(cw, { wrapField = true } = {}) {
             data-view-nanoclaw-agid="${escAttr(nanoSess.agent_group_id || '')}"
             data-view-session-group="${escAttr(cw.folder)}">View</button>
         </div>
-        ${subCount > 0 ? `<div style="font-size:9px;color:var(--text-dim)">▸ ${subCount} SDK sub-session${subCount === 1 ? '' : 's'}</div>` : ''}
-        ${subCount > 0 ? `<div style="display:flex;flex-direction:column;gap:2px;margin-left:10px">
-          ${nanoSess.sdk_subsessions.slice(0, 6).map((s) => `
+        ${(() => {
+          if (subCount === 0) return '';
+          const subs = nanoSess.sdk_subsessions || [];
+          const nonGhost = subs.filter((s) => s.shape !== 'ghost');
+          const visible = (nonGhost.length > 0 ? nonGhost : subs).slice(0, 5);
+          const hiddenGhosts = subs.length - nonGhost.length;
+          const header = nonGhost.length > 0
+            ? `▸ ${subCount} SDK sub-session${subCount === 1 ? '' : 's'} (showing ${visible.length} recent${hiddenGhosts > 0 ? `, ${hiddenGhosts} ghost hidden` : ''})`
+            : `▸ ${subCount} SDK sub-session${subCount === 1 ? '' : 's'} (all ghost)`;
+          return `<div style="font-size:9px;color:var(--text-dim)">${esc(header)}</div>
+        <div style="display:flex;flex-direction:column;gap:2px;margin-left:10px">
+          ${visible.map((s) => `
             <button class="hook-entry hook-entry-link" style="display:flex;gap:8px;align-items:center;font-size:9px;padding:1px 4px;text-align:left"
               data-view-session="${escAttr(s.session_id)}" data-view-session-group="${escAttr(cw.folder)}">
               <span style="font-family:monospace;color:var(--text-dim)">${esc(s.session_id.slice(0, 11))}</span>
@@ -242,7 +251,8 @@ function renderActiveSessionBlock(cw, { wrapField = true } = {}) {
               <span style="color:var(--text-muted)">${Number(s.event_count).toLocaleString()} ev</span>
             </button>
           `).join('')}
-        </div>` : ''}
+        </div>`;
+        })()}
       </div>`;
   } else {
     // Fallback: fall back to the last-seen SDK session if cachedSessions hasn't loaded yet.
@@ -275,7 +285,8 @@ function renderDetailHooks(cw) {
   if (recentTools.length === 0 && groupEvents.length === 0) return html;
 
   html += '<label style="color:var(--text-dim);font-size:9px;text-transform:uppercase">Recent Events</label>';
-  const display = groupEvents.filter((e) => e.event !== 'PreToolUse').slice(-10);
+  // Newest-first: take the last 5 chronologically, then reverse so the top entry is most recent.
+  const display = groupEvents.filter((e) => e.event !== 'PreToolUse').slice(-5).reverse();
   html += display.map((e) => {
     const dur = (e.event === 'PostToolUse' || e.event === 'PostToolUseFailure') && e.tool_use_id && preTimes.has(e.tool_use_id)
       ? ` <span style="color:var(--text-muted)">${formatDuration(e.timestamp - preTimes.get(e.tool_use_id))}</span>` : '';
@@ -1946,40 +1957,96 @@ async function fetchSessions() {
   updateSessionSelector();
 }
 
+// Two-tier Timeline picker: #coworker-select narrows the scope, then #session-select only
+// lists sessions belonging to that coworker. "All coworkers" shows every session flat (no
+// optgroups — the coworker picker is doing the grouping now).
 function updateSessionSelector() {
-  const sel = document.getElementById('session-select');
-  if (!sel) return;
-  const currentVal = sel.value;
-  sel.innerHTML = '<option value="">Timeline view (all events)</option>';
-  // Top-level = nanoclaw session; children = SDK sub-sessions (indented label, optgroup for visual nesting).
+  const coworkerSel = document.getElementById('coworker-select');
+  const sessionSel = document.getElementById('session-select');
+  if (!sessionSel) return;
+
+  const byCoworker = new Map();
   for (const p of cachedSessions) {
-    // Use last_active when present, otherwise the latest sub-session last_ts.
+    const arr = byCoworker.get(p.group_folder) || [];
+    arr.push(p);
+    byCoworker.set(p.group_folder, arr);
+  }
+
+  // --- Repopulate the coworker dropdown, preserving selection. ---
+  if (coworkerSel) {
+    const prevCoworker = coworkerSel.value;
+    let cwHtml = '<option value="">All coworkers</option>';
+    // Sort coworkers by their latest activity DESC so the most recently active is at top.
+    const coworkerEntries = Array.from(byCoworker.entries()).map(([folder, parents]) => {
+      const latestMs = Math.max(...parents.map((p) => {
+        if (p.last_active) return new Date(p.last_active).getTime();
+        return p.sdk_subsessions?.[0]?.last_ts ?? 0;
+      }), 0);
+      return { folder, parents, latestMs };
+    });
+    coworkerEntries.sort((a, b) => b.latestMs - a.latestMs);
+    for (const { folder, latestMs } of coworkerEntries) {
+      const label = latestMs ? `${folder} · last ${timeAgo(latestMs)}` : folder;
+      cwHtml += `<option value="${escAttr(folder)}">${esc(label)}</option>`;
+    }
+    coworkerSel.innerHTML = cwHtml;
+    // Restore prior selection only if that coworker still exists.
+    if (prevCoworker && byCoworker.has(prevCoworker)) coworkerSel.value = prevCoworker;
+  }
+
+  // --- Repopulate the session dropdown, filtered to the selected coworker. ---
+  const selectedCoworker = coworkerSel ? coworkerSel.value : '';
+  const prevSession = sessionSel.value;
+  const parentsToShow = selectedCoworker
+    ? (byCoworker.get(selectedCoworker) || [])
+    : cachedSessions;
+
+  const allEventsLabel = selectedCoworker
+    ? `Timeline view (all ${selectedCoworker} events)`
+    : 'Timeline view (all events)';
+  let html = `<option value="">${esc(allEventsLabel)}</option>`;
+  for (const p of parentsToShow) {
     const parentLastMs = p.last_active
       ? new Date(p.last_active).getTime()
       : (p.sdk_subsessions[0]?.last_ts ?? 0);
     const parentTs = parentLastMs ? formatTimeFull(parentLastMs) : '';
     const parentAgo = parentLastMs ? timeAgo(parentLastMs) : '';
+    // When "All coworkers" is selected, prefix the option with the folder so rows are
+    // distinguishable; when a specific coworker is selected, the prefix is redundant.
+    const prefix = selectedCoworker ? '' : `${p.group_folder} · `;
     const parentLabel = p.nanoclaw_session_id
-      ? `${p.group_folder} | ${parentTs} (${parentAgo}) | ${p.event_count_total} ev | ${p.nanoclaw_session_id}`
-      : `${p.group_folder} | (no active nanoclaw session)`;
-    // Sentinel value "nano:<agid>:<sess-id>" so the change handler can route to the nanoclaw-session view.
+      ? `${prefix}${parentTs} (${parentAgo}) · ${p.event_count_total} ev · ${p.nanoclaw_session_id}`
+      : `${prefix}(no active nanoclaw session)`;
     const parentVal = p.nanoclaw_session_id ? `nano:${p.agent_group_id}:${p.nanoclaw_session_id}` : '';
     if (parentVal) {
-      sel.innerHTML += `<option value="${escAttr(parentVal)}" data-group="${escAttr(p.group_folder)}" data-kind="nanoclaw">${esc(parentLabel)}</option>`;
+      html += `<option value="${escAttr(parentVal)}" data-group="${escAttr(p.group_folder)}" data-kind="nanoclaw">${esc(parentLabel)}</option>`;
     }
-    // SDK sub-sessions nested under the parent (plain <select> — prefix with indent + marker).
     for (const s of (p.sdk_subsessions || [])) {
-      // ALWAYS use last_ts (not first_ts — that was the old bug: ghost sessions showed their start time
-      // and looked "recently active" even though they died immediately).
+      // ALWAYS use last_ts (not first_ts — that was the old bug: ghost sessions showed their
+      // start time and looked "recently active" even though they died immediately).
       const ts = formatTimeFull(s.last_ts);
       const ago = timeAgo(s.last_ts);
       const shape = s.shape ? ` [${s.shape}]` : '';
-      const label = `    └ ${ts} (${ago}) | ${s.event_count} ev${shape} | ${s.session_id.slice(0, 12)}`;
-      sel.innerHTML += `<option value="${escAttr(s.session_id)}" data-group="${escAttr(p.group_folder)}" data-kind="sdk">${esc(label)}</option>`;
+      const label = `  └ ${ts} (${ago}) · ${s.event_count} ev${shape} · ${s.session_id.slice(0, 12)}`;
+      html += `<option value="${escAttr(s.session_id)}" data-group="${escAttr(p.group_folder)}" data-kind="sdk">${esc(label)}</option>`;
     }
   }
-  if (currentVal) sel.value = currentVal;
+  sessionSel.innerHTML = html;
+  // Restore prior session selection only if it's still a valid option under the new filter.
+  if (prevSession && sessionSel.querySelector(`option[value="${CSS.escape(prevSession)}"]`)) {
+    sessionSel.value = prevSession;
+  }
 }
+
+// Coworker picker change → refilter the session dropdown. Doesn't itself enter a flow view;
+// only the session dropdown's change handler does that.
+document.getElementById('coworker-select')?.addEventListener('change', () => {
+  updateSessionSelector();
+  // If the user had been viewing a specific session that no longer matches the coworker,
+  // they're back to "Timeline view" — bail out of any active flow view to match.
+  const sessionSel = document.getElementById('session-select');
+  if (sessionSel && !sessionSel.value) exitSessionFlow();
+});
 
 // Fetch sessions periodically
 setInterval(fetchSessions, 10000);
@@ -2075,14 +2142,17 @@ function renderSessionFlow(entries) {
     container.innerHTML = '<div class="tl-empty">No events in this session.</div>';
     return;
   }
-  // In the aggregated nanoclaw-session view, entries span multiple SDK sub-sessions; emit a
-  // MINOR separator whenever session_id changes between adjacent entries. The single-SDK
-  // view has uniform session_id so this is a no-op there. Subagent children are skipped —
-  // they inherit their parent's session and don't need their own boundary marker.
+  // Newest-first: the API returns entries chronologically (start → end) for flow-reading,
+  // but the rest of the dashboard puts latest at top, so we reverse before rendering. The
+  // SESSION START marker naturally ends up at the bottom, which reads as "scroll down to
+  // see where the session began" — consistent with Recent Events and Timeline default view.
+  // Subagent children inside an entry are left in their natural parent→child tree order.
+  const ordered = [...entries].reverse();
+  // Separators (SDK sub-session boundary) still fire on adjacency; direction doesn't matter.
   const parts = [];
   let prevSdk = undefined;
-  for (let i = 0; i < entries.length; i++) {
-    const e = entries[i];
+  for (let i = 0; i < ordered.length; i++) {
+    const e = ordered[i];
     const sdk = e.session_id || null;
     if (sdk && prevSdk !== undefined && prevSdk !== sdk) {
       const meta = (cachedSessions || [])
@@ -2349,27 +2419,31 @@ function loadAdminPanel(name) {
     channels: loadAdminChannels,
     config: loadAdminConfig,
     infra: loadAdminInfra,
-    metrics: loadAllMetrics,
   };
   if (loaders[name]) loaders[name]();
 }
 
 // --- Overview ---
+// Overview is the combined landing panel: summary stat cards on top, then the formerly-
+// separate Metrics sections (Token Usage, 24h Activity, Users, Channels) inline below.
+// Loading the Overview panel fires all of them in parallel.
 async function loadAdminOverview() {
-  const el = document.getElementById('admin-overview-content');
+  const el = document.getElementById('overview-summary');
   try {
     const res = await fetch('/api/overview');
     if (!res.ok) throw new Error('fetch failed');
     adminState.overview = await res.json();
     adminState.loaded.add('overview');
     renderAdminOverview();
-  } catch { el.innerHTML = '<div class="admin-empty">Failed to load overview</div>'; }
+  } catch { if (el) el.innerHTML = '<div class="admin-empty">Failed to load overview</div>'; }
+  loadAllMetrics();
 }
 
 function renderAdminOverview() {
   const d = adminState.overview;
   if (!d) return;
-  const el = document.getElementById('admin-overview-content');
+  const el = document.getElementById('overview-summary');
+  if (!el) return;
   const uptimeStr = formatDuration(d.uptime * 1000);
   el.innerHTML = `
     <div class="admin-stat-grid">
@@ -4887,7 +4961,7 @@ function fmtNum(n) {
   return n.toLocaleString();
 }
 
-const metricsState = { loaded: new Set(), tokenPeriod: 'all' };
+const metricsState = { loaded: new Set(), tokenPeriod: '1d' };
 
 // --- Token Metrics (ccusage) ---
 async function loadMetricsTokens(period) {
@@ -5003,8 +5077,8 @@ function renderMetricsTokens(el, data) {
   el.innerHTML = html;
 }
 
-// Wire period filter clicks via event delegation
-document.getElementById('admin-metrics-content')?.addEventListener('click', (e) => {
+// Wire period filter clicks via event delegation. Metrics now lives inside Overview.
+document.getElementById('admin-overview-content')?.addEventListener('click', (e) => {
   const btn = e.target.closest('[data-metrics-period]');
   if (btn) loadMetricsTokens(btn.dataset.metricsPeriod);
 });
