@@ -1,5 +1,6 @@
 ---
 name: nanoclaw-github
+license: MIT
 description: "GitHub operations for NanoClaw. Clone, branch, PR, issues, CI."
 provides: [repo.read, repo.write, repo.pr, issues.read, issues.write, ci.rerun]
 allowed-tools: Bash(git:*), Bash(gh:*), Read, Grep, Glob
