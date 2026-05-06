@@ -1,5 +1,6 @@
 ---
 name: slang-docs
+license: MIT
 description: "Read and write Slang compiler documentation."
 provides: [doc.read, doc.write]
 allowed-tools: Read, Grep, Glob, Edit, Write, Bash(git add:*), Bash(git commit:*), Bash(python:*), Bash(powershell:*)

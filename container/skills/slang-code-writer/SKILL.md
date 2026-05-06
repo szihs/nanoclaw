@@ -1,5 +1,6 @@
 ---
 name: slang-code-writer
+license: MIT
 description: "Implement changes in the Slang compiler. Edit code, write tests, format, commit."
 provides: [code.read, code.edit, test.gen]
 allowed-tools: Bash, Read, Write, Edit, Grep, Glob

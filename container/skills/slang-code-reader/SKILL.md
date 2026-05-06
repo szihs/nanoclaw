@@ -1,5 +1,6 @@
 ---
 name: slang-code-reader
+license: MIT
 description: "Read-only investigation of the Slang compiler codebase. Navigate source, trace compiler pipelines, understand architecture."
 provides: [code.read, doc.read]
 allowed-tools: Bash, Read, Grep, Glob, mcp__deepwiki__ask_question
