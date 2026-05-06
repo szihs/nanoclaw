@@ -154,6 +154,19 @@ export function initGroupFilesystem(group: AgentGroup, opts?: { instructions?: s
     }
   }
 
+  // Prune mirrors for agent.md files removed upstream so stale definitions
+  // (e.g. sandbox:'read-only' from an old codex-critique) can't persist.
+  for (const existing of fs.readdirSync(agentsDst)) {
+    const name = existing.replace(/\.md$/, '');
+    const stillExists = ['skills', 'overlays'].some((sub) =>
+      fs.existsSync(path.join(projectRoot, 'container', sub, name, 'agent.md')),
+    );
+    if (!stillExists) {
+      fs.rmSync(path.join(agentsDst, existing));
+      initialized.push(`agents/${existing} (pruned orphan)`);
+    }
+  }
+
   // 3. data/v2-sessions/<id>/agent-runner-src/ — per-group source copy
   const groupRunnerDir = path.join(DATA_DIR, 'v2-sessions', group.id, 'agent-runner-src');
   if (!fs.existsSync(groupRunnerDir)) {
