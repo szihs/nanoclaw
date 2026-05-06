@@ -136,12 +136,18 @@ export function initGroupFilesystem(group: AgentGroup, opts?: { instructions?: s
   // mtime-refreshed on each wake for the same reason as skills/.
   const agentsDst = path.join(claudeDir, 'agents');
   fs.mkdirSync(agentsDst, { recursive: true });
+
+  // Collect the canonical set of agent filenames from source so we can
+  // prune orphans — mirrors of source agent.md files that were later
+  // removed upstream (e.g. codex-critique's old sandbox:read-only agent.md).
+  const canonicalAgents = new Set<string>();
   for (const subdir of ['skills', 'overlays']) {
     const srcRoot = path.join(projectRoot, 'container', subdir);
     if (!fs.existsSync(srcRoot)) continue;
     for (const entry of fs.readdirSync(srcRoot)) {
       const agentFile = path.join(srcRoot, entry, 'agent.md');
       if (fs.existsSync(agentFile)) {
+        canonicalAgents.add(`${entry}.md`);
         const dst = path.join(agentsDst, `${entry}.md`);
         const existed = fs.existsSync(dst);
         const srcMtime = latestMtimeMs(agentFile);
@@ -151,6 +157,14 @@ export function initGroupFilesystem(group: AgentGroup, opts?: { instructions?: s
           initialized.push(existed ? `agents/${entry}.md (refreshed)` : `agents/${entry}.md`);
         }
       }
+    }
+  }
+
+  // Remove agent files whose source agent.md was deleted upstream.
+  for (const existing of fs.readdirSync(agentsDst)) {
+    if (!canonicalAgents.has(existing)) {
+      fs.rmSync(path.join(agentsDst, existing));
+      initialized.push(`agents/${existing} (pruned orphan)`);
     }
   }
 
