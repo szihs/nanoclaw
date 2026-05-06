@@ -615,6 +615,7 @@ def main(port: int, transport: str) -> int:
                                     "branch",
                                 ],
                             },
+                            annotations=types.ToolAnnotations(openWorldHint=True),
                         ),
                         types.Tool(
                             name="github_get_discussions",
@@ -906,6 +907,7 @@ def main(port: int, transport: str) -> int:
                                     "branch",
                                 ],
                             },
+                            annotations=types.ToolAnnotations(openWorldHint=True),
                         ),
                     ]
                 )
@@ -961,6 +963,7 @@ def main(port: int, transport: str) -> int:
                                 },
                                 "required": ["channel_id", "content"],
                             },
+                            annotations=types.ToolAnnotations(openWorldHint=True),
                         ),
                     ]
                 )
@@ -986,6 +989,7 @@ def main(port: int, transport: str) -> int:
                                 },
                                 "required": ["channel_id", "text"],
                             },
+                            annotations=types.ToolAnnotations(openWorldHint=True),
                         ),
                         types.Tool(
                             name="slack_get_channel_history",
@@ -1037,6 +1041,7 @@ def main(port: int, transport: str) -> int:
                                 },
                                 "required": ["channel_id", "thread_ts", "text"],
                             },
+                            annotations=types.ToolAnnotations(openWorldHint=True),
                         ),
                         types.Tool(
                             name="slack_get_user_profile",
