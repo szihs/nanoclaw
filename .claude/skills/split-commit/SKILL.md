@@ -77,7 +77,23 @@ diff <(git show <bucket-A>:<file>) <(git show <bucket-B>:<file>) > /dev/null 2>&
 
 Present the overlap matrix to the user. For each overlapping file, propose which bucket owns it. Get confirmation before proceeding.
 
-### 2d. Deletion audit
+### 2d. Name-based ownership (overrides path-prefix)
+
+Path-prefix alone mis-routes project-scoped files that live in shared dirs. Before accepting the path-prefix classification, apply name-based overrides:
+
+| Filename pattern | Route to |
+|---|---|
+| `src/**/*.slang.test.ts`, `src/**/*slang-*.test.ts`, `src/slang-*` | nv-slang |
+| `src/**/*.slangpy.test.ts`, `src/**/*slangpy-*.test.ts`, `src/slangpy-*` | nv-slangpy |
+| `src/**/*.nanoclaw.test.ts`, `src/**/*nanoclaw-*.test.ts`, `src/nanoclaw-*` | nv-nanoclaw |
+| `src/**/*.dashboard.test.ts`, `src/**/*dashboard-*.test.ts`, `src/channels/dashboard.*` | nv-dashboard |
+| everything else under `src/`, `container/agent-runner/`, `container/hooks/`, `container/overlays/`, `container/workflows/{plan,implement}/`, `container/spines/base/`, `setup/`, `scripts/`, `docs/` | nv-main |
+
+**Why this matters**: `src/claude-composer-scenarios.slang.test.ts` is a test for slang-specific scenarios. Path-prefix sends it to `nv-main`, but `origin/nv-slang` ALSO carries it (with a stale pre-refactor copy). A split that routes updates to nv-main while leaving nv-slang's stale copy intact produces a silent regression: on the next `/update-nanoclaw-instance` merge, origin/nv-slang's stale version wins, reverting the update.
+
+Rule of thumb: if the filename contains a project token (`slang`, `slangpy`, `nanoclaw`, `dashboard`), that token is the ownership signal — not the directory.
+
+### 2e. Deletion audit
 
 For each bucket, check what files it deletes from the base:
 
@@ -115,11 +131,11 @@ cat /tmp/<other-bucket-1>-files.txt /tmp/<other-bucket-2>-files.txt ... | sort -
   xargs git reset HEAD --
 ```
 
-Also unstage any file flagged as a phantom deletion in Phase 2d.
+Also unstage any file flagged as a phantom deletion in Phase 2e.
 
 ### 3c. Restore phantom deletions
 
-For files that were incorrectly deleted (phantom deletions from Phase 2d):
+For files that were incorrectly deleted (phantom deletions from Phase 2e):
 
 ```bash
 git checkout <base> -- <file1> <file2> ...
@@ -364,3 +380,5 @@ Resolution: add bucket-B's line to bucket-A (the owner). Bucket-B should not tou
 5. **Assuming identical file names mean identical content.** Always `diff` overlapping files. A file can be in both buckets with different content — one has fixes the other lacks.
 
 6. **Direct force-push without review.** Create PRs. The stripped branches may have lost content that was intentionally placed. PRs give a chance to catch this before the force-push destroys the old refs.
+
+7. **Trusting path-prefix over filename for ownership.** `src/` routes to `nv-main` by default, but `src/claude-composer-scenarios.slang.test.ts` is a slang test. If a project token appears anywhere in the filename (`slang`, `slangpy`, `nanoclaw`, `dashboard`), the token is the ownership signal. See Phase 2d. Missing this rule causes silent regressions on the next `/update-nanoclaw-instance` cycle: the update's auto-resolver takes the stale project-branch copy over the correctly-routed nv-main update.
