@@ -1,5 +1,6 @@
 ---
 name: slangpy-build
+license: MIT
 description: "Clone, build, and test SlangPy. Use when the repo needs setup, a rebuild, or when tests fail."
 provides: [code.build, test.run, test.gen, ci.inspect]
 allowed-tools: Bash(git:*), Bash(cmake:*), Bash(python:*), Bash(pytest:*), Bash(pip:*), Bash(pre-commit:*), Read, Grep, Glob

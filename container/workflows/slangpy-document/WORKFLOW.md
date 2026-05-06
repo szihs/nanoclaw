@@ -1,5 +1,6 @@
 ---
 name: slangpy-document
+license: MIT
 type: workflow
 description: "Update SlangPy documentation after a change or for a doc gap."
 extends: document
