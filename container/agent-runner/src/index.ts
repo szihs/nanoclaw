@@ -115,13 +115,30 @@ async function main(): Promise<void> {
     codex: {
       command: 'codex',
       args: codexArgs,
-      // Scope-narrow: the `codex mcp-server` subprocess only needs what it
-      // uses to authenticate and route. NVIDIA_API_KEY authenticates the
-      // nvinference provider (see model_providers.<p>.env_key in
-      // createCodexConfigOverrides). HOME + PATH are basic runtime needs.
-      // Proxy/cert vars are forwarded if present so the container's OneCLI
-      // trust chain still works. OPENAI_API_KEY is intentionally NOT
-      // forwarded — we want codex routed through nvinference, not OpenAI.
+      // Scope-narrow env for the `codex mcp-server` subprocess.
+      //
+      // Why NVIDIA_API_KEY has to be forwarded — even though OneCLI ought
+      // to handle auth transparently:
+      //
+      // OneCLI's HTTPS proxy DOES swap secrets transparently at the TLS
+      // layer (the value here is usually `onecli-placeholder`, not a real
+      // token — the real secret never enters the container). BUT codex-cli
+      // validates `model_providers.<p>.env_key` at SESSION START — before
+      // any HTTP call is attempted. If the named env var is undefined it
+      // errors `Missing environment variable: NVIDIA_API_KEY` and the
+      // subprocess exits before OneCLI gets a chance to inject. The
+      // var must therefore be *defined* in the child env (placeholder is
+      // fine); OneCLI will rewrite the Authorization header on the way out.
+      //
+      // Verified empirically 2026-05-07 via `codex exec` A/B test:
+      //   - without the var → codex errors at startup
+      //   - with `onecli-placeholder` → request reaches nvinference, OneCLI
+      //     swaps credentials, succeeds.
+      //
+      // HOME + PATH are minimal subprocess runtime needs. Proxy/cert vars
+      // are forwarded so the OneCLI trust chain stays intact.
+      // OPENAI_API_KEY is intentionally NOT forwarded — codex is routed
+      // through nvinference per the deployment's credential policy.
       env: (() => {
         const e: Record<string, string> = {
           HOME: process.env.HOME ?? '/home/node',
