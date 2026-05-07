@@ -22,9 +22,11 @@ import { registerDeliveryAction } from '../../delivery.js';
 import { registerApprovalHandler } from '../approvals/index.js';
 import { applyAddMcpServer, applyInstallPackages } from './apply.js';
 import { handleAddMcpServer, handleInstallPackages } from './request.js';
+import { handleRequestRestart } from './restart.js';
 
 registerDeliveryAction('install_packages', handleInstallPackages);
 registerDeliveryAction('add_mcp_server', handleAddMcpServer);
+registerDeliveryAction('request_restart', handleRequestRestart);
 
 registerApprovalHandler('install_packages', applyInstallPackages);
 registerApprovalHandler('add_mcp_server', applyAddMcpServer);

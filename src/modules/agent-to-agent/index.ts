@@ -17,6 +17,10 @@
  * throw because the module isn't installed.
  */
 import { registerDeliveryAction } from '../../delivery.js';
+import { handleAppendLearning } from './append-learning.js';
 import { handleCreateAgent } from './create-agent.js';
+import { handleWireAgents } from './wire-agents.js';
 
 registerDeliveryAction('create_agent', handleCreateAgent);
+registerDeliveryAction('wire_agents', handleWireAgents);
+registerDeliveryAction('append_learning', handleAppendLearning);

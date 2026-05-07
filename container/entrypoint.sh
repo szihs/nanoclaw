@@ -13,4 +13,8 @@ set -e
 
 cat > /tmp/input.json
 
+# Rewrite github.com HTTPS URLs to embed placeholder credentials.
+# The OneCLI proxy intercepts the Basic auth header and injects the real token.
+git config --global "url.https://x-access-token:placeholder@github.com/.insteadOf" "https://github.com/" 2>/dev/null || true
+
 exec bun run /app/src/index.ts < /tmp/input.json

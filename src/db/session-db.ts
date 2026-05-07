@@ -32,6 +32,14 @@ export function openOutboundDb(dbPath: string): Database.Database {
   return db;
 }
 
+/** Open the outbound DB for a session with write access (host direct-write path). */
+export function openOutboundDbWritable(dbPath: string): Database.Database {
+  const db = new Database(dbPath);
+  db.pragma('journal_mode = DELETE');
+  db.pragma('busy_timeout = 5000');
+  return db;
+}
+
 export function upsertSessionRouting(
   db: Database.Database,
   routing: { channel_type: string | null; platform_id: string | null; thread_id: string | null },
@@ -83,6 +91,29 @@ export function nextEvenSeq(db: Database.Database): number {
   return maxSeq < 2 ? 2 : maxSeq + 2 - (maxSeq % 2);
 }
 
+// Stored-timestamp shape contract for messages_in: always an ISO-8601 UTC
+// string. Historically some callers slipped `Date.now()` in as a number,
+// which SQLite stored as REAL and printed back as "<ms>.0" — unparseable by
+// Date.parse and able to bisect downstream sorts via NaN poisoning. We guard
+// at the insert site so the corruption can't re-enter the DB.
+function toIsoTimestamp(raw: unknown, field: string): string {
+  if (typeof raw === 'string') {
+    const s = raw.trim();
+    if (/^\d+(\.\d+)?$/.test(s)) {
+      const n = Number(s);
+      if (Number.isFinite(n)) return new Date(n).toISOString();
+    }
+    const parsed = Date.parse(s);
+    if (Number.isFinite(parsed)) return new Date(parsed).toISOString();
+    throw new Error(`insertMessage: unparseable ${field} "${raw}"`);
+  }
+  if (typeof raw === 'number' && Number.isFinite(raw)) {
+    return new Date(raw).toISOString();
+  }
+  if (raw instanceof Date) return raw.toISOString();
+  throw new Error(`insertMessage: invalid ${field} type ${typeof raw}`);
+}
+
 export function insertMessage(
   db: Database.Database,
   message: {
@@ -102,11 +133,16 @@ export function insertMessage(
     trigger?: 0 | 1;
   },
 ): void {
+  const normalizedTimestamp = toIsoTimestamp(message.timestamp, 'timestamp');
+  const normalizedProcessAfter =
+    message.processAfter == null ? null : toIsoTimestamp(message.processAfter, 'processAfter');
   db.prepare(
     `INSERT INTO messages_in (id, seq, kind, timestamp, status, platform_id, channel_type, thread_id, content, process_after, recurrence, series_id, trigger)
      VALUES (@id, @seq, @kind, @timestamp, 'pending', @platformId, @channelType, @threadId, @content, @processAfter, @recurrence, @id, @trigger)`,
   ).run({
     ...message,
+    timestamp: normalizedTimestamp,
+    processAfter: normalizedProcessAfter,
     trigger: message.trigger ?? 1,
     seq: nextEvenSeq(db),
   });
@@ -119,7 +155,7 @@ export function countDueMessages(db: Database.Database): number {
         `SELECT COUNT(*) as count FROM messages_in
        WHERE status = 'pending'
          AND trigger = 1
-         AND (process_after IS NULL OR datetime(process_after) <= datetime('now'))`,
+         AND (process_after IS NULL OR REPLACE(REPLACE(process_after, 'T', ' '), 'Z', '') <= datetime('now'))`,
       )
       .get() as { count: number }
   ).count;

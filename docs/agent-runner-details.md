@@ -531,22 +531,6 @@ Implementation:
 
 The agent's execution is paused at this tool call. The provider's query keeps running (Claude holds the tool call open). The agent-runner polls for the response in a separate loop.
 
-#### edit_message
-
-Edit a previously sent message.
-
-```typescript
-{
-  name: 'edit_message',
-  params: {
-    messageId: string,     // integer ID as shown to the agent
-    text: string,          // new content
-  }
-}
-```
-
-Implementation: write a `messages_out` row with `operation: 'edit'`, the message ID, and new text.
-
 #### add_reaction
 
 Add an emoji reaction to a message.
@@ -713,7 +697,7 @@ These are ephemeral to the container's lifetime. When the container is killed an
 The agent-runner receives configuration via:
 
 - **Environment variables:** `AGENT_PROVIDER` (claude/codex/opencode), `NANOCLAW_ADMIN_USER_ID`, provider-specific vars (API keys, model overrides), `TZ`
-- **Fixed mount paths:** Session DB at `/workspace/session.db`. Agent group folder at `/workspace/agent/`. System prompt from `/workspace/agent/CLAUDE.md` and `/workspace/global/CLAUDE.md`.
+- **Fixed mount paths:** Session DB at `/workspace/session.db`. Agent group folder at `/workspace/agent/`. System prompt from `/workspace/agent/CLAUDE.md` (composed on every wake). Cross-group shared facts at `/workspace/shared/` (read-write for Main, read-only for coworkers).
 - **Optional startup config:** Some config may be passed as a JSON file at a fixed path (e.g., `/workspace/config.json`) for things like the session ID to resume, assistant name, and admin user ID. This avoids overloading environment variables.
 
 The agent-runner reads config, creates the provider, and enters the poll loop. No stdin, no initial prompt — messages are already in the session DB.

@@ -32,6 +32,12 @@ if [ "${INSTALL_CJK_FONTS:-false}" = "true" ]; then
     BUILD_ARGS+=(--build-arg INSTALL_CJK_FONTS=true)
 fi
 
+# Auto-detect GPU: enable GPU packages if nvidia-smi is available
+if command -v nvidia-smi &>/dev/null; then
+    echo "NVIDIA GPU detected — building with GPU support (CUDA, Vulkan, X11)"
+    BUILD_ARGS+=(--build-arg ENABLE_GPU=1)
+fi
+
 echo "Building NanoClaw agent container image..."
 echo "Image: ${IMAGE_NAME}:${TAG}"
 

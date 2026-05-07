@@ -4,29 +4,48 @@
  * The container runs the v2 agent-runner which polls the session DB.
  */
 import { ChildProcess, execSync, spawn } from 'child_process';
+import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
 
 import { OneCLI } from '@onecli-sh/sdk';
 
 import {
+  composeCoworkerSpine,
+  readCoworkerTypes,
+  readSkillCatalog,
+  resolveCoworkerManifest,
+  type CoworkerTypeEntry,
+  type SkillMeta,
+} from './claude-composer.js';
+import {
   CONTAINER_IMAGE,
   CONTAINER_IMAGE_BASE,
   CONTAINER_INSTALL_LABEL,
+  CONTAINER_PREFIX,
+  DASHBOARD_PORT,
   DATA_DIR,
   GROUPS_DIR,
-  ONECLI_API_KEY,
+  IDLE_TIMEOUT,
+  MAX_MESSAGES_PER_PROMPT,
+  MCP_PROXY_PORT,
   ONECLI_URL,
   TIMEZONE,
 } from './config.js';
 import { readContainerConfig, writeContainerConfig } from './container-config.js';
 import { CONTAINER_RUNTIME_BIN, hostGatewayArgs, readonlyMountArgs, stopContainer } from './container-runtime.js';
-import { composeGroupClaudeMd } from './claude-md-compose.js';
 import { getAgentGroup } from './db/agent-groups.js';
 import { getDb, hasTable } from './db/connection.js';
+import { getSession } from './db/sessions.js';
 import { initGroupFilesystem } from './group-init.js';
 import { stopTypingRefresh } from './modules/typing/index.js';
 import { log } from './log.js';
+import {
+  registerContainerToken,
+  revokeContainerToken,
+  getDiscoveredToolInventory,
+  getDiscoveredToolAnnotations,
+} from './mcp-auth-proxy.js';
 import { validateAdditionalMounts } from './modules/mount-security/index.js';
 // Provider host-side config barrel — each provider that needs host-side
 // container setup self-registers on import.
@@ -45,10 +64,91 @@ import {
 } from './session-manager.js';
 import type { AgentGroup, Session } from './types.js';
 
-const onecli = new OneCLI({ url: ONECLI_URL, apiKey: ONECLI_API_KEY });
+const onecli = new OneCLI({ url: ONECLI_URL });
+
+/**
+ * Cached coworker types + skill catalog — reloaded when any coworker-types.yaml
+ * or SKILL.md mtime changes. Tool derivation walks the catalog so both inputs
+ * participate in the fingerprint.
+ */
+let registryCache: {
+  types: Record<string, CoworkerTypeEntry>;
+  catalog: Record<string, SkillMeta>;
+  fingerprint: number;
+} | null = null;
+
+function registryFingerprint(): number {
+  const root = process.cwd();
+  // Mirror discovery roots in src/claude-composer/registry.ts. Any change to a
+  // spine, workflow, overlay, or capability skill file invalidates the cache.
+  const roots: { dir: string; files: string[] }[] = [
+    { dir: path.join(root, 'container', 'skills'), files: ['coworker-types.yaml', 'SKILL.md'] },
+    { dir: path.join(root, 'container', 'workflows'), files: ['WORKFLOW.md'] },
+    { dir: path.join(root, 'container', 'overlays'), files: ['OVERLAY.md'] },
+    { dir: path.join(root, 'container', 'spines'), files: ['coworker-types.yaml'] },
+  ];
+  let maxMtime = 0;
+  for (const { dir, files } of roots) {
+    try {
+      for (const entry of fs.readdirSync(dir)) {
+        for (const file of files) {
+          try {
+            maxMtime = Math.max(maxMtime, fs.statSync(path.join(dir, entry, file)).mtimeMs);
+          } catch {
+            /* file does not exist */
+          }
+        }
+      }
+    } catch {
+      /* root dir does not exist */
+    }
+  }
+  return maxMtime;
+}
+
+function loadRegistry(): { types: Record<string, CoworkerTypeEntry>; catalog: Record<string, SkillMeta> } {
+  try {
+    const fp = registryFingerprint();
+    if (registryCache && registryCache.fingerprint === fp) {
+      return { types: registryCache.types, catalog: registryCache.catalog };
+    }
+    const projectRoot = process.cwd();
+    const types = readCoworkerTypes(projectRoot);
+    const catalog = readSkillCatalog(projectRoot);
+    registryCache = { types, catalog, fingerprint: fp };
+    return { types, catalog };
+  } catch (err) {
+    log.warn('Failed to load coworker registry', { err });
+    return { types: {}, catalog: {} };
+  }
+}
+
+export function resetCoworkerTypesCacheForTests(): void {
+  registryCache = null;
+}
+
+type GpuMode = 'runtime-nvidia' | 'gpus-all' | 'none';
+let gpuModeCache: GpuMode | null = null;
+
+function detectGpuMode(): GpuMode {
+  if (gpuModeCache) return gpuModeCache;
+  if (process.env.ENABLE_GPU !== '1' && !fs.existsSync('/usr/bin/nvidia-smi')) {
+    return (gpuModeCache = 'none');
+  }
+  const forced = process.env.GPU_RUNTIME_MODE as GpuMode | undefined;
+  if (forced === 'runtime-nvidia' || forced === 'gpus-all') return (gpuModeCache = forced);
+  try {
+    const runtimes = execSync('docker info --format "{{json .Runtimes}}"', { timeout: 3000 }).toString();
+    if (/\bnvidia\b/.test(runtimes)) return (gpuModeCache = 'runtime-nvidia');
+  } catch {}
+  return (gpuModeCache = 'gpus-all');
+}
 
 /** Active containers tracked by session ID. */
 const activeContainers = new Map<string, { process: ChildProcess; containerName: string }>();
+
+/** SHA-256 hash of CLAUDE.md at spawn time, keyed by session ID. */
+const spawnedClaudeMdHash = new Map<string, string>();
 
 /**
  * In-flight wake promises, keyed by session id. Deduplicates concurrent
@@ -59,6 +159,190 @@ const activeContainers = new Map<string, { process: ChildProcess; containerName:
  * racy double-replies.
  */
 const wakePromises = new Map<string, Promise<void>>();
+
+/**
+ * Compose CLAUDE.md from the lego coworker model: spine fragments + skills +
+ * workflows + overlays + trait bindings, discovered under
+ * `container/{spines,skills,workflows,overlays}/`. See docs/lego-coworker-workflows.md.
+ *
+ * Runs for ALL non-admin coworkers on every container wake. CLAUDE.md is
+ * system-owned (regenerated from the manifest + .instructions.md on every
+ * wake). User edits go in .instructions.md and are appended after the spine.
+ */
+function composeCoworkerClaudeMd(agentGroup: AgentGroup): void {
+  const groupDir = path.resolve(GROUPS_DIR, agentGroup.folder);
+  const claudeMdPath = path.join(groupDir, 'CLAUDE.md');
+  const instructionsPath = path.join(groupDir, '.instructions.md');
+
+  if (!agentGroup.coworker_type && !fs.existsSync(instructionsPath) && fs.existsSync(claudeMdPath)) {
+    fs.renameSync(claudeMdPath, instructionsPath);
+    log.info('Auto-migrated CLAUDE.md to .instructions.md', { folder: agentGroup.folder });
+  }
+
+  if (!agentGroup.coworker_type) {
+    // Untyped coworker: compose via the 'default' typed leaf + .instructions.md.
+    // 'default' extends base-common with no project skills, so it's the bare
+    // spine — minimum operational guidance for a coworker that needs no
+    // project-specific knowledge. This goes through the same composer
+    // pipeline as typed coworkers.
+    try {
+      let extraInstructions: string | null = null;
+      try {
+        extraInstructions = fs.readFileSync(instructionsPath, 'utf-8');
+      } catch {
+        /* no instructions */
+      }
+
+      const composed = composeCoworkerSpine({
+        coworkerType: 'default',
+        extraInstructions,
+        disableOverlays: agentGroup.disable_overlays === 1,
+      });
+      fs.mkdirSync(groupDir, { recursive: true });
+      fs.writeFileSync(claudeMdPath, composed);
+      log.debug('CLAUDE.md composed for untyped coworker via default type', { folder: agentGroup.folder });
+    } catch (err) {
+      log.warn('Failed to compose CLAUDE.md for untyped coworker', { folder: agentGroup.folder, err });
+    }
+    return;
+  }
+
+  try {
+    let extraInstructions: string | null = null;
+    try {
+      extraInstructions = fs.readFileSync(instructionsPath, 'utf-8');
+    } catch {
+      /* no explicit instructions */
+    }
+
+    const composed = composeCoworkerSpine({
+      coworkerType: agentGroup.coworker_type,
+      extraInstructions,
+      disableOverlays: agentGroup.disable_overlays === 1,
+    });
+
+    fs.mkdirSync(groupDir, { recursive: true });
+    fs.writeFileSync(claudeMdPath, composed);
+    log.debug('CLAUDE.md composed from lego spine', { folder: agentGroup.folder });
+  } catch (err) {
+    log.warn('Failed to compose CLAUDE.md from lego spine', { folder: agentGroup.folder, err });
+  }
+}
+
+/** Resolve the coworker manifest once; returns tools, mcpServers, overlay names, and workflow summaries. */
+function resolveTypeManifest(agentGroup: AgentGroup): {
+  tools: string[];
+  mcpServers: Record<string, unknown>;
+  overlayNames: string[];
+  workflows: { name: string; description: string }[];
+} {
+  // Untyped coworker → resolve as 'default' so it gets the same tool
+  // allowlist, MCP servers, and overlays as its composed CLAUDE.md
+  // (composeCoworkerClaudeMd above also renders via 'default').
+  const effectiveType = agentGroup.coworker_type || 'default';
+  try {
+    const { types, catalog } = loadRegistry();
+    const manifest = resolveCoworkerManifest(types, effectiveType, catalog, process.cwd());
+    const overlayNames = [
+      ...new Set(
+        manifest.customizations.filter((c) => c.kind === 'overlay' && c.overlayName).map((c) => c.overlayName!),
+      ),
+    ];
+    return {
+      tools: manifest.tools.filter((t) => t.startsWith('mcp__')),
+      mcpServers: manifest.mcpServers ?? {},
+      overlayNames,
+      workflows: manifest.workflows.map((w) => ({ name: w.name, description: w.description })),
+    };
+  } catch (err) {
+    log.warn('Failed to resolve coworker manifest', { coworkerType: effectiveType, err });
+    return { tools: [], mcpServers: {}, overlayNames: [], workflows: [] };
+  }
+}
+
+/**
+ * Whether the runtime overlay hooks (plan-gate, critique-tracker, intent-router,
+ * edit-counter, workflow-state-reset) should be injected into the container's
+ * settings.json for this agent group.
+ *
+ * Mirrors the compose-time contract in `claude-composer/spine.ts`: when the
+ * per-coworker `agent_groups.disable_overlays` flag is 1, every overlay-driven
+ * behavior is suppressed — spine rendering (PR #97) AND runtime hook gates.
+ * Without this, disable_overlays would strip the Gate Protocol text but the
+ * hooks would still block Edit/Write/Bash, so the coworker would fail writes
+ * with no corresponding prompt explaining why.
+ *
+ * Exported for the R20 runtime-side counterpart of the R19 compose-time test.
+ */
+export function resolveOverlayHookFlags(agentGroup: AgentGroup): { hasPlan: boolean; hasCritique: boolean } {
+  if (agentGroup.disable_overlays === 1) return { hasPlan: false, hasCritique: false };
+  const { overlayNames, workflows: wfManifest } = resolveTypeManifest(agentGroup);
+  const hasCritique = overlayNames.includes('critique-overlay');
+  // Plan gate is part of critique-overlay (insert-before: [patch]) and only
+  // applies when the coworker has implement-family workflows.
+  const hasPlan = hasCritique && wfManifest.some((w) => w.name.includes('implement'));
+  return { hasPlan, hasCritique };
+}
+
+/**
+ * For a given coworker, return the subset of its allowed MCP tools whose MCP
+ * annotations say `openWorldHint: true` — i.e. tools that interact with
+ * external systems (GitHub posting, Discord messaging, etc.). These tools
+ * should be gated by plan-gate.sh under the same conditions as Edit/Write,
+ * so external-facing side effects respect the critique gate.
+ *
+ * Empty when no tools are annotated yet (PR-1 ships as no-op until PR-2
+ * lands annotations on slang-mcp tools).
+ *
+ * Also empty when disable_overlays=1 (no gate, no need to gate anything).
+ *
+ * Exported for test access.
+ */
+export function resolveCritiqueGatedTools(agentGroup: AgentGroup): string[] {
+  const { hasPlan, hasCritique } = resolveOverlayHookFlags(agentGroup);
+  if (!hasPlan && !hasCritique) return [];
+
+  const allowed = resolveAllowedMcpTools(agentGroup);
+  if (allowed.length === 0) return [];
+
+  const annotations = getDiscoveredToolAnnotations();
+  const gated: string[] = [];
+  for (const tool of allowed) {
+    const anno = annotations[tool];
+    if (anno?.openWorldHint === true) gated.push(tool);
+  }
+  return gated;
+}
+
+export function resolveAllowedMcpTools(agentGroup: AgentGroup): string[] {
+  if (agentGroup.is_admin) {
+    const adminOverride = process.env.ADMIN_MCP_TOOLS || '';
+    if (adminOverride) {
+      return adminOverride
+        .split(',')
+        .map((t) => t.trim())
+        .filter(Boolean);
+    }
+    const inv = getDiscoveredToolInventory();
+    const allTools = Object.values(inv).flat();
+    return allTools.length > 0 ? allTools : [];
+  }
+
+  if (agentGroup.allowed_mcp_tools) {
+    try {
+      const parsed = JSON.parse(agentGroup.allowed_mcp_tools);
+      if (Array.isArray(parsed)) return parsed.filter(Boolean);
+    } catch {
+      /* not JSON, fall through to comma-split */
+    }
+    return agentGroup.allowed_mcp_tools
+      .split(',')
+      .map((t) => t.trim())
+      .filter(Boolean);
+  }
+
+  return resolveTypeManifest(agentGroup).tools;
+}
 
 export function getActiveContainerCount(): number {
   return activeContainers.size;
@@ -98,6 +382,20 @@ async function spawnContainer(session: Session): Promise<void> {
     return;
   }
 
+  // Compose CLAUDE.md for typed coworkers (lego spine model).
+  composeCoworkerClaudeMd(agentGroup);
+
+  // Store a hash of the just-composed CLAUDE.md so the host sweep can detect
+  // staleness if skills/overlays/workflows change while the container is running.
+  try {
+    const claudeContent = fs.readFileSync(path.join(GROUPS_DIR, agentGroup.folder, 'CLAUDE.md'));
+    const hash = crypto.createHash('sha256').update(claudeContent).digest('hex');
+    spawnedClaudeMdHash.set(session.id, hash);
+    log.debug('CLAUDE.md hash stored at spawn', { sessionId: session.id, hash: hash.slice(0, 12) });
+  } catch {
+    /* composition failed — no hash to track */
+  }
+
   // Refresh the destination map and default reply routing so any admin
   // changes take effect on wake. Destinations come from the agent-to-agent
   // module — skip when the module isn't installed (table absent).
@@ -107,35 +405,33 @@ async function spawnContainer(session: Session): Promise<void> {
   }
   writeSessionRouting(agentGroup.id, session.id);
 
-  // Read container config once — threaded through provider resolution,
-  // buildMounts, and buildContainerArgs so we don't re-read the file.
-  const containerConfig = readContainerConfig(agentGroup.folder);
-
-  // Ensure container.json has the agent group identity fields the runner needs.
-  // Written at spawn time so the runner can read them from the RO mount.
-  ensureRuntimeFields(containerConfig, agentGroup);
-
   // Resolve the effective provider + any host-side contribution it declares
   // (extra mounts, env passthrough). Computed once and threaded through both
   // buildMounts and buildContainerArgs so side effects (mkdir, etc.) fire once.
-  const { provider, contribution } = resolveProviderContribution(session, agentGroup, containerConfig);
+  const { provider, contribution } = resolveProviderContribution(session, agentGroup);
 
-  const mounts = buildMounts(agentGroup, session, containerConfig, contribution);
-  const containerName = `nanoclaw-v2-${agentGroup.folder}-${Date.now()}`;
+  const mounts = buildMounts(agentGroup, session, contribution);
+  const containerName = `${CONTAINER_PREFIX}-${agentGroup.folder}-${Date.now()}`;
   // OneCLI agent identifier is always the agent group id — stable across
   // sessions and reversible via getAgentGroup() for approval routing.
   const agentIdentifier = agentGroup.id;
-  const args = await buildContainerArgs(
-    mounts,
-    containerName,
-    agentGroup,
-    containerConfig,
-    provider,
-    contribution,
-    agentIdentifier,
-  );
 
-  log.info('Spawning container', { sessionId: session.id, agentGroup: agentGroup.name, containerName });
+  // Register an MCP proxy token so the container can access host MCP servers.
+  const allowedTools = resolveAllowedMcpTools(agentGroup);
+  const proxyToken = registerContainerToken(agentGroup.folder, allowedTools);
+
+  const args = await buildContainerArgs(mounts, containerName, agentGroup, provider, contribution, agentIdentifier, {
+    proxyToken,
+    allowedTools,
+  });
+
+  log.info('Spawning container', {
+    sessionId: session.id,
+    agentGroup: agentGroup.name,
+    containerName,
+    mcpToolCount: allowedTools.length,
+    hasProxyToken: !!proxyToken,
+  });
 
   // Clear any orphan heartbeat from a previous container instance — the
   // sweep's ceiling check treats a missing file as "fresh spawn, give grace"
@@ -165,8 +461,10 @@ async function spawnContainer(session: Session): Promise<void> {
 
   container.on('close', (code) => {
     activeContainers.delete(session.id);
+    spawnedClaudeMdHash.delete(session.id);
     markContainerStopped(session.id);
     stopTypingRefresh(session.id);
+    revokeContainerToken(proxyToken);
     log.info('Container exited', { sessionId: session.id, code, containerName });
   });
 
@@ -210,12 +508,85 @@ export function resolveProviderName(
   return (sessionProvider || agentGroupProvider || containerConfigProvider || 'claude').toLowerCase();
 }
 
+/**
+ * Recompose CLAUDE.md for a running container and update the stored hash.
+ * Call after sending /clear so the next SDK turn picks up the fresh file
+ * and the sweep doesn't re-detect as stale.
+ */
+export function recomposeAndUpdateHash(sessionId: string): void {
+  const session = getSession(sessionId);
+  if (!session) return;
+  const ag = getAgentGroup(session.agent_group_id);
+  if (!ag) return;
+  composeCoworkerClaudeMd(ag);
+  // Hash must match what detectStaleContainers computes: composeCoworkerSpine output,
+  // NOT the file on disk (which may have @-import prefixes for flat types).
+  try {
+    const coworkerType = ag.coworker_type || 'default';
+    let extra: string | null = null;
+    try {
+      extra = fs.readFileSync(path.join(GROUPS_DIR, ag.folder, '.instructions.md'), 'utf-8');
+    } catch {
+      /* */
+    }
+    const composed = composeCoworkerSpine({
+      coworkerType,
+      extraInstructions: extra,
+      disableOverlays: ag.disable_overlays === 1,
+    });
+    spawnedClaudeMdHash.set(sessionId, crypto.createHash('sha256').update(composed).digest('hex'));
+  } catch {
+    /* best-effort */
+  }
+}
+
+/**
+ * Detect containers whose CLAUDE.md has become stale (skills/overlays/
+ * .instructions.md changed since spawn). Returns session IDs that need a
+ * fresh context. Does NOT kill or send messages — the caller decides.
+ */
+export function detectStaleContainers(): Array<{ sessionId: string; agentGroupId: string; folder: string }> {
+  const stale: Array<{ sessionId: string; agentGroupId: string; folder: string }> = [];
+  for (const [sessionId] of activeContainers) {
+    const session = getSession(sessionId);
+    if (!session) continue;
+    const ag = getAgentGroup(session.agent_group_id);
+    if (!ag) continue;
+
+    const spawnHash = spawnedClaudeMdHash.get(sessionId);
+    if (!spawnHash) continue;
+
+    const coworkerType = ag.coworker_type || 'default';
+    let extra: string | null = null;
+    try {
+      extra = fs.readFileSync(path.join(GROUPS_DIR, ag.folder, '.instructions.md'), 'utf-8');
+    } catch {
+      /* no instructions */
+    }
+
+    const composed = composeCoworkerSpine({
+      coworkerType,
+      extraInstructions: extra,
+      disableOverlays: ag.disable_overlays === 1,
+    });
+    const currentHash = crypto.createHash('sha256').update(composed).digest('hex');
+
+    if (currentHash !== spawnHash) {
+      stale.push({ sessionId, agentGroupId: ag.id, folder: ag.folder });
+    }
+  }
+  return stale;
+}
+
 function resolveProviderContribution(
   session: Session,
   agentGroup: AgentGroup,
-  containerConfig: import('./container-config.js').ContainerConfig,
 ): { provider: string; contribution: ProviderContainerContribution } {
-  const provider = resolveProviderName(session.agent_provider, agentGroup.agent_provider, containerConfig.provider);
+  // Precedence: session provider > agent_group provider > container.json > default.
+  // Previously passed undefined for container-config, making `provider:` in
+  // groups/<folder>/container.json dead config.
+  const containerConfigProvider = readContainerConfig(agentGroup.folder).provider ?? null;
+  const provider = resolveProviderName(session.agent_provider, agentGroup.agent_provider, containerConfigProvider);
   const fn = getProviderContainerConfig(provider);
   const contribution = fn
     ? fn({
@@ -230,85 +601,269 @@ function resolveProviderContribution(
 function buildMounts(
   agentGroup: AgentGroup,
   session: Session,
-  containerConfig: import('./container-config.js').ContainerConfig,
   providerContribution: ProviderContainerContribution,
 ): VolumeMount[] {
-  const projectRoot = process.cwd();
-
   // Per-group filesystem state lives forever after first creation. Init is
   // idempotent: it only writes paths that don't already exist, so this call
-  // is a no-op for groups that have spawned before.
+  // is a no-op for groups that have spawned before. Pulling in upstream
+  // built-in skill or agent-runner source updates is an explicit operation
+  // (host-mediated tools), not something the spawn path does silently.
   initGroupFilesystem(agentGroup);
-
-  // Sync skill symlinks based on container.json selection before mounting.
-  const claudeDir = path.join(DATA_DIR, 'v2-sessions', agentGroup.id, '.claude-shared');
-  syncSkillSymlinks(claudeDir, containerConfig);
-
-  // Compose CLAUDE.md fresh every spawn from the shared base, enabled skill
-  // fragments, and MCP server instructions. See `claude-md-compose.ts`.
-  composeGroupClaudeMd(agentGroup);
 
   const mounts: VolumeMount[] = [];
   const sessDir = sessionDir(agentGroup.id, session.id);
   const groupDir = path.resolve(GROUPS_DIR, agentGroup.folder);
 
+  // Convenience: drop a symlink at groups/<folder>/.workflow-state.json pointing
+  // at the per-session state file. Lets the user inspect plan/critique state from
+  // the visible group folder instead of digging into data/v2-sessions/.../sess-*/.claude/.
+  // The symlink uses an absolute host path because it's only ever read host-side
+  // (the container has the real file at /workspace/.claude/workflow-state.json).
+  try {
+    const linkPath = path.join(groupDir, '.workflow-state.json');
+    const targetPath = path.join(sessDir, '.claude', 'workflow-state.json');
+    if (fs.existsSync(linkPath) && !fs.lstatSync(linkPath).isSymbolicLink()) {
+      // Stale regular file from a prior run — replace with symlink.
+      fs.unlinkSync(linkPath);
+    }
+    if (!fs.existsSync(linkPath)) {
+      fs.symlinkSync(targetPath, linkPath);
+    }
+  } catch (err) {
+    log.debug('workflow-state symlink skipped', { folder: agentGroup.folder, err });
+  }
+
   // Session folder at /workspace (contains inbound.db, outbound.db, outbox/, .claude/)
   mounts.push({ hostPath: sessDir, containerPath: '/workspace', readonly: false });
 
-  // Agent group folder at /workspace/agent (RW for working files + CLAUDE.local.md)
+  // Agent group folder at /workspace/agent
   mounts.push({ hostPath: groupDir, containerPath: '/workspace/agent', readonly: false });
 
-  // container.json — nested RO mount on top of RW group dir so the agent
-  // can read its config but cannot modify it.
-  const containerJsonPath = path.join(groupDir, 'container.json');
-  if (fs.existsSync(containerJsonPath)) {
-    mounts.push({ hostPath: containerJsonPath, containerPath: '/workspace/agent/container.json', readonly: true });
-  }
-
-  // Composer-managed CLAUDE.md artifacts — nested RO mounts. These are
-  // regenerated from the shared base + fragments on every spawn; any
-  // agent-side writes would be clobbered, so enforce read-only. Only
-  // CLAUDE.local.md (per-group memory) remains RW via the group-dir mount.
-  // `.claude-shared.md` is a symlink whose target (`/app/CLAUDE.md`) is
-  // already RO-mounted, so writes through it fail regardless — no need for
-  // a nested mount there.
-  const composedClaudeMd = path.join(groupDir, 'CLAUDE.md');
-  if (fs.existsSync(composedClaudeMd)) {
-    mounts.push({ hostPath: composedClaudeMd, containerPath: '/workspace/agent/CLAUDE.md', readonly: true });
-  }
-  const fragmentsDir = path.join(groupDir, '.claude-fragments');
-  if (fs.existsSync(fragmentsDir)) {
-    mounts.push({ hostPath: fragmentsDir, containerPath: '/workspace/agent/.claude-fragments', readonly: true });
-  }
-
-  // Global memory directory — always read-only.
-  const globalDir = path.join(GROUPS_DIR, 'global');
-  if (fs.existsSync(globalDir)) {
-    mounts.push({ hostPath: globalDir, containerPath: '/workspace/global', readonly: true });
-  }
-
-  // Shared CLAUDE.md — read-only, imported by the composed entry point via
-  // the `.claude-shared.md` symlink inside the group dir.
-  const sharedClaudeMd = path.join(process.cwd(), 'container', 'CLAUDE.md');
-  if (fs.existsSync(sharedClaudeMd)) {
-    mounts.push({ hostPath: sharedClaudeMd, containerPath: '/app/CLAUDE.md', readonly: true });
+  // Shared directory (learnings + cross-group facts) — mounted read-only
+  // for coworkers, read-write for Main. Main is the only agent allowed to
+  // edit the shared bucket; coworkers write via mcp__nanoclaw__append_learning
+  // which the host processes through the approval flow.
+  const sharedDir = path.join(DATA_DIR, 'shared');
+  if (fs.existsSync(sharedDir)) {
+    // Admin (Main) gets write access. Trust ONLY is_admin — not
+    // coworker_type. A malicious import that set coworker_type='main'
+    // on a non-admin group must not get write access.
+    const isAdmin = agentGroup.is_admin === 1;
+    mounts.push({ hostPath: sharedDir, containerPath: '/workspace/shared', readonly: !isAdmin });
   }
 
   // Per-group .claude-shared at /home/node/.claude (Claude state, settings,
-  // skill symlinks)
+  // skills — initialized once at group creation, persistent thereafter)
+  const claudeDir = path.join(DATA_DIR, 'v2-sessions', agentGroup.id, '.claude-shared');
+  const settingsFile = path.join(claudeDir, 'settings.json');
+
+  // Dashboard hook injection (port comes from config/.env)
+  const dashboardPort = DASHBOARD_PORT ? String(DASHBOARD_PORT) : '';
+  if (dashboardPort) {
+    const settings = JSON.parse(fs.readFileSync(settingsFile, 'utf-8'));
+    const hookUrl = `http://host.docker.internal:${dashboardPort}/api/hook-event`;
+    if (!settings.hooks) settings.hooks = {};
+    // Use command-type hooks with curl --proxy '' to bypass OneCLI HTTPS_PROXY.
+    // The Claude SDK pipes hook event JSON to stdin; curl reads it via $(cat).
+    const hookConfig = {
+      hooks: [
+        {
+          type: 'command',
+          command: `curl -sf --proxy '' -X POST ${hookUrl} -H 'Content-Type: application/json' -H 'X-Group-Folder: ${agentGroup.folder}' -d "$(cat)" > /dev/null 2>&1 || true`,
+          timeout: 5,
+        },
+      ],
+    };
+    for (const event of [
+      // Tool lifecycle
+      'PreToolUse',
+      'PostToolUse',
+      'PostToolUseFailure',
+      'PermissionRequest',
+      'PermissionDenied',
+      // Session lifecycle
+      'SessionStart',
+      'SessionEnd',
+      'Stop',
+      'StopFailure',
+      // Turn lifecycle
+      'UserPromptSubmit',
+      'Notification',
+      // Subagent lifecycle
+      'SubagentStart',
+      'SubagentStop',
+      // Task lifecycle
+      'TaskCreated',
+      'TaskCompleted',
+      // Context
+      'PreCompact',
+      'PostCompact',
+      // Configuration
+      'ConfigChange',
+      'InstructionsLoaded',
+      // File/directory
+      'FileChanged',
+      'CwdChanged',
+      // Worktree
+      'WorktreeCreate',
+      'WorktreeRemove',
+      // MCP
+      'Elicitation',
+      'ElicitationResult',
+    ]) {
+      if (!settings.hooks[event]) settings.hooks[event] = [];
+      // Strip stale entries (old transport/http format)
+      settings.hooks[event] = settings.hooks[event].filter(
+        (h: { transport?: string; type?: string; url?: string }) =>
+          !((h.transport || h.type === 'http') && h.url?.includes(hookUrl)),
+      );
+      // Dedup: check if a command hook for this URL already exists
+      const hasHook = settings.hooks[event].some((h: { hooks?: { command?: string }[] }) =>
+        h.hooks?.some((inner: { command?: string }) => inner.command?.includes(hookUrl)),
+      );
+      if (!hasHook) {
+        settings.hooks[event].push(hookConfig);
+      }
+    }
+    // Guard hook: block direct edits to CLAUDE.md — agents must edit .instructions.md instead.
+    // CLAUDE.md is auto-composed from templates + .instructions.md on every container wake,
+    // so direct edits are silently lost. This hook enforces the single source of truth.
+    const guardCmd = `INPUT=$(cat); FILE=$(echo "$INPUT" | jq -r '.tool_input.file_path // empty'); if echo "$FILE" | grep -q 'CLAUDE\\.md$'; then echo "CLAUDE.md is auto-generated from templates + .instructions.md on every container start. Your edits here will be overwritten. Edit .instructions.md instead — it lives in the same directory and its contents are appended to the composed CLAUDE.md." >&2; exit 2; fi; exit 0`;
+    const guardHookConfig = {
+      matcher: 'Edit|Write',
+      hooks: [{ type: 'command', command: guardCmd, timeout: 5 }],
+    };
+    if (!settings.hooks.PreToolUse) settings.hooks.PreToolUse = [];
+    const hasGuard = settings.hooks.PreToolUse.some(
+      (h: { matcher?: string; hooks?: { command?: string }[] }) =>
+        h.matcher === 'Edit|Write' &&
+        h.hooks?.some((inner: { command?: string }) => inner.command?.includes('CLAUDE\\\\.md')),
+    );
+    if (!hasGuard) {
+      settings.hooks.PreToolUse.push(guardHookConfig);
+    }
+
+    // Overlay hook injection: enforce plan/critique gates via runtime hooks.
+    // Uses resolveOverlayHookFlags() so agent_groups.disable_overlays=1 skips
+    // injection entirely — matches the compose-time contract in PR #97.
+    const hooksDir = path.join(process.cwd(), 'container', 'hooks');
+    if (fs.existsSync(hooksDir)) {
+      const { hasPlan, hasCritique } = resolveOverlayHookFlags(agentGroup);
+
+      const hasCmd = (event: string, cmd: string): boolean =>
+        (settings.hooks[event] ?? []).some((h: { hooks?: { command?: string }[] }) =>
+          h.hooks?.some((i: { command?: string }) => i.command?.includes(cmd)),
+        );
+
+      if (hasPlan || hasCritique) {
+        if (!settings.hooks.UserPromptSubmit) settings.hooks.UserPromptSubmit = [];
+        if (!hasCmd('UserPromptSubmit', 'workflow-state-reset.sh')) {
+          settings.hooks.UserPromptSubmit.push({
+            hooks: [{ type: 'command', command: 'bash /app/hooks/workflow-state-reset.sh', timeout: 5 }],
+          });
+        }
+        // Intent router: LLM-based workflow classification on each user message.
+        // Builds a routing table from the manifest's workflows and passes it as
+        // an env var so the hook can present options to the classifier.
+        const { workflows: wfList } = resolveTypeManifest(agentGroup);
+        if (wfList.length > 0 && !hasCmd('UserPromptSubmit', 'intent-router.sh')) {
+          const routingTable = wfList
+            .map((w) => `${w.name}:${w.description.slice(0, 60).replace(/[;:]/g, ' ')}`)
+            .join(';');
+          settings.hooks.UserPromptSubmit.push({
+            hooks: [
+              {
+                type: 'command',
+                command: `OVERLAY_WORKFLOWS='${routingTable}' bash /app/hooks/intent-router.sh`,
+                timeout: 8,
+              },
+            ],
+          });
+        }
+      }
+      if (hasPlan || hasCritique) {
+        // plan-gate.sh enforces BOTH plan and critique gates — inject it
+        // whenever either overlay is active (critique-only types still need
+        // the blocking hook for critique_required enforcement).
+        if (!hasCmd('PreToolUse', 'plan-gate.sh')) {
+          // Widened matcher includes `mcp__.*` so the hook can gate
+          // external-posting MCP tools (openWorldHint: true) under the
+          // same plan/critique conditions as Edit/Write. The script itself
+          // reads CRITIQUE_GATED_TOOLS and exits 0 for MCP tools that are
+          // not in the gated set, so this is a no-op until PR-2 lands
+          // annotations on slang-mcp tools.
+          settings.hooks.PreToolUse.push({
+            matcher: 'Edit|Write|MultiEdit|NotebookEdit|mcp__.*',
+            hooks: [
+              {
+                type: 'command',
+                command: `OVERLAY_HAS_PLAN=${hasPlan ? '1' : '0'} bash /app/hooks/plan-gate.sh`,
+                timeout: 5,
+              },
+            ],
+          });
+        }
+        if (!settings.hooks.PostToolUse) settings.hooks.PostToolUse = [];
+        if (!hasCmd('PostToolUse', 'plan-tracker.sh')) {
+          settings.hooks.PostToolUse.push({
+            matcher: 'Write',
+            hooks: [{ type: 'command', command: 'bash /app/hooks/plan-tracker.sh', timeout: 5 }],
+          });
+        }
+        // critique-record-gate enforces the disk-write half of the
+        // critique-overlay protocol: blocks Edit/Write on source files until
+        // the agent has recorded the verdict to /workspace/agent/critiques/.
+        if (!hasCmd('PreToolUse', 'critique-record-gate.sh')) {
+          // Matcher widened alongside plan-gate.sh (see above) — the
+          // script itself decides what to do with non-Edit/Write tools.
+          settings.hooks.PreToolUse.push({
+            matcher: 'Edit|Write|MultiEdit|NotebookEdit|mcp__.*',
+            hooks: [{ type: 'command', command: 'bash /app/hooks/critique-record-gate.sh', timeout: 5 }],
+          });
+        }
+      }
+      if (hasCritique) {
+        // Track every successful mcp__codex__codex call as a critique round.
+        // PostToolUse fires reliably for tool_use; SubagentStart was unreliable
+        // (agent_type field not always populated) and obsolete now that
+        // codex-critique is invoked directly via Skill, not as an Agent subagent.
+        if (!settings.hooks.PostToolUse) settings.hooks.PostToolUse = [];
+        if (!hasCmd('PostToolUse', 'critique-tracker.sh')) {
+          settings.hooks.PostToolUse.push({
+            matcher: 'mcp__codex__codex|mcp__codex__codex-reply',
+            hooks: [{ type: 'command', command: 'bash /app/hooks/critique-tracker.sh', timeout: 5 }],
+          });
+        }
+      }
+      if (hasPlan || hasCritique) {
+        if (!settings.hooks.PostToolUse) settings.hooks.PostToolUse = [];
+        if (!hasCmd('PostToolUse', 'edit-counter.sh')) {
+          settings.hooks.PostToolUse.push({
+            matcher: 'Edit|Write|MultiEdit|NotebookEdit',
+            hooks: [{ type: 'command', command: 'bash /app/hooks/edit-counter.sh', timeout: 5 }],
+          });
+        }
+        log.debug('Overlay hooks injected', { folder: agentGroup.folder, plan: hasPlan, critique: hasCritique });
+      }
+    }
+
+    fs.writeFileSync(settingsFile, JSON.stringify(settings, null, 2) + '\n');
+  }
   mounts.push({ hostPath: claudeDir, containerPath: '/home/node/.claude', readonly: false });
 
-  // Shared agent-runner source — read-only, same code for all groups.
-  const agentRunnerSrc = path.join(projectRoot, 'container', 'agent-runner', 'src');
-  mounts.push({ hostPath: agentRunnerSrc, containerPath: '/app/src', readonly: true });
-
-  // Shared skills — read-only, symlinks in .claude-shared/skills/ point here.
-  const skillsSrc = path.join(projectRoot, 'container', 'skills');
-  if (fs.existsSync(skillsSrc)) {
-    mounts.push({ hostPath: skillsSrc, containerPath: '/app/skills', readonly: true });
+  // Overlay hook scripts at /app/hooks (read-only — host-managed)
+  const hooksMount = path.join(process.cwd(), 'container', 'hooks');
+  if (fs.existsSync(hooksMount)) {
+    mounts.push({ hostPath: hooksMount, containerPath: '/app/hooks', readonly: true });
   }
 
-  // Additional mounts from container config
+  // Per-group agent-runner source at /app/src (initialized once at group
+  // creation, persistent thereafter — agents can modify their runner)
+  const groupRunnerDir = path.join(DATA_DIR, 'v2-sessions', agentGroup.id, 'agent-runner-src');
+  mounts.push({ hostPath: groupRunnerDir, containerPath: '/app/src', readonly: false });
+
+  // Additional mounts from container config (groups/<folder>/container.json)
+  const containerConfig = readContainerConfig(agentGroup.folder);
   if (containerConfig.additionalMounts && containerConfig.additionalMounts.length > 0) {
     const validated = validateAdditionalMounts(containerConfig.additionalMounts, agentGroup.name);
     mounts.push(...validated);
@@ -322,110 +877,115 @@ function buildMounts(
   return mounts;
 }
 
-/**
- * Sync skill symlinks in .claude-shared/skills/ to match the container.json
- * selection. Each symlink points to a container path (/app/skills/<name>)
- * so it's dangling on the host but valid inside the container.
- */
-function syncSkillSymlinks(claudeDir: string, containerConfig: import('./container-config.js').ContainerConfig): void {
-  const skillsDir = path.join(claudeDir, 'skills');
-  if (!fs.existsSync(skillsDir)) {
-    fs.mkdirSync(skillsDir, { recursive: true });
-  }
-
-  // Determine desired skill set
-  const projectRoot = process.cwd();
-  const sharedSkillsDir = path.join(projectRoot, 'container', 'skills');
-  let desired: string[];
-  if (containerConfig.skills === 'all') {
-    // Recompute from shared dir — newly-added upstream skills appear automatically
-    desired = fs.existsSync(sharedSkillsDir)
-      ? fs.readdirSync(sharedSkillsDir).filter((e) => {
-          try {
-            return fs.statSync(path.join(sharedSkillsDir, e)).isDirectory();
-          } catch {
-            return false;
-          }
-        })
-      : [];
-  } else {
-    desired = containerConfig.skills;
-  }
-
-  const desiredSet = new Set(desired);
-
-  // Remove symlinks not in the desired set
-  for (const entry of fs.readdirSync(skillsDir)) {
-    const entryPath = path.join(skillsDir, entry);
-    let isSymlink = false;
-    try {
-      isSymlink = fs.lstatSync(entryPath).isSymbolicLink();
-    } catch {
-      continue;
-    }
-    if (isSymlink && !desiredSet.has(entry)) {
-      fs.unlinkSync(entryPath);
-    }
-  }
-
-  // Create symlinks for desired skills (container path targets)
-  for (const skill of desired) {
-    const linkPath = path.join(skillsDir, skill);
-    let exists = false;
-    try {
-      fs.lstatSync(linkPath);
-      exists = true;
-    } catch {
-      /* missing */
-    }
-    if (!exists) {
-      fs.symlinkSync(`/app/skills/${skill}`, linkPath);
-    }
-  }
-}
-
-/**
- * Ensure container.json has the runtime identity fields the runner needs.
- * Written at spawn time so they're always current even if the DB values
- * change (e.g. group rename). Only writes if values differ to avoid
- * unnecessary file churn.
- */
-function ensureRuntimeFields(
-  containerConfig: import('./container-config.js').ContainerConfig,
-  agentGroup: AgentGroup,
-): void {
-  let dirty = false;
-  if (containerConfig.agentGroupId !== agentGroup.id) {
-    containerConfig.agentGroupId = agentGroup.id;
-    dirty = true;
-  }
-  if (containerConfig.groupName !== agentGroup.name) {
-    containerConfig.groupName = agentGroup.name;
-    dirty = true;
-  }
-  if (containerConfig.assistantName !== agentGroup.name) {
-    containerConfig.assistantName = agentGroup.name;
-    dirty = true;
-  }
-  if (dirty) {
-    writeContainerConfig(agentGroup.folder, containerConfig);
-  }
-}
-
 async function buildContainerArgs(
   mounts: VolumeMount[],
   containerName: string,
   agentGroup: AgentGroup,
-  containerConfig: import('./container-config.js').ContainerConfig,
   provider: string,
   providerContribution: ProviderContainerContribution,
   agentIdentifier?: string,
+  mcpProxy?: { proxyToken: string; allowedTools: string[] },
 ): Promise<string[]> {
   const args: string[] = ['run', '--rm', '--name', containerName, '--label', CONTAINER_INSTALL_LABEL];
 
-  // Environment — only vars read by code we don't own.
-  // Everything NanoClaw-specific is in container.json (read by runner at startup).
+  {
+    const mode = detectGpuMode();
+    if (mode === 'runtime-nvidia') {
+      args.push('--runtime=nvidia');
+    } else if (mode === 'gpus-all') {
+      args.push('--gpus', 'all');
+    }
+    if (mode !== 'none') {
+      args.push('-e', 'NVIDIA_VISIBLE_DEVICES=all');
+      args.push('-e', 'NVIDIA_DRIVER_CAPABILITIES=compute,utility,graphics');
+    }
+  }
+
+  // Environment
   args.push('-e', `TZ=${TIMEZONE}`);
+  args.push('-e', `AGENT_PROVIDER=${provider}`);
+  // Two-DB split: container reads inbound.db, writes outbound.db
+  args.push('-e', 'SESSION_INBOUND_DB_PATH=/workspace/inbound.db');
+  args.push('-e', 'SESSION_OUTBOUND_DB_PATH=/workspace/outbound.db');
+  args.push('-e', 'SESSION_HEARTBEAT_PATH=/workspace/.heartbeat');
+
+  // Intent router needs the same OVERLAY_WORKFLOWS string the SDK hook gets,
+  // so the agent-runner's poll-loop can run the router on follow-up pushes
+  // (the SDK fires UserPromptSubmit only on the initial query; mid-query
+  // query.push() does not, so the agent-runner has to invoke the hook itself).
+  // Skipped when disable_overlays=1: with no intent-router hook registered
+  // in settings.json, the env var would be dead weight at best and would
+  // still drive intent-router-bridge.ts on follow-up pushes at worst.
+  {
+    const { hasPlan, hasCritique } = resolveOverlayHookFlags(agentGroup);
+    if (hasPlan || hasCritique) {
+      const { workflows: wfList } = resolveTypeManifest(agentGroup);
+      if (wfList.length > 0) {
+        const routingTable = wfList
+          .map((w) => `${w.name}:${w.description.slice(0, 60).replace(/[;:]/g, ' ')}`)
+          .join(';');
+        args.push('-e', `OVERLAY_WORKFLOWS=${routingTable}`);
+      }
+    }
+  }
+
+  // CRITIQUE_GATED_TOOLS: comma-joined MCP tool names that plan-gate.sh should
+  // block under plan/critique conditions (openWorldHint: true tools that
+  // interact with external systems — GitHub posts, Discord messages, etc.).
+  // Empty until PR-2 lands openWorldHint annotations on slang-mcp tools, at
+  // which point the matcher widened above starts having visible effect.
+  {
+    const gated = resolveCritiqueGatedTools(agentGroup);
+    if (gated.length > 0) {
+      args.push('-e', `CRITIQUE_GATED_TOOLS=${gated.join(',')}`);
+    }
+  }
+
+  // Model + API routing + SDK tuning — forward host .env vars so the Claude
+  // SDK inside the container talks to the right endpoint with the right model.
+  for (const key of [
+    'ANTHROPIC_MODEL',
+    'ANTHROPIC_BASE_URL',
+    'ANTHROPIC_DEFAULT_OPUS_MODEL',
+    'ANTHROPIC_DEFAULT_SONNET_MODEL',
+    'ANTHROPIC_DEFAULT_HAIKU_MODEL',
+    'ENABLE_PROMPT_CACHING_1H',
+    // Separate Bedrock-specific toggle read by the Claude Code SDK when
+    // requests route through an aws/anthropic/bedrock-* model. All three
+    // instances (lego/prod/dev) use the NVIDIA inference-api proxy with
+    // bedrock models, so `ENABLE_PROMPT_CACHING_1H_BEDROCK` is the one that
+    // actually takes effect; `ENABLE_PROMPT_CACHING_1H` alone is ignored on
+    // the Bedrock path.
+    'ENABLE_PROMPT_CACHING_1H_BEDROCK',
+    'FORCE_PROMPT_CACHING_5M',
+    'CLAUDE_CODE_EFFORT_LEVEL',
+    'CLAUDE_CODE_AUTO_COMPACT_WINDOW',
+    'CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING',
+    'CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS',
+    'CLAUDE_CODE_FORK_SUBAGENT',
+    'CODEX_PROFILE',
+    'CODEX_HOME',
+    'CODEX_BASE_URL',
+    'CODEX_MODEL',
+    'CODEX_MODEL_PROVIDER',
+    'CODEX_REASONING_EFFORT',
+  ]) {
+    if (process.env[key]) args.push('-e', `${key}=${process.env[key]}`);
+  }
+  args.push('-e', 'NVIDIA_API_KEY=onecli-placeholder');
+  args.push('-e', 'GH_TOKEN=placeholder');
+  // git doesn't honor SSL_CERT_FILE — needs GIT_SSL_CAINFO to trust
+  // the OneCLI MITM CA so `git clone/push` work through the proxy.
+  args.push('-e', 'GIT_SSL_CAINFO=/tmp/onecli-combined-ca.pem');
+
+  if (agentGroup.name) {
+    args.push('-e', `NANOCLAW_ASSISTANT_NAME=${agentGroup.name}`);
+  }
+  args.push('-e', `NANOCLAW_AGENT_GROUP_ID=${agentGroup.id}`);
+  args.push('-e', `NANOCLAW_AGENT_GROUP_NAME=${agentGroup.name}`);
+  // Cap on how many pending messages reach one prompt. Accumulated context
+  // (trigger=0 rows) rides along with wake-eligible rows up to this cap.
+  args.push('-e', `NANOCLAW_MAX_MESSAGES_PER_PROMPT=${MAX_MESSAGES_PER_PROMPT}`);
 
   // Provider-contributed env vars (e.g. XDG_DATA_HOME, OPENCODE_*, NO_PROXY).
   if (providerContribution.env) {
@@ -434,14 +994,82 @@ async function buildContainerArgs(
     }
   }
 
+  // Users allowed to run admin commands (e.g. /clear) inside this container.
+  // Computed at wake time: owners + global admins + admins scoped to this
+  // agent group. Role changes take effect on next container spawn.
+  //
+  // SQL inlined to keep core independent of the permissions module — we
+  // guard on the `user_roles` table directly. If the permissions module
+  // isn't installed, the table doesn't exist and the set stays empty; the
+  // formatter treats an empty admin set as permissionless mode (every
+  // sender is admin).
+  const adminUserIds = new Set<string>();
+  if (hasTable(getDb(), 'user_roles')) {
+    const db = getDb();
+    const owners = db
+      .prepare("SELECT user_id FROM user_roles WHERE role = 'owner' AND agent_group_id IS NULL")
+      .all() as Array<{ user_id: string }>;
+    const globalAdmins = db
+      .prepare("SELECT user_id FROM user_roles WHERE role = 'admin' AND agent_group_id IS NULL")
+      .all() as Array<{ user_id: string }>;
+    const scopedAdmins = db
+      .prepare("SELECT user_id FROM user_roles WHERE role = 'admin' AND agent_group_id = ?")
+      .all(agentGroup.id) as Array<{ user_id: string }>;
+    for (const r of owners) adminUserIds.add(r.user_id);
+    for (const r of globalAdmins) adminUserIds.add(r.user_id);
+    for (const r of scopedAdmins) adminUserIds.add(r.user_id);
+  }
+  if (adminUserIds.size > 0) {
+    args.push('-e', `NANOCLAW_ADMIN_USER_IDS=${Array.from(adminUserIds).join(',')}`);
+  }
+
   // OneCLI gateway — injects HTTPS_PROXY + certs so container API calls
   // are routed through the agent vault for credential injection.
+  // Must ensureAgent first for non-admin groups, otherwise applyContainerConfig
+  // rejects the unknown agent identifier and returns false.
   try {
     if (agentIdentifier) {
       await onecli.ensureAgent({ name: agentGroup.name, identifier: agentIdentifier });
     }
+    // Snapshot the shared CA files before applyContainerConfig overwrites them —
+    // another instance's running containers may mount these paths.
+    const sharedCaPath = path.join('/tmp', 'onecli-proxy-ca.pem');
+    const sharedCombinedPath = path.join('/tmp', 'onecli-combined-ca.pem');
+    let savedCa: Buffer | null = null;
+    let savedCombined: Buffer | null = null;
+    try {
+      savedCa = fs.readFileSync(sharedCaPath);
+    } catch {}
+    try {
+      savedCombined = fs.readFileSync(sharedCombinedPath);
+    } catch {}
+
     const onecliApplied = await onecli.applyContainerConfig(args, { addHostMapping: false, agent: agentIdentifier });
     if (onecliApplied) {
+      // The SDK writes to shared /tmp/onecli-{proxy,combined}-ca.pem. When
+      // multiple instances use different OneCLI vaults, the last writer wins.
+      // Copy our CA to instance-specific paths, rewrite docker -v args to
+      // mount those, then restore the original shared files for other instances.
+      const caPrefix = `onecli-${CONTAINER_PREFIX}`;
+      const instanceCaPath = path.join('/tmp', `${caPrefix}-proxy-ca.pem`);
+      const instanceCombinedPath = path.join('/tmp', `${caPrefix}-combined-ca.pem`);
+      try {
+        if (fs.existsSync(sharedCaPath)) fs.copyFileSync(sharedCaPath, instanceCaPath);
+        if (fs.existsSync(sharedCombinedPath)) fs.copyFileSync(sharedCombinedPath, instanceCombinedPath);
+        // Restore the original shared files for other instances
+        if (savedCa) fs.writeFileSync(sharedCaPath, savedCa);
+        if (savedCombined) fs.writeFileSync(sharedCombinedPath, savedCombined);
+        // Only rewrite -v host:container mount sources, not -e env values.
+        // The container-side paths (/tmp/onecli-gateway-ca.pem, /tmp/onecli-combined-ca.pem)
+        // must stay unchanged — only the host-side source path changes.
+        for (let i = 0; i < args.length; i++) {
+          if (args[i] === '-v' && typeof args[i + 1] === 'string') {
+            args[i + 1] = args[i + 1]
+              .replace(`${sharedCaPath}:`, `${instanceCaPath}:`)
+              .replace(`${sharedCombinedPath}:`, `${instanceCombinedPath}:`);
+          }
+        }
+      } catch {}
       log.info('OneCLI gateway applied', { containerName });
     } else {
       log.warn('OneCLI gateway not applied — container will have no credentials', { containerName });
@@ -449,6 +1077,10 @@ async function buildContainerArgs(
   } catch (err) {
     log.warn('OneCLI gateway error — container will have no credentials', { containerName, err });
   }
+
+  // Bypass proxy for host-local traffic (dashboard hooks, MCP proxy)
+  args.push('-e', 'NO_PROXY=host.docker.internal,localhost,127.0.0.1,discord.com');
+  args.push('-e', 'no_proxy=host.docker.internal,localhost,127.0.0.1,discord.com');
 
   // Host gateway
   args.push(...hostGatewayArgs());
@@ -470,14 +1102,70 @@ async function buildContainerArgs(
     }
   }
 
+  // MCP servers: type-level (from coworker registry) + per-instance (from container.json).
+  // Per-instance overrides type-level per server name.
+  const typeMcpServers = resolveTypeManifest(agentGroup).mcpServers;
+  const containerConfig = readContainerConfig(agentGroup.folder);
+  const mergedMcpServers = { ...typeMcpServers, ...containerConfig.mcpServers };
+  if (Object.keys(mergedMcpServers).length > 0) {
+    args.push('-e', `NANOCLAW_MCP_SERVERS=${JSON.stringify(mergedMcpServers)}`);
+  }
+
+  // MCP proxy token + URL + allowed tools — enables containers to reach host MCP servers
+  if (mcpProxy) {
+    args.push('-e', `MCP_PROXY_TOKEN=${mcpProxy.proxyToken}`);
+    args.push('-e', `MCP_PROXY_URL=http://host.docker.internal:${MCP_PROXY_PORT}`);
+    if (mcpProxy.allowedTools.length > 0) {
+      args.push('-e', `NANOCLAW_ALLOWED_MCP_TOOLS=${JSON.stringify(mcpProxy.allowedTools)}`);
+    }
+  }
+
+  // Dashboard URL
+  if (DASHBOARD_PORT) {
+    args.push('-e', `DASHBOARD_URL=http://host.docker.internal:${DASHBOARD_PORT}`);
+  }
+
   // Override entrypoint: run v2 entry point directly via Bun (no tsc, no stdin).
+  // The image's ENTRYPOINT (tini → entrypoint.sh) handles the stdin-piped
+  // invocation path; the host-spawned sessions don't need stdin because all
+  // IO flows through the mounted session DBs.
   args.push('--entrypoint', 'bash');
 
   // Use per-agent-group image if one has been built, otherwise base image
   const imageTag = containerConfig.imageTag || CONTAINER_IMAGE;
   args.push(imageTag);
 
-  args.push('-c', 'exec bun run /app/src/index.ts');
+  // Codex CLI needs the full [model_providers.<provider>] block in a real
+  // config.toml — `-c` overrides reliably modify existing fields but don't
+  // always *define* new TOML sections. Generate a minimal config from
+  // container env vars in the entrypoint, then exec the agent-runner.
+  // Auth still flows through OneCLI MITM via env_key=NVIDIA_API_KEY.
+  // Note: heredoc delimiter is UNquoted (TOML_EOF, not 'TOML_EOF') so bash
+  // expands the ${VAR:-default} references at container start.
+  args.push(
+    '-c',
+    `git config --global "url.https://x-access-token:placeholder@github.com/.insteadOf" "https://github.com/" 2>/dev/null || true
+mkdir -p ~/.codex && cat > ~/.codex/config.toml <<TOML_EOF
+model_provider = "\${CODEX_MODEL_PROVIDER:-nvinference}"
+model = "\${CODEX_MODEL:-openai/openai/gpt-5.5}"
+model_reasoning_effort = "\${CODEX_REASONING_EFFORT:-xhigh}"
+# Docker is the sandbox; codex's bwrap wrapper is redundant nesting and fails
+# with "No permissions to create a new namespace" because Docker's default
+# seccomp profile blocks unshare(CLONE_NEWUSER). Skip codex's sandbox and
+# rely on the container boundary.
+sandbox_mode = "danger-full-access"
+
+[model_providers.\${CODEX_MODEL_PROVIDER:-nvinference}]
+name = "\${CODEX_MODEL_PROVIDER:-nvinference}"
+wire_api = "\${CODEX_WIRE_API:-responses}"
+base_url = "\${CODEX_BASE_URL:-https://inference-api.nvidia.com/v1}"
+env_key = "NVIDIA_API_KEY"
+
+[projects."/workspace/agent"]
+trust_level = "trusted"
+TOML_EOF
+exec bun run /app/src/index.ts`,
+  );
 
   return args;
 }
@@ -509,7 +1197,7 @@ export async function buildAgentGroupImage(agentGroupId: string): Promise<void> 
   }
   dockerfile += 'USER node\n';
 
-  const imageTag = `${CONTAINER_IMAGE_BASE}:${agentGroupId}`;
+  const imageTag = `nanoclaw-agent:${agentGroupId}`;
 
   log.info('Building per-agent-group image', { agentGroupId, imageTag, apt: aptPackages, npm: npmPackages });
 

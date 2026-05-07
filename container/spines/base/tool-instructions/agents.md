@@ -1,10 +1,12 @@
 ## Companion and collaborator agents (`create_agent`)
 
-`mcp__nanoclaw__create_agent({ name, instructions })` spins up a new long-lived agent and wires it as a destination — bidirectional, so you can send it tasks and it can message you back.
+`mcp__nanoclaw__create_agent({ name, coworkerType, instructions })` spins up a new long-lived agent and wires it as a destination — bidirectional, so you can send it tasks and it can message you back.
+
+**Always pass `coworkerType`.** It resolves to a registry leaf (`default`, `slang-reader`, `slang-writer`, …) that determines the agent's skills, MCP tool allowlist, and workflows. Omitting it falls back to `default` (base spine only) — rarely what you want. Ask the user which type to use when it isn't obvious from the task; the registry is assembled from `container/{spines,skills}/*/coworker-types.yaml` files.
 
 ### How it works
 
-- Creates a new agent with its own container, workspace, and session. Your `instructions` string seeds the agent's `CLAUDE.local.md` — its starting role and personality.
+- Creates a new agent with its own container, workspace, and session. Your `instructions` string is written to the agent's `.instructions.md`, which the composer appends after its typed spine on every container wake — its starting role and domain-specific rules.
 - The agent's `name` becomes a destination on both sides: you address it via `send_message({ to: "<name>", ... })`, and its replies arrive as inbound messages with `from="<name>"`.
 - Each agent has its own persistent workspace under `groups/<folder>/` — memory, conversation history, and notes all survive across sessions. This is a full standalone agent, not a stateless sub-query.
 - **Fire-and-forget:** the call returns immediately without waiting for the agent to confirm it's ready. Messages you send will queue until it's up.
@@ -23,4 +25,4 @@ The right frame is: does this agent need its own memory and context that builds 
 
 ### Writing good `instructions`
 
-Cover: the agent's role, who it takes tasks from (you, by name), how it should report back (on completion only? with milestones for long work?), and any domain-specific rules. Don't restate NanoClaw base behavior — the shared base is already loaded on the agent's end.
+Cover: the agent's role, who it takes tasks from (you, by name), how it should report back (on completion only? with milestones for long work?), and any domain-specific rules. Don't restate NanoClaw base behavior or the coworker type's skills — the shared base and typed spine are already loaded on the agent's end.

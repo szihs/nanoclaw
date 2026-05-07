@@ -1,0 +1,236 @@
+# Coworker Architecture
+
+NanoClaw spawns one container per coworker. The container's always-in-context `CLAUDE.md` — the **spine** — is composed from: **spine fragments**, **skills**, **workflows**, **overlays**, and **traits + bindings**.
+
+Workflow step bodies and overlay gate protocols are **embedded into CLAUDE.md at compose time** — not loaded as slash commands at runtime. Capability skills remain runtime slash commands; their bodies load on demand when invoked.
+
+| Root | Contents | Filename | Runtime-loaded? |
+|------|----------|----------|-----------------|
+| `container/spines/<name>/` | Identity, invariants, context, project `coworker-types.yaml` | — | no (compose-time) |
+| `container/workflows/<name>/` | Workflow step sequences (full body embedded) | `WORKFLOW.md` | no (compose-time) |
+| `container/overlays/<name>/` | Cross-workflow gates (full body inlined at anchor) | `OVERLAY.md` | no (compose-time) |
+| `container/skills/<name>/` | Capability skills the agent invokes as `/slash` | `SKILL.md` | yes |
+
+## Layers
+
+```
+┌───────────────────────────────────────────────────┐
+│  Leaf types: slang-reader · slang-writer           │  permission boundary
+│  extends slang-common → extends base-common        │
+├───────────────────────────────────────────────────┤
+│  Project spine: slang-common                       │  one per project
+│  (identity + invariants + bindings + skills)       │
+├───────────────────────────────────────────────────┤
+│  Universal spine: base-common                      │  one
+│  (safety / truth / scope / capabilities / ops)     │
+│  2 core workflows: plan, implement                 │
+└───────────────────────────────────────────────────┘
+
+main (flat) — admin orchestrator, separate lineage. No `global` type; shared facts live in `data/shared/`.
+```
+
+## Glossary
+
+| Term | What it is |
+|---|---|
+| **coworker type** | Named entry in `container/{spines,skills}/*/coworker-types.yaml`. Composes spine fragments + skills + workflows + overlays + bindings. |
+| **spine** | The always-in-context `CLAUDE.md`: identity → invariants → context → workflow/skill index → bindings → customizations → additional instructions. |
+| **trait** | Dotted capability name (`repo.pr`, `code.edit`). Skills `provide`; workflows `require`; types `bind` at the domain level. |
+| **skill** | `container/skills/<name>/SKILL.md` with `provides: [trait, ...]`. Runtime slash command — body loads on `/skill-name` invocation. |
+| **workflow** | `container/workflows/<name>/WORKFLOW.md` with `requires: [trait, ...]`. Body has steps with `{#step-id}` anchors. Compose-time only — embedded into the spine; NOT a runtime slash command. |
+| **overlay** | `container/overlays/<name>/OVERLAY.md` with `applies-to:` workflow/trait targets. Splices steps into workflows at `insert-after` / `insert-before` anchors. Compose-time only. |
+| **spine fragment** | `container/spines/<project>/{identity,invariants,context}/*.md` plus `coworker-types.yaml`. Contributes to the always-in-context prompt. |
+| **extends** (type) | Inheritance: identity leaf-wins; invariants/context/skills/workflows/overlays append+dedup; bindings leaf-wins per domain. |
+| **extends** (workflow) | Inheritance: parent body + `overrides` per `{#step-id}`. Unoverridden steps run as-is. |
+
+## Traits
+
+8 domains with dotted qualifiers. Bindings use domain-only keys; `provides:`/`requires:` use the full qualified form.
+
+| Domain | Qualifiers |
+|---|---|
+| `repo` | `repo.read`, `repo.write`, `repo.pr` |
+| `issues` | `issues.read`, `issues.write` |
+| `ci` | `ci.inspect`, `ci.rerun` |
+| `code` | `code.read`, `code.edit`, `code.build` |
+| `test` | `test.run`, `test.gen` |
+| `doc` | `doc.read`, `doc.write` |
+| `plan` | `plan.research` |
+| `critique` | `critique.review` |
+
+**Validation:** the resolver extracts the domain from a qualified trait (`repo.pr` → `repo`), looks up the binding, and checks the bound skill provides the full qualifier. Falls back to any skill in the set that directly provides it.
+
+**Overlay matching:** `applies-to.traits: [code.edit]` matches only workflows requiring `code.edit` — not `code.read`. Domain-level (`code`) matches all qualifiers under that domain.
+
+## 2 Core Workflows
+
+| Workflow | Requires | Steps |
+|---|---|---|
+| `/plan`      | `issues.read, code.read, doc.read` | understand → research → synthesize (`{#diagnose}`) → deliver (`{#deliver}`) → handoff |
+| `/implement` | `code.read, code.edit, test.run, test.gen, repo.pr` | setup → reproduce (`{#reproduce}`) → change (`{#change}`) → verify (`{#verify}`) → ship |
+
+`/plan` covers the old /investigate, /review, /document, and deep-research modes via its `mode` enum (`plan` | `investigate` | `review` | `research`). Output is always text — a written deliverable at `/workspace/agent/reports/<slug>.md`. `/implement` is pure execution; any diagnosis belongs in `/plan` first.
+
+`base-common` lists no workflows (abstract). Project types add them — typically `plan` on readers, `plan` + `<project>-implement` on writers, and optionally a project-specific read-only workflow for recurring maintainer sweeps (e.g. `/slang-maintain`).
+
+## How extension works
+
+### Type inheritance (`extends`)
+
+```yaml
+slang-reader:
+  extends: slang-common    # inherits identity, invariants, context, skills, bindings
+  workflows:
+    - plan                   # the universal planning/investigation workflow
+```
+
+### Workflow inheritance (`extends` + `overrides`)
+
+```yaml
+name: slang-implement
+extends: implement           # inherits all 5 steps
+overrides:
+  reproduce: "Write a failing test as a .slang file under tests/..."
+  change:    "Use /slang-code-writer..."
+  verify:    "cmake --build --preset debug && slang-test tests/..."
+```
+
+Steps 1 (setup) and 5 (ship) run as the base wrote them. Steps 2, 3, 4 use the overrides. The agent reads both documents and applies overrides as it goes.
+
+### Overlay (`insert-after`)
+
+```yaml
+name: critique-overlay
+applies-to:
+  workflows: [plan, implement]
+  traits: [code.edit, test.gen, doc.write]
+insert-after: [diagnose, change, deliver]
+insert-before: [change]
+```
+
+Splices critique gates at named anchors. Stages (PLAN_REVIEW before `change`, CODE_REVIEW after `change`, DIAGNOSIS_REVIEW after `diagnose`, OUTPUT_REVIEW after `deliver`) follow a 3-round protocol; must-fix items block progress; escalate to user after 3 rounds.
+
+## Instance customization via `.instructions.md`
+
+Every coworker instance has `groups/<folder>/.instructions.md`. The composed `CLAUDE.md` appends it under `## Additional Instructions`.
+
+| Level | Where | Scope |
+|---|---|---|
+| Base workflow | `container/workflows/<plan\|implement>/WORKFLOW.md` | Every project, every agent |
+| Project override | `container/workflows/<project>-implement/WORKFLOW.md` | Every agent of that project |
+| Instance persona | `groups/<folder>/.instructions.md` | This specific agent |
+
+**Start in `.instructions.md`.** Lift to a project workflow override when multiple agents share the same behavior. Lift to the base workflow when it applies to all projects.
+
+## Extending the system
+
+### Add a skill
+
+1. Create `container/skills/<name>/SKILL.md` with `provides: [trait.qualifier]`
+2. Reference from a coworker type's `skills:` list
+3. Bind the trait domain: `bindings: { domain: <name> }`
+
+### Add a workflow
+
+1. Create `container/workflows/<name>/WORKFLOW.md` with `type: workflow`, `requires:`, and `{#step-id}` anchors
+2. Reference from a coworker type's `workflows:` list
+3. Ensure all required traits have bindings
+
+### Specialize a workflow
+
+1. Create `container/workflows/<project>-<name>/WORKFLOW.md` with `extends: <base-name>` and `overrides:`
+2. Only override the steps that need project-specific behavior
+
+### Add an overlay
+
+1. Create `container/overlays/<name>/OVERLAY.md` with `type: overlay`, `applies-to:` (workflow names or trait domains), and `insert-after` / `insert-before` anchors.
+2. Attach via `overlays:` on a coworker type.
+3. (Optional) If the overlay also needs a runtime Task-tool subagent, drop an `agent.md` alongside the OVERLAY.md — `group-init.ts` copies it into `.claude-shared/agents/`.
+
+### Bring up a new project
+
+1. **Author skills** — one per concrete tool (`<project>-github`, `<project>-build`, `<project>-code-reader`, `<project>-code-writer`)
+2. **Author spine** — `container/spines/<project>/` with identity, invariants, context, `coworker-types.yaml`
+3. **Declare types** — permission-level types (reader/writer) that extend `<project>-common`
+4. **Validate** — `npm run validate:templates`
+
+Example:
+
+```yaml
+# container/spines/graphics/coworker-types.yaml
+graphics-common:
+  project: graphics
+  extends: base-common
+  identity: container/spines/graphics/identity/engine.md
+  skills: [graphics-gerrit, graphics-bazel, graphics-explore, graphics-jira]
+  workflows: []
+  bindings:
+    repo: graphics-gerrit
+    issues: graphics-jira
+    code: graphics-explore
+    doc: graphics-explore
+    test: graphics-bazel
+    ci: graphics-bazel
+
+graphics-reader:
+  project: graphics
+  extends: graphics-common
+  workflows: [plan]
+
+graphics-writer:
+  project: graphics
+  extends: graphics-common
+  skills: [graphics-code-writer]
+  workflows: [plan, graphics-implement]
+  bindings:
+    code: graphics-code-writer
+    test: graphics-code-writer
+```
+
+## Flat types (main)
+
+`main` uses `flat: true` — admin orchestrator. Its spine is the verbatim identity body plus additive `context:` fragments (tool-instructions + per-project fragments contributed by `*-project-base` skills, if any exist). No structured headings, no trait machinery.
+
+`global` is retired. Shared cross-group facts live in `data/shared/` (mounted read-only into coworkers at `/workspace/shared/`, read-write for main). `append_learning` writes to `data/shared/learnings/`.
+
+Per-project main fragments contribute via duplicate-type merging:
+
+```yaml
+# container/skills/slang-project-base/coworker-types.yaml (example)
+main:
+  context:
+    - container/skills/slang-project-base/prompts/main-fragment.md
+```
+
+## Runtime
+
+- `composeCoworkerClaudeMd` runs on every container wake — regenerates CLAUDE.md from spine + `.instructions.md`
+- `initGroupFilesystem` creates group dirs, `.claude-shared/` (all types), and copies skill/overlay subagent defs to `.claude-shared/agents/`. The retired `.claude-global.md` @-import is gone — composed CLAUDE.md is self-contained on every wake.
+- `resolveAllowedMcpTools` derives the MCP tool allowlist from the manifest
+- `mcpServers` from `coworker-types.yaml` are injected via `NANOCLAW_MCP_SERVERS` env var
+
+## Validation
+
+`npm run validate:templates` — walks every leaf type through the composer. Catches:
+
+- Unknown skill/workflow/overlay references
+- Unresolved traits (no binding + no direct provider)
+- Mis-mapped bindings (skill doesn't provide the qualifier)
+- Cross-project `extends`
+
+## File map
+
+| Path | Role |
+|---|---|
+| `container/spines/base/` | Universal invariants + context + `base-common` type |
+| `container/spines/<project>/` | Project identity + invariants + context + types |
+| `container/workflows/<name>/WORKFLOW.md` | Workflow body (base or project — embedded into CLAUDE.md at compose time) |
+| `container/overlays/<name>/OVERLAY.md` | Overlay body (inlined at workflow step anchors) |
+| `container/overlays/<name>/agent.md` | Optional Task-tool subagent definition (copied to `.claude-shared/agents/`) |
+| `container/skills/<name>/SKILL.md` | Capability skill body (runtime slash command) |
+| `container/skills/<project>-project-base/` | Optional: per-project fragment that appends to `main` (discovery-only, no code-path) |
+| `dashboard/` | Pixel Office dashboard (standalone; not a skill) |
+| `src/claude-composer/` | Composer: registry, resolver, spine renderer |
+| `src/container-runner.ts` | Runtime: composeCoworkerClaudeMd, resolveAllowedMcpTools |
+| `scripts/validate-templates.ts` | Author-time validator |
+| `groups/<folder>/.instructions.md` | Per-instance customization |

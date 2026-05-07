@@ -171,6 +171,7 @@ export async function routeInbound(event: InboundEvent): Promise<void> {
       platform_id: event.platformId,
       name: null,
       is_group: event.message.isGroup ? 1 : 0,
+      admin_user_id: null,
       unknown_sender_policy: 'request_approval',
       denied_at: null,
       created_at: new Date().toISOString(),
@@ -323,6 +324,21 @@ export async function routeInbound(event: InboundEvent): Promise<void> {
   }
 }
 
+/** Cache compiled engage regexes by pattern string to avoid re-creation on every message. */
+const engageRegexCache = new Map<string, RegExp | null>();
+
+function getOrCompileRegex(pattern: string): RegExp | null {
+  let re = engageRegexCache.get(pattern);
+  if (re !== undefined) return re;
+  try {
+    re = new RegExp(pattern, 'i');
+  } catch {
+    re = null;
+  }
+  engageRegexCache.set(pattern, re);
+  return re;
+}
+
 /**
  * Decide whether a given wired agent should engage on this message.
  *
@@ -351,15 +367,14 @@ function evaluateEngage(
   threadId: string | null,
 ): boolean {
   switch (agent.engage_mode) {
+    case 'always':
+      return true;
     case 'pattern': {
       const pat = agent.engage_pattern ?? '.';
       if (pat === '.') return true;
-      try {
-        return new RegExp(pat).test(text);
-      } catch {
-        // Bad regex: fail open so admin sees the agent responding + can fix.
-        return true;
-      }
+      const re = getOrCompileRegex(pat);
+      // Bad regex (null): fail open so admin sees the agent responding + can fix.
+      return re ? re.test(text) : true;
     }
     case 'mention':
       return isMention;

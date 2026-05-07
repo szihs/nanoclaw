@@ -69,7 +69,7 @@ async function handleRegisteredApproval(
     });
   };
 
-  if (selectedOption !== 'approve') {
+  if (selectedOption.toLowerCase() !== 'approve') {
     notify(`Your ${approval.action} request was rejected by admin.`);
     log.info('Approval rejected', { approvalId: approval.approval_id, action: approval.action, userId });
     deletePendingApproval(approval.approval_id);

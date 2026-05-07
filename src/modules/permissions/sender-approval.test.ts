@@ -84,6 +84,7 @@ beforeEach(async () => {
     platform_id: 'chat-123',
     name: 'Group Chat',
     is_group: 1,
+    admin_user_id: null,
     unknown_sender_policy: 'request_approval',
     created_at: now(),
   });
@@ -91,6 +92,8 @@ beforeEach(async () => {
     id: 'mga-1',
     messaging_group_id: 'mg-chat',
     agent_group_id: 'ag-1',
+    trigger_rules: null,
+    response_scope: 'all',
     engage_mode: 'pattern',
     engage_pattern: '.',
     sender_scope: 'all',
@@ -115,6 +118,7 @@ beforeEach(async () => {
     platform_id: 'dm-owner',
     name: 'Owner DM',
     is_group: 0,
+    admin_user_id: null,
     unknown_sender_policy: 'public',
     created_at: now(),
   });

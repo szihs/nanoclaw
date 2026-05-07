@@ -1,0 +1,38 @@
+# Base coworker types: the universal spine every typed coworker extends,
+# plus the two top-level types — `main` (flat admin orchestrator) and
+# `default` (untyped fallback when no coworker_type is set).
+
+base-common:
+  description: "Universal coworker spine — invariants, workspace conventions. Every project type extends this."
+  invariants:
+    - container/spines/base/invariants/principles.md
+    - container/spines/base/invariants/safety.md
+    - container/spines/base/invariants/operations.md
+  context:
+    - container/spines/base/context/workspace.md
+    - container/spines/base/context/invocation.md
+  skills:
+    - base-nanoclaw
+    - codex-critique
+
+main:
+  flat: true
+  description: "Admin orchestrator — slim manager body plus per-project main fragments contributed by project skills."
+  identity: container/spines/base/identity/main-body.md
+  context:
+    # Admin-specific tool guidance (create_agent, ask_user_question vs
+    # send_card, install_packages/add_mcp_server admin flow) and the
+    # universal core+scheduling nuance. Main is flat so it can't invoke
+    # `/base-nanoclaw` as a skill — the baked-in refs are its only
+    # access to tool nuance.
+    - container/spines/base/tool-instructions/agents.md
+    - container/spines/base/tool-instructions/interactive.md
+    - container/spines/base/tool-instructions/self-mod.md
+    - container/spines/base/tool-instructions/core.md
+    - container/spines/base/tool-instructions/scheduling.md
+
+default:
+  title: "Coworker"
+  description: "Untyped fallback coworker — base spine only, no project skills or workflows."
+  extends: base-common
+  identity: container/spines/base/identity/default-identity.md

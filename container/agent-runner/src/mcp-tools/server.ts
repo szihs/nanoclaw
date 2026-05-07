@@ -6,7 +6,7 @@
  * calls `startMcpServer()` which uses whatever was registered.
  *
  * Default when only `core.ts` is imported: the core `send_message` /
- * `send_file` / `edit_message` / `add_reaction` tools are available.
+ * `send_file` / `add_reaction` tools are available.
  */
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
