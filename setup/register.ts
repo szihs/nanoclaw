@@ -215,18 +215,18 @@ export async function run(args: string[]): Promise<void> {
   if (shouldCreateDirectChannel) {
     messagingGroup = getMessagingGroupByPlatform(parsed.channel, parsed.platformId);
     if (!messagingGroup) {
-    const mgId = generateId('mg');
-    createMessagingGroup({
-      id: mgId,
-      channel_type: parsed.channel,
-      platform_id: parsed.platformId,
-      name: parsed.name,
-      is_group: 1,
-      unknown_sender_policy: parsed.channel === 'dashboard' ? 'public' : 'strict',
-      created_at: new Date().toISOString(),
-    });
-    messagingGroup = getMessagingGroupByPlatform(parsed.channel, parsed.platformId)!;
-    log.info('Created messaging group', { id: mgId, channel: parsed.channel, platformId: parsed.platformId });
+      const mgId = generateId('mg');
+      createMessagingGroup({
+        id: mgId,
+        channel_type: parsed.channel,
+        platform_id: parsed.platformId,
+        name: parsed.name,
+        is_group: 1,
+        unknown_sender_policy: parsed.channel === 'dashboard' ? 'public' : 'strict',
+        created_at: new Date().toISOString(),
+      });
+      messagingGroup = getMessagingGroupByPlatform(parsed.channel, parsed.platformId)!;
+      log.info('Created messaging group', { id: mgId, channel: parsed.channel, platformId: parsed.platformId });
     }
   }
 
@@ -236,34 +236,34 @@ export async function run(args: string[]): Promise<void> {
   if (shouldCreateDirectChannel && messagingGroup) {
     const existing = getMessagingGroupAgentByPair(messagingGroup.id, agentGroup.id);
     if (!existing) {
-    newlyWired = true;
-    const mgaId = generateId('mga');
-    // Mirrors scripts/init-first-agent.ts:wireIfMissing so both setup paths
-    // create rows with the same shape. Groups default to 'mention' (bot only
-    // responds when addressed); DMs default to 'pattern'/'.' (respond to
-    // every message). An explicit --trigger overrides the pattern regex.
-    const isGroup = messagingGroup.is_group === 1;
-    const engageMode: 'always' | 'pattern' | 'mention' = !parsed.requiresTrigger
-      ? 'always'
-      : isGroup && !parsed.trigger ? 'mention' : 'pattern';
-    const engagePattern: string | null = engageMode === 'pattern' ? parsed.trigger || '.' : (engageMode === 'always' ? parsed.trigger || null : null);
-    createMessagingGroupAgent({
-      id: mgaId,
-      messaging_group_id: messagingGroup.id,
-      agent_group_id: agentGroup.id,
-      engage_mode: engageMode,
-      engage_pattern: engagePattern,
-      sender_scope: 'all',
-      ignored_message_policy: 'drop',
-      session_mode: parsed.sessionMode as 'shared' | 'per-thread' | 'agent-shared',
-      priority: 0,
-      created_at: new Date().toISOString(),
-    });
-    log.info('Wired agent to messaging group', {
-      mgaId,
-      agentGroup: agentGroup.id,
-      messagingGroup: messagingGroup.id,
-    });
+      newlyWired = true;
+      const mgaId = generateId('mga');
+      // Mirrors scripts/init-first-agent.ts:wireIfMissing so both setup paths
+      // create rows with the same shape. Groups default to 'mention' (bot only
+      // responds when addressed); DMs default to 'pattern'/'.' (respond to
+      // every message). An explicit --trigger overrides the pattern regex.
+      const isGroup = messagingGroup.is_group === 1;
+      const engageMode: 'always' | 'pattern' | 'mention' = !parsed.requiresTrigger
+        ? 'always'
+        : isGroup && !parsed.trigger ? 'mention' : 'pattern';
+      const engagePattern: string | null = engageMode === 'pattern' ? parsed.trigger || '.' : (engageMode === 'always' ? parsed.trigger || null : null);
+      createMessagingGroupAgent({
+        id: mgaId,
+        messaging_group_id: messagingGroup.id,
+        agent_group_id: agentGroup.id,
+        engage_mode: engageMode,
+        engage_pattern: engagePattern,
+        sender_scope: 'all',
+        ignored_message_policy: 'drop',
+        session_mode: parsed.sessionMode as 'shared' | 'per-thread' | 'agent-shared',
+        priority: 0,
+        created_at: new Date().toISOString(),
+      });
+      log.info('Wired agent to messaging group', {
+        mgaId,
+        agentGroup: agentGroup.id,
+        messagingGroup: messagingGroup.id,
+      });
     }
   }
 

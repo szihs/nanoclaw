@@ -111,6 +111,75 @@ describe('setup/register', () => {
     expect(getDestinationByTarget(child.id, 'agent', admin.id)).toBeDefined();
   });
 
+  it('defaults dashboard channel session_mode to per-thread', async () => {
+    // The Slack-style thread UI requires per-thread sessions; without
+    // this default, replies land in the root session keyed on
+    // thread_id=NULL and the thread panel shows "no replies yet" even
+    // though the agent processed the message. See PR #155 for context.
+    await run([
+      '--platform-id', 'dashboard_main',
+      '--name', 'Dashboard Main',
+      '--folder', 'main',
+      '--channel', 'dashboard',
+      '--is-admin',
+    ]);
+    const mg = getMessagingGroupByPlatform('dashboard', 'dashboard:dashboard_main')!;
+    const agent = getAgentGroupByFolder('main')!;
+    const mga = getMessagingGroupAgentByPair(mg.id, agent.id)!;
+    expect(mga.session_mode).toBe('per-thread');
+  });
+
+  it('keeps non-dashboard channels on the conservative shared default', async () => {
+    // Telegram/WhatsApp/iMessage/Discord/Slack don't need per-thread
+    // isolation for the dashboard UI; shared preserves existing behaviour.
+    await run([
+      '--platform-id', 'dashboard_main',
+      '--name', 'Dashboard Main',
+      '--folder', 'main',
+      '--channel', 'dashboard',
+      '--is-admin',
+    ]);
+    await run([
+      '--platform-id', 'discord-chan-sm',
+      '--name', 'Discord Worker',
+      '--folder', 'discord-worker',
+      '--channel', 'discord',
+    ]);
+    const mg = getMessagingGroupByPlatform('discord', 'discord:discord-chan-sm')!;
+    const agent = getAgentGroupByFolder('discord-worker')!;
+    const mga = getMessagingGroupAgentByPair(mg.id, agent.id)!;
+    expect(mga.session_mode).toBe('shared');
+  });
+
+  it('--session-mode explicitly passed wins over the channel-aware default', async () => {
+    // Escape hatch: an operator can force any session mode regardless of
+    // channel. Verified for both directions (dashboard → shared, non-dashboard → per-thread).
+    await run([
+      '--platform-id', 'dashboard_main',
+      '--name', 'Dashboard Main',
+      '--folder', 'main',
+      '--channel', 'dashboard',
+      '--is-admin',
+      '--session-mode', 'shared',
+    ]);
+    const dashMg = getMessagingGroupByPlatform('dashboard', 'dashboard:dashboard_main')!;
+    const dashAgent = getAgentGroupByFolder('main')!;
+    const dashMga = getMessagingGroupAgentByPair(dashMg.id, dashAgent.id)!;
+    expect(dashMga.session_mode).toBe('shared');
+
+    await run([
+      '--platform-id', 'discord-chan-explicit',
+      '--name', 'Discord Explicit',
+      '--folder', 'discord-explicit',
+      '--channel', 'discord',
+      '--session-mode', 'per-thread',
+    ]);
+    const dMg = getMessagingGroupByPlatform('discord', 'discord:discord-chan-explicit')!;
+    const dAgent = getAgentGroupByFolder('discord-explicit')!;
+    const dMga = getMessagingGroupAgentByPair(dMg.id, dAgent.id)!;
+    expect(dMga.session_mode).toBe('per-thread');
+  });
+
   it('routing=direct creates messaging group and wiring', async () => {
     await run([
       '--platform-id', 'dashboard_main',

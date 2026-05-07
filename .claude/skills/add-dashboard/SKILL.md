@@ -63,7 +63,7 @@ All tests must pass, including dashboard-specific tests (`dashboard/server.test.
 The dashboard needs at least one registered group to route messages to. Register an admin group with a `dashboard:*` platform ID:
 
 ```bash
-npx tsx setup/index.ts --step register -- \
+pnpm exec tsx setup/index.ts --step register -- \
   --platform-id "dashboard:orchestrator" \
   --name "Orchestrator" \
   --folder "orchestrator" \
