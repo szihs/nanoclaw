@@ -231,7 +231,7 @@ export function startDashboardIngress(options: DashboardIngressOptions = {}): Da
     const body = await readBody(req, res);
     if (body === null) return;
 
-    let parsed: { group?: unknown; content?: unknown };
+    let parsed: { group?: unknown; content?: unknown; thread_id?: unknown };
     try {
       parsed = JSON.parse(body);
     } catch {
@@ -246,6 +246,20 @@ export function startDashboardIngress(options: DashboardIngressOptions = {}): Da
       return;
     }
 
+    let threadId: string | null = null;
+    if (parsed.thread_id !== undefined && parsed.thread_id !== null) {
+      if (typeof parsed.thread_id !== 'string') {
+        writeJson(res, 400, { error: 'thread_id must be a string' });
+        return;
+      }
+      const trimmed = parsed.thread_id.trim();
+      if (trimmed.length > 200) {
+        writeJson(res, 400, { error: 'thread_id too long (max 200 chars)' });
+        return;
+      }
+      threadId = trimmed.length > 0 ? trimmed : null;
+    }
+
     if (!isAdapterReady()) {
       writeJson(res, 503, { error: 'Dashboard channel adapter not ready' });
       return;
@@ -255,7 +269,7 @@ export function startDashboardIngress(options: DashboardIngressOptions = {}): Da
       await routeInboundFn({
         channelType: 'dashboard',
         platformId: `dashboard:${group}`,
-        threadId: null,
+        threadId,
         message: {
           id: generateMessageId(),
           kind: 'chat',
