@@ -3896,12 +3896,15 @@ async function fetchCwThread(parentId) {
       const optTs = Date.parse(opt.timestamp);
       if (!Number.isFinite(optTs)) return false;
       if (now - optTs > OPTIMISTIC_MAX_AGE_MS) return true; // expire
+      // Server-returned rows go through normalizeMessageForDisplay which
+      // may set displayContent to an unwrapped string while raw content
+      // stays JSON; the optimistic row is plain text. Compare via the
+      // same displayContent || content fallback the renderer uses.
+      const optText = opt.displayContent || opt.content || '';
       return incoming.some((m) => {
-        // User-sent messages persist to messages_in.db and come back with
-        // direction='incoming'. Match on that (plus content + timestamp
-        // proximity) so the optimistic bubble is replaced cleanly.
         if (m.direction !== 'incoming') return false;
-        if ((m.content || '') !== (opt.content || '')) return false;
+        const mText = m.displayContent || m.content || '';
+        if (mText !== optText) return false;
         const mTs = Date.parse(m.timestamp);
         return Number.isFinite(mTs) && Math.abs(mTs - optTs) <= MATCH_WINDOW_MS;
       });

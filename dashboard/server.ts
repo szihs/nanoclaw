@@ -37,6 +37,9 @@ import { join, resolve, relative, normalize, isAbsolute, extname, basename, dirn
 import Database from 'better-sqlite3';
 import { createRequire } from 'node:module';
 
+import { initDb as initSrcDb } from '../src/db/connection.js';
+import { refreshDestinationsForAgentGroup } from '../src/modules/agent-to-agent/write-destinations.js';
+
 /**
  * Check if `target` is inside (or equal to) `baseDir`.
  * Uses path.relative to avoid the startsWith('/foo/bar') vs '/foo/bar-evil' bug.
@@ -267,6 +270,36 @@ function getWriteDb(): Database.Database | null {
     return writeDb;
   } catch {
     return null;
+  }
+}
+
+// Lazy init of the src/ db connection so we can call shared helpers like
+// refreshDestinationsForAgentGroup() which rely on getDb(). Separate handle
+// from writeDb above; both target the same WAL-mode SQLite file.
+let _srcDbReady = false;
+function ensureSrcDb(): void {
+  if (_srcDbReady) return;
+  try {
+    initSrcDb(getDbPath());
+    _srcDbReady = true;
+  } catch {
+    /* already initialised in this process (e.g. tests) — getDb() will work */
+    _srcDbReady = true;
+  }
+}
+
+/**
+ * After mutating `agent_destinations` from a dashboard handler, fire this
+ * to project the change into the per-session `inbound.db` of every active
+ * session for `agentGroupId`. Silently no-ops if the helper isn't available
+ * (e.g. agent-to-agent module not installed).
+ */
+function refreshRunningSessions(agentGroupId: string): void {
+  try {
+    ensureSrcDb();
+    refreshDestinationsForAgentGroup(agentGroupId);
+  } catch (err) {
+    console.warn('[dashboard] failed to refresh destinations for', agentGroupId, err);
   }
 }
 
@@ -1633,11 +1666,22 @@ try {
   }
 } catch { /* hook_events table may not exist yet */ }
 
-// Cached set of running container name prefixes (refreshed async every 5s)
+// Cached set of running container name prefixes (refreshed async every 5s).
+// Scoped to the instance's CONTAINER_PREFIX so containers belonging to
+// sibling NanoClaw instances on the same host (prod, another dev, etc.)
+// don't bleed into this dashboard's running-state view.
 const runningContainers = new Set<string>();
 
+/** Container-name prefix used for docker ps --filter. Falls back to
+ * 'nanoclaw-' for historical setups that never set CONTAINER_PREFIX. */
+function getContainerNameFilter(): string {
+  const prefix = process.env.CONTAINER_PREFIX || 'nanoclaw';
+  return `${prefix}-`;
+}
+
 function refreshContainerStatus(): void {
-  exec('docker ps --format "{{.Names}}" 2>/dev/null', { timeout: 3000 }, (_err, stdout) => {
+  const filter = getContainerNameFilter();
+  exec(`docker ps --filter name=${filter} --format "{{.Names}}" 2>/dev/null`, { timeout: 3000 }, (_err, stdout) => {
     runningContainers.clear();
     if (stdout) {
       for (const name of stdout.trim().split('\n')) {
@@ -4708,6 +4752,12 @@ export async function handleRequest(
             .prepare("INSERT INTO agent_destinations (agent_group_id, local_name, target_type, target_id, created_at) VALUES (?, ?, 'agent', ?, ?)")
             .run(agId, parentName, adminGroup.id, now);
         }
+
+        // Project the new destinations into any already-running parent
+        // container's inbound.db so the orchestrator sees the new coworker
+        // without a restart. See invariant in db/agent-destinations.ts.
+        refreshRunningSessions(adminGroup.id);
+        refreshRunningSessions(agId);
       }
 
       // Write .instructions.md if provided (CLAUDE.md is system-composed on wake)
@@ -5494,6 +5544,11 @@ export async function handleRequest(
           return;
         }
 
+        // Project the imported destinations into any already-running
+        // sessions of the newly-restored agent. See invariant in
+        // db/agent-destinations.ts.
+        refreshRunningSessions(newAgId);
+
         // 6. Move staged group-files to final location
         try {
           mkdirSync(groupDir, { recursive: true });
@@ -5734,6 +5789,11 @@ export async function handleRequest(
         res.end(JSON.stringify({ error: `Import failed (DB): ${dbErr.message}` }));
         return;
       }
+
+      // Project the imported destinations into any already-running
+      // sessions of the newly-restored agent. See invariant in
+      // db/agent-destinations.ts.
+      refreshRunningSessions(agId);
 
       // 6. DB committed + files staged → copy to final location
       //    If copy fails, rollback DB rows and return error.
@@ -6336,7 +6396,7 @@ export async function handleRequest(
         }),
       );
     };
-    exec(`docker ps --filter name=nanoclaw-${folderHyphenated}- --format '{{.Names}}'`, (_err, stdout) => {
+    exec(`docker ps --filter name=${getContainerNameFilter()}${folderHyphenated}- --format '{{.Names}}'`, (_err, stdout) => {
       const containers = (stdout || '').trim().split('\n').filter(Boolean);
       if (containers.length === 0) {
         doCleanup().catch((err) => {
@@ -6657,7 +6717,7 @@ export async function handleRequest(
             // Running containers
             try {
               const raw = execSync(
-                'docker ps --filter name=nanoclaw- --format "{{.Names}}|{{.Status}}|{{.Networks}}"',
+                `docker ps --filter name=${getContainerNameFilter()} --format "{{.Names}}|{{.Status}}|{{.Networks}}"`,
                 { stdio: 'pipe', encoding: 'utf-8', timeout: 5000 },
               ).trim();
               const containers = raw
