@@ -1,0 +1,456 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <title>NanoClaw Mobile</title>
+  <style>
+    :root {
+      --bg: #0f172a;
+      --bg-card: #1e293b;
+      --bg-hover: #334155;
+      --border: #334155;
+      --text: #e2e8f0;
+      --text-dim: #94a3b8;
+      --text-muted: #64748b;
+      --accent: #3b82f6;
+      --green: #10b981;
+      --yellow: #f59e0b;
+      --red: #ef4444;
+      --purple: #8b5cf6;
+      --font: 'Courier New', monospace;
+      --tab-bar-h: 56px;
+      --safe-bottom: env(safe-area-inset-bottom, 0px);
+    }
+    * { margin: 0; padding: 0; box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+    body {
+      font-family: var(--font);
+      background: var(--bg);
+      color: var(--text);
+      height: 100dvh;
+      overflow: hidden;
+      -webkit-text-size-adjust: 100%;
+    }
+
+    /* --- Header --- */
+    .m-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 12px;
+      height: 44px;
+      border-bottom: 1px solid var(--border);
+      background: var(--bg-card);
+    }
+    .m-header-title { font-size: 12px; font-weight: 600; letter-spacing: 0.5px; }
+    .m-header-title span { color: var(--accent); }
+    .m-status { display: flex; align-items: center; gap: 6px; font-size: 10px; color: var(--text-dim); }
+    .m-status-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--green); animation: pulse 2s infinite; }
+    @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.4; } }
+
+    /* --- Main content area --- */
+    .m-content {
+      height: calc(100dvh - 44px - var(--tab-bar-h) - var(--safe-bottom));
+      overflow: hidden;
+      position: relative;
+    }
+    .m-view {
+      position: absolute;
+      inset: 0;
+      display: none;
+      flex-direction: column;
+      overflow: hidden;
+    }
+    .m-view.active { display: flex; }
+
+    /* --- Bottom Tab Bar --- */
+    .m-tab-bar {
+      display: flex;
+      height: var(--tab-bar-h);
+      padding-bottom: var(--safe-bottom);
+      border-top: 1px solid var(--border);
+      background: var(--bg-card);
+    }
+    .m-tab {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 2px;
+      font-family: var(--font);
+      font-size: 9px;
+      color: var(--text-muted);
+      background: none;
+      border: none;
+      cursor: pointer;
+      position: relative;
+      min-height: 44px;
+    }
+    .m-tab.active { color: var(--accent); }
+    .m-tab-icon { font-size: 18px; line-height: 1; }
+    .m-tab-badge {
+      position: absolute;
+      top: 4px;
+      right: calc(50% - 18px);
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--red);
+      display: none;
+    }
+
+    /* --- Coworkers List View --- */
+    .m-cw-list { flex: 1; overflow-y: auto; -webkit-overflow-scrolling: touch; }
+    .m-cw-item {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 14px 14px;
+      border-bottom: 1px solid var(--border);
+      cursor: pointer;
+    }
+    .m-cw-item:active { background: var(--bg-hover); }
+    .m-cw-item.selected { background: var(--bg-hover); }
+    .m-cw-dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      flex-shrink: 0;
+    }
+    .m-cw-dot.idle { background: #6B7280; }
+    .m-cw-dot.active { background: #3B82F6; }
+    .m-cw-dot.working { background: var(--green); }
+    .m-cw-dot.thinking { background: var(--yellow); }
+    .m-cw-dot.error { background: var(--red); }
+    .m-cw-info { flex: 1; min-width: 0; }
+    .m-cw-name { font-size: 13px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .m-cw-meta { font-size: 10px; color: var(--text-dim); margin-top: 2px; }
+    .m-cw-badges { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
+    .m-cw-approval-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--yellow); }
+    .m-cw-unread { width: 8px; height: 8px; border-radius: 50%; background: var(--accent); }
+    .m-cw-empty { padding: 40px 20px; text-align: center; color: var(--text-muted); font-size: 12px; }
+    .m-cw-chevron { color: var(--text-muted); font-size: 14px; flex-shrink: 0; }
+
+    /* --- Chat View --- */
+    .m-chat-header {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 0 12px;
+      height: 44px;
+      border-bottom: 1px solid var(--border);
+      background: var(--bg-card);
+      flex-shrink: 0;
+    }
+    .m-back-btn {
+      background: none;
+      border: none;
+      color: var(--accent);
+      font-family: var(--font);
+      font-size: 13px;
+      cursor: pointer;
+      padding: 8px 4px;
+      min-width: 44px;
+      min-height: 44px;
+      display: flex;
+      align-items: center;
+    }
+    .m-chat-name { font-size: 13px; font-weight: 600; flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .m-chat-status {
+      font-size: 9px;
+      padding: 2px 8px;
+      border-radius: 999px;
+      color: #fff;
+      flex-shrink: 0;
+    }
+    .m-chat-messages {
+      flex: 1;
+      overflow-y: auto;
+      -webkit-overflow-scrolling: touch;
+      padding: 10px 10px 4px;
+    }
+    .m-msg { margin-bottom: 10px; }
+    .m-msg.user .m-msg-bubble { background: var(--accent); color: #fff; margin-left: 40px; border-radius: 14px 14px 4px 14px; }
+    .m-msg.assistant .m-msg-bubble { background: var(--bg-card); border: 1px solid var(--border); margin-right: 40px; border-radius: 14px 14px 14px 4px; }
+    .m-msg-bubble {
+      padding: 10px 12px;
+      font-size: 12px;
+      line-height: 1.5;
+      word-break: break-word;
+    }
+    .m-msg-bubble p { margin: 0; }
+    .m-msg-bubble p + p { margin-top: 6px; }
+    .m-msg-bubble pre { background: #0f172a; border-radius: 6px; padding: 8px; margin: 6px 0; overflow-x: auto; font-size: 11px; }
+    .m-msg-bubble code { font-family: var(--font); font-size: 11px; background: rgba(0,0,0,0.3); padding: 1px 4px; border-radius: 3px; }
+    .m-msg-bubble pre code { background: none; padding: 0; }
+    .m-msg-bubble a { color: #60a5fa; }
+    .m-msg-bubble strong { font-weight: 700; }
+    .m-msg-bubble em { font-style: italic; }
+    .m-msg-bubble ul { margin: 4px 0; padding-left: 16px; }
+    .m-msg-bubble li { margin: 2px 0; }
+    .m-msg-bubble table { border-collapse: collapse; margin: 6px 0; font-size: 11px; }
+    .m-msg-bubble th, .m-msg-bubble td { border: 1px solid var(--border); padding: 4px 8px; }
+    .m-msg-bubble th { background: var(--bg-hover); }
+    .m-msg-bubble hr { border: none; border-top: 1px solid var(--border); margin: 8px 0; }
+    .m-msg-bubble img { max-width: 100%; border-radius: 8px; margin: 4px 0; }
+    .m-msg-time { font-size: 9px; color: var(--text-muted); margin-top: 3px; padding: 0 4px; }
+    .m-msg.user .m-msg-time { text-align: right; }
+    .m-msg-system { opacity: 0.5; font-size: 10px; border-left: 2px solid #555; padding-left: 6px; }
+
+    /* Approval/credential/question cards */
+    .m-card {
+      padding: 10px 12px;
+      border-radius: 10px;
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      margin-right: 20px;
+      margin-bottom: 10px;
+    }
+    .m-card-approval { border-left: 3px solid var(--yellow); }
+    .m-card-credential { border-left: 3px solid #d97706; }
+    .m-card-question { border-left: 3px solid var(--accent); }
+    .m-card-body { font-size: 12px; line-height: 1.5; }
+    .m-card-body p { margin: 0; }
+    .m-card-body p + p { margin-top: 4px; }
+    .m-card-actions { display: flex; gap: 8px; margin-top: 10px; flex-wrap: wrap; }
+    .m-btn {
+      border: none;
+      border-radius: 6px;
+      padding: 8px 16px;
+      font-family: var(--font);
+      font-size: 11px;
+      cursor: pointer;
+      min-height: 36px;
+      color: #fff;
+    }
+    .m-btn-approve { background: #238636; }
+    .m-btn-reject { background: #da3633; }
+    .m-btn-primary { background: var(--accent); }
+    .m-btn:active { opacity: 0.7; }
+    .m-card-label { font-size: 8px; color: var(--text-muted); font-style: italic; margin-top: 4px; }
+
+    /* Chat input */
+    .m-chat-input-area {
+      display: flex;
+      align-items: flex-end;
+      gap: 8px;
+      padding: 8px 10px;
+      border-top: 1px solid var(--border);
+      background: var(--bg-card);
+      flex-shrink: 0;
+    }
+    .m-chat-input {
+      flex: 1;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 10px 12px;
+      color: var(--text);
+      font-family: var(--font);
+      font-size: 13px;
+      resize: none;
+      max-height: 100px;
+      line-height: 1.4;
+    }
+    .m-chat-input::placeholder { color: var(--text-muted); }
+    .m-send-btn {
+      background: var(--accent);
+      color: #fff;
+      border: none;
+      border-radius: 8px;
+      width: 44px;
+      height: 40px;
+      font-size: 16px;
+      cursor: pointer;
+      flex-shrink: 0;
+    }
+    .m-send-btn:active { opacity: 0.7; }
+
+    /* No selection placeholder */
+    .m-chat-empty { padding: 40px 20px; text-align: center; color: var(--text-muted); font-size: 12px; }
+
+    /* --- Detail View --- */
+    .m-detail { flex: 1; overflow-y: auto; -webkit-overflow-scrolling: touch; padding: 14px; }
+    .m-detail-empty { padding: 40px 20px; text-align: center; color: var(--text-muted); font-size: 12px; }
+    .m-detail-header {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-bottom: 16px;
+    }
+    .m-detail-name { font-size: 16px; font-weight: 700; }
+    .m-detail-section {
+      margin-bottom: 16px;
+    }
+    .m-detail-section-title {
+      font-size: 10px;
+      color: var(--text-muted);
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      margin-bottom: 6px;
+    }
+    .m-detail-row {
+      display: flex;
+      justify-content: space-between;
+      padding: 6px 0;
+      border-bottom: 1px solid rgba(51,65,85,0.5);
+      font-size: 12px;
+    }
+    .m-detail-label { color: var(--text-dim); }
+    .m-detail-value { color: var(--text); text-align: right; max-width: 60%; word-break: break-all; }
+    .m-detail-card {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 10px 12px;
+    }
+    .m-mcp-tag {
+      display: inline-block;
+      padding: 2px 8px;
+      border-radius: 4px;
+      font-size: 10px;
+      margin: 2px;
+    }
+    .m-mcp-tag.allowed { background: rgba(16,185,129,0.15); color: var(--green); }
+    .m-mcp-tag.blocked { background: rgba(239,68,68,0.15); color: var(--red); text-decoration: line-through; }
+    .m-memory-preview {
+      font-size: 11px;
+      line-height: 1.5;
+      max-height: 150px;
+      overflow: hidden;
+      position: relative;
+    }
+    .m-memory-preview.expanded { max-height: none; }
+    .m-memory-toggle {
+      background: none;
+      border: none;
+      color: var(--accent);
+      font-family: var(--font);
+      font-size: 10px;
+      cursor: pointer;
+      padding: 6px 0;
+    }
+
+    /* --- Credential modal overlay --- */
+    .m-modal-overlay {
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,0.7);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      z-index: 100;
+      padding: 20px;
+    }
+    .m-modal {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 20px;
+      width: 100%;
+      max-width: 360px;
+    }
+    .m-modal h3 { font-size: 14px; margin-bottom: 12px; }
+    .m-modal p { font-size: 11px; color: var(--text-dim); margin-bottom: 12px; }
+    .m-modal input {
+      width: 100%;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 10px;
+      color: var(--text);
+      font-family: var(--font);
+      font-size: 13px;
+      margin-bottom: 14px;
+    }
+    .m-modal-actions { display: flex; gap: 8px; justify-content: flex-end; }
+
+    /* Approval banner */
+    .m-approval-banner {
+      background: rgba(245,158,11,0.08);
+      border: 1px solid rgba(245,158,11,0.2);
+      border-radius: 8px;
+      padding: 8px;
+      margin-bottom: 10px;
+    }
+    .m-approval-banner-label {
+      font-size: 10px;
+      color: var(--yellow);
+      font-weight: 600;
+      margin-bottom: 6px;
+    }
+
+    /* Desktop link */
+    .m-desktop-link {
+      font-size: 10px;
+      color: var(--text-muted);
+      text-decoration: none;
+    }
+  </style>
+</head>
+<body>
+  <!-- Header -->
+  <div class="m-header">
+    <div class="m-header-title"><span>NANO</span>CLAW</div>
+    <div style="display:flex;align-items:center;gap:10px">
+      <a href="?desktop=1" class="m-desktop-link">Desktop</a>
+      <div class="m-status">
+        <div class="m-status-dot" id="m-live-dot"></div>
+        <span id="m-live-label">Connecting...</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- Main content -->
+  <div class="m-content">
+    <!-- Coworkers List -->
+    <div id="m-view-list" class="m-view active">
+      <div id="m-cw-list" class="m-cw-list"></div>
+    </div>
+
+    <!-- Chat -->
+    <div id="m-view-chat" class="m-view">
+      <div class="m-chat-header">
+        <button id="m-chat-back" class="m-back-btn">&lt; Back</button>
+        <div id="m-chat-name" class="m-chat-name">—</div>
+        <span id="m-chat-status" class="m-chat-status">idle</span>
+      </div>
+      <div id="m-chat-messages" class="m-chat-messages"></div>
+      <div id="m-chat-input-area" class="m-chat-input-area">
+        <textarea id="m-chat-input" class="m-chat-input" rows="1" placeholder="Type a message..."></textarea>
+        <button id="m-send-btn" class="m-send-btn">&#9654;</button>
+      </div>
+    </div>
+
+    <!-- Detail -->
+    <div id="m-view-detail" class="m-view">
+      <div id="m-detail" class="m-detail">
+        <div class="m-detail-empty">Select a coworker to view details.</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Bottom Tab Bar -->
+  <div class="m-tab-bar">
+    <button class="m-tab active" data-view="list">
+      <div class="m-tab-icon">&#9776;</div>
+      <div>Coworkers</div>
+      <div class="m-tab-badge" id="m-tab-badge-list"></div>
+    </button>
+    <button class="m-tab" data-view="chat">
+      <div class="m-tab-icon">&#9993;</div>
+      <div>Chat</div>
+      <div class="m-tab-badge" id="m-tab-badge-chat"></div>
+    </button>
+    <button class="m-tab" data-view="detail">
+      <div class="m-tab-icon">&#9432;</div>
+      <div>Detail</div>
+    </button>
+  </div>
+
+  <script src="mobile.js"></script>
+</body>
+</html>
