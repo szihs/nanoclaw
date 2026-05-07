@@ -371,6 +371,21 @@ function applyState(nextState) {
   updateTimeline();
   // Live-update coworkers tab sidebar
   if (typeof scheduleCwRefresh === 'function') scheduleCwRefresh();
+  // WS-driven chat refresh: when the selected coworker's lastMessageTs
+  // advances, pull the main feed (and any open thread) immediately. The 3s
+  // poll remains as a fallback. State shape tolerates either .coworkers
+  // or .registeredGroups carrying the timestamp.
+  if (cwState && cwState.selected) {
+    const cw = (nextState.coworkers || []).find((c) => c.folder === cwState.selected);
+    const ts = cw?.lastMessageTs || cw?.lastActivity || null;
+    if (ts && ts !== cwState.lastMainMessageTs) {
+      cwState.lastMainMessageTs = ts;
+      if (typeof fetchCwMessages === 'function') fetchCwMessages();
+      if (cwState.thread && typeof fetchCwThread === 'function') {
+        fetchCwThread(cwState.thread.parentId);
+      }
+    }
+  }
   // Live-update detail panel if open
   if (selectedCoworker) {
     const updated = state.coworkers.find((c) => c.folder === selectedCoworker.folder);
@@ -3212,11 +3227,14 @@ document.getElementById('chat-input')?.addEventListener('keydown', (e) => {
 // ===================================================================
 
 const cwState = {
-  selected: null,       // currently selected coworker folder
-  messages: [],         // chat messages for selected coworker
-  polling: null,        // chat polling interval
-  types: null,          // coworker-types.json cache
+  selected: null,             // currently selected coworker folder
+  messages: [],               // main-view messages (thread_id IS NULL). Alias for .main.messages; kept as a top-level field so existing readers don't break.
+  threadSummaries: {},        // { [parentMessageId]: { replyCount, lastReplyTs } } — main view only
+  polling: null,              // main-view polling interval
+  thread: null,               // { parentId, parentSnapshot, messages: [], polling } when a thread panel is open; null otherwise
+  types: null,                // coworker-types.json cache
   approvalCountByFolder: {},  // { folder: count } for sidebar dot
+  lastMainMessageTs: null,    // tracks last-seen state.lastMessageTs for WS-driven refresh dedupe
 };
 
 function getCwCoworkers() {
@@ -3310,7 +3328,13 @@ function renderCwSidebar() {
 function selectCoworker(folder) {
   cwState.selected = folder;
   cwState.messages = [];
+  cwState.threadSummaries = {};
+  cwState.lastMainMessageTs = null;
   if (cwState.polling) { clearInterval(cwState.polling); cwState.polling = null; }
+  // Any open thread belongs to the previous coworker — close it.
+  closeThread({ silent: true });
+  // Push URL state for shareable / reload-safe navigation.
+  syncCwUrl();
   renderCwSidebar();
   if (folder) {
     document.getElementById('cw-chat-input-area').style.display = 'flex';
@@ -3386,6 +3410,7 @@ async function fetchCwMessages() {
     if (!res.ok) return;
     const data = await res.json();
     cwState.messages = (data.messages || []).reverse();
+    cwState.threadSummaries = data.threadSummaries || {};
     try {
       const ar = await fetch(`/api/approvals?group=${encodeURIComponent(cwState.selected)}`);
       cwState.pendingApprovals = ar.ok ? await ar.json() : [];
@@ -3508,9 +3533,36 @@ function renderCwMessages() {
     // so render as markdown rather than escaped plain text.
     const renderAsMd = isOutgoing || isFromCoworker;
     const bubbleBody = `${text ? (renderAsMd ? md(text) : esc(text)) : ''}${attachmentsHtml}`;
-    return `<div class="cw-msg ${cls}"${systemStyle}>
+
+    // Slack-style row: monogram avatar + header (name · time) + body.
+    // Author label: You (self) · coworker name (a2a) · coworker folder
+    // (assistant). Hover reveals a small actions toolbar with "Reply in
+    // thread" (gated on persisted id — optimistic sends have no id yet).
+    const authorName = isOutgoing
+      ? (isToCoworker && m.recipientCoworkerName ? `You → @${esc(m.recipientCoworkerName)}` : 'You')
+      : isFromCoworker && m.senderCoworkerName
+        ? `@${esc(m.senderCoworkerName)}`
+        : (cwState.selected ? esc(cwState.selected) : 'agent');
+    const monogram = esc((isOutgoing ? 'You' : (m.senderCoworkerName || cwState.selected || 'A')).trim().charAt(0).toUpperCase() || 'A');
+
+    // Reply-count stub: only for main-view rows that are thread starters.
+    const summary = cwState.threadSummaries && m.id ? cwState.threadSummaries[m.id] : null;
+    const threadStubHtml = summary
+      ? `<div class="cw-thread-stub" data-parent-id="${esc(m.id)}" title="Open thread"><span class="cw-thread-stub-count">${summary.replyCount} repl${summary.replyCount === 1 ? 'y' : 'ies'}</span>${summary.lastReplyTs ? ` <span class="cw-thread-stub-time">· ${formatTime(summary.lastReplyTs)}</span>` : ''}</div>`
+      : '';
+    // Hover action toolbar — only offer "Reply in thread" when we have a
+    // persisted message id (not optimistic) and it's not an approval/
+    // credential/question card (those have their own buttons).
+    const canReply = !!m.id && !m.optimistic;
+    const actionsHtml = canReply
+      ? `<div class="cw-msg-actions"><button class="cw-msg-action-btn cw-reply-btn" data-parent-id="${esc(m.id)}" title="Reply in thread">↳ Reply</button></div>`
+      : '';
+    return `<div class="cw-msg ${cls}" data-msg-id="${esc(m.id || '')}"${systemStyle}>
+      <div class="cw-msg-avatar">${monogram}</div>
+      ${actionsHtml}
+      <div class="cw-msg-header"><span class="cw-msg-author">${authorName}</span><span class="cw-msg-time">${time}${kindLabel}${coworkerLabel}${metaSuffix}</span></div>
       <div class="cw-msg-bubble">${bubbleBody || '<span style="color:#9ca3af">(empty message)</span>'}</div>
-      <div class="cw-msg-time">${time}${kindLabel}${coworkerLabel}${metaSuffix}</div>
+      ${threadStubHtml}
     </div>`;
   }).join('');
   if (!approvalHtml && !credentialHtml && !messageHtml) {
@@ -3530,6 +3582,13 @@ function renderCwMessages() {
   if (!el._approvalDelegateAttached) {
     el._approvalDelegateAttached = true;
     el.addEventListener('click', async (e) => {
+      // ── Reply-in-thread hover button or reply-count stub ──
+      const replyBtn = e.target.closest('.cw-reply-btn, .cw-thread-stub');
+      if (replyBtn) {
+        const parentId = replyBtn.dataset.parentId;
+        if (parentId) openThread(parentId);
+        return;
+      }
       // ── Approval buttons ──
       const approvalBtn = e.target.closest('.approval-btn');
       if (approvalBtn) {
@@ -3708,39 +3767,205 @@ async function ensureContainerRunning(folder) {
   } catch { return false; }
 }
 
+/**
+ * Shared send helper. `threadId` is the Slack-style thread id (= parent
+ * message id). null/undefined routes to the root session.
+ */
+async function sendMessage({ group, content, threadId = null, optimisticBucket }) {
+  const optimistic = {
+    id: null, optimistic: true, content, direction: 'outgoing',
+    sender: 'web@dashboard', sender_name: 'Dashboard',
+    is_from_me: 0, is_bot_message: 0, timestamp: new Date().toISOString(),
+    thread_id: threadId,
+  };
+  optimisticBucket.push(optimistic);
+  if (threadId) renderCwThread(); else renderCwMessages();
+  try {
+    const body = { group, content };
+    if (threadId) body.thread_id = threadId;
+    const res = await fetch('/api/chat/send', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) {
+      const idx = optimisticBucket.indexOf(optimistic);
+      if (idx >= 0) optimisticBucket.splice(idx, 1);
+      if (threadId) renderCwThread(); else renderCwMessages();
+      let err = 'Failed to send message';
+      try { err = (await res.json()).error || err; } catch { /* ignore */ }
+      alert(err);
+      return false;
+    }
+    if (threadId) fetchCwThread(threadId); else fetchCwMessages();
+    return true;
+  } catch (e) {
+    const idx = optimisticBucket.indexOf(optimistic);
+    if (idx >= 0) optimisticBucket.splice(idx, 1);
+    if (threadId) renderCwThread(); else renderCwMessages();
+    alert('Failed to send message: ' + e.message);
+    return false;
+  }
+}
+
 async function sendCwMessage() {
   const input = document.getElementById('cw-chat-input');
   const content = input.value.trim();
   if (!cwState.selected || !content) return;
   input.value = '';
-  const optimisticMessage = {
-    content, sender: 'web@dashboard', sender_name: 'Dashboard',
-    is_from_me: 0, is_bot_message: 0, timestamp: new Date().toISOString(),
-  };
-  cwState.messages.push(optimisticMessage);
-  renderCwMessages();
+  await sendMessage({ group: cwState.selected, content, optimisticBucket: cwState.messages });
+}
+
+async function sendCwThreadMessage() {
+  const input = document.getElementById('cw-thread-input-text');
+  if (!input) return;
+  const content = input.value.trim();
+  if (!cwState.selected || !cwState.thread || !content) return;
+  input.value = '';
+  await sendMessage({
+    group: cwState.selected,
+    content,
+    threadId: cwState.thread.parentId,
+    optimisticBucket: cwState.thread.messages,
+  });
+}
+
+function openThread(parentId) {
+  if (!cwState.selected || !parentId) return;
+  // Snapshot the parent message from the current main view for the header.
+  const parentSnapshot = (cwState.messages || []).find((m) => m.id === parentId) || null;
+  if (cwState.thread?.polling) clearInterval(cwState.thread.polling);
+  cwState.thread = { parentId, parentSnapshot, messages: [], polling: null };
+  const panel = document.getElementById('cw-thread-panel');
+  if (panel) panel.style.display = 'flex';
+  // The dashboard's detail panel and thread panel fight for the same slot —
+  // hide detail while the thread is open to avoid a squeezed layout.
+  const detail = document.getElementById('cw-detail');
+  if (detail && detail.style.display !== 'none') {
+    detail.dataset.wasVisible = '1';
+    detail.style.display = 'none';
+  }
+  renderCwThread(); // render placeholder immediately
+  fetchCwThread(parentId);
+  cwState.thread.polling = setInterval(() => {
+    if (cwState.thread) fetchCwThread(cwState.thread.parentId);
+  }, 3000);
+  syncCwUrl();
+}
+
+function closeThread({ silent = false } = {}) {
+  if (cwState.thread?.polling) clearInterval(cwState.thread.polling);
+  cwState.thread = null;
+  const panel = document.getElementById('cw-thread-panel');
+  if (panel) panel.style.display = 'none';
+  const detail = document.getElementById('cw-detail');
+  if (detail && detail.dataset.wasVisible === '1') {
+    detail.style.display = 'block';
+    delete detail.dataset.wasVisible;
+  }
+  if (!silent) syncCwUrl();
+}
+
+async function fetchCwThread(parentId) {
+  if (!cwState.selected || !cwState.thread || cwState.thread.parentId !== parentId) return;
   try {
-    const res = await fetch('/api/chat/send', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ group: cwState.selected, content }),
-    });
-    if (!res.ok) {
-      cwState.messages = cwState.messages.filter((m) => m !== optimisticMessage);
-      renderCwMessages();
-      let err = 'Failed to send message';
-      try {
-        const data = await res.json();
-        err = data.error || err;
-      } catch { /* ignore */ }
-      alert(err);
-      return;
+    const res = await fetch(`/api/messages?group=${encodeURIComponent(cwState.selected)}&thread_id=${encodeURIComponent(parentId)}&limit=200`);
+    if (!res.ok) return;
+    const data = await res.json();
+    const incoming = (data.messages || []).reverse();
+    // Preserve locally-pushed optimistic messages UNTIL their persisted
+    // twin arrives. Heuristic: drop an optimistic row once the server
+    // returns any outgoing thread row with identical content within 30 s
+    // of the optimistic timestamp. Also drop optimistic rows older than
+    // 60 s so a failed round-trip doesn't stick forever.
+    const OPTIMISTIC_MAX_AGE_MS = 60_000;
+    const MATCH_WINDOW_MS = 30_000;
+    const now = Date.now();
+    const matched = (opt) => {
+      const optTs = Date.parse(opt.timestamp);
+      if (!Number.isFinite(optTs)) return false;
+      if (now - optTs > OPTIMISTIC_MAX_AGE_MS) return true; // expire
+      return incoming.some((m) => {
+        if (m.direction !== 'outgoing') return false;
+        if ((m.content || '') !== (opt.content || '')) return false;
+        const mTs = Date.parse(m.timestamp);
+        return Number.isFinite(mTs) && Math.abs(mTs - optTs) <= MATCH_WINDOW_MS;
+      });
+    };
+    const pending = cwState.thread.messages.filter((m) => m.optimistic && !matched(m));
+    cwState.thread.messages = incoming.concat(pending);
+    renderCwThread();
+  } catch { /* ignore */ }
+}
+
+function renderCwThread() {
+  if (!cwState.thread) return;
+  const t = cwState.thread;
+  const parentEl = document.getElementById('cw-thread-parent');
+  const parentLabel = document.getElementById('cw-thread-parent-label');
+  const msgsEl = document.getElementById('cw-thread-messages');
+  if (parentLabel) parentLabel.textContent = t.parentId.slice(0, 12);
+  if (parentEl) {
+    if (t.parentSnapshot) {
+      const p = t.parentSnapshot;
+      const pText = p.displayContent || p.content || '';
+      const pIsOutgoing = p.direction === 'outgoing';
+      // esc() everything that comes from server-side strings. Keep the
+      // "@" prefix for coworker senders; everything inside esc().
+      const pAuthor = pIsOutgoing
+        ? 'You'
+        : (p.senderCoworkerName ? `@${esc(p.senderCoworkerName)}` : esc(cwState.selected || 'agent'));
+      parentEl.innerHTML = `<div class="parent-author">${pAuthor} <span style="color:var(--text-muted);font-weight:400">· ${p.timestamp ? formatTime(p.timestamp) : ''}</span></div>
+        <div class="parent-body">${md(pText)}</div>`;
+    } else {
+      parentEl.innerHTML = '<div class="parent-body" style="color:var(--text-muted)">(parent message)</div>';
     }
-    fetchCwMessages();
-  } catch (e) {
-    cwState.messages = cwState.messages.filter((m) => m !== optimisticMessage);
-    renderCwMessages();
-    alert('Failed to send message: ' + e.message);
+  }
+  if (!msgsEl) return;
+  const wasAtBottom = msgsEl.scrollHeight - msgsEl.scrollTop - msgsEl.clientHeight < 60;
+  const html = (t.messages || []).map((m) => {
+    const isOutgoing = m.direction === 'outgoing';
+    const isFromCoworker = !isOutgoing && m.senderKind === 'coworker';
+    const cls = isFromCoworker ? 'coworker' : isOutgoing ? 'assistant' : 'user';
+    const time = m.timestamp ? formatTime(m.timestamp) : '';
+    const text = m.displayContent || m.content || '';
+    const renderAsMd = isOutgoing || isFromCoworker;
+    const body = text ? (renderAsMd ? md(text) : esc(text)) : '<span style="color:#9ca3af">(empty message)</span>';
+    const authorName = isOutgoing ? 'You' : (m.senderCoworkerName ? `@${esc(m.senderCoworkerName)}` : (cwState.selected || 'agent'));
+    const monogram = esc((isOutgoing ? 'You' : (m.senderCoworkerName || cwState.selected || 'A')).trim().charAt(0).toUpperCase() || 'A');
+    return `<div class="cw-msg ${cls}"><div class="cw-msg-avatar">${monogram}</div>
+      <div class="cw-msg-header"><span class="cw-msg-author">${authorName}</span><span class="cw-msg-time">${time}</span></div>
+      <div class="cw-msg-bubble">${body}</div></div>`;
+  }).join('');
+  msgsEl.innerHTML = html || '<div class="cw-empty" style="padding:12px">No replies yet.</div>';
+  if (wasAtBottom) msgsEl.scrollTop = msgsEl.scrollHeight;
+}
+
+/**
+ * Sync URL hash with current coworker/thread selection — shareable /
+ * reload-safe. Schema: #/cw/<folder> or #/cw/<folder>/t/<parentId>.
+ */
+function syncCwUrl() {
+  try {
+    let hash = '';
+    if (cwState.selected) {
+      hash = `#/cw/${encodeURIComponent(cwState.selected)}`;
+      if (cwState.thread) hash += `/t/${encodeURIComponent(cwState.thread.parentId)}`;
+    }
+    if (location.hash !== hash) history.replaceState(null, '', hash || location.pathname);
+  } catch { /* ignore */ }
+}
+
+function applyCwUrl() {
+  const m = /^#\/cw\/([^/]+)(?:\/t\/(.+))?$/.exec(location.hash || '');
+  if (!m) return;
+  const folder = decodeURIComponent(m[1]);
+  const parentId = m[2] ? decodeURIComponent(m[2]) : null;
+  if (cwState.selected !== folder) selectCoworker(folder);
+  if (parentId && (!cwState.thread || cwState.thread.parentId !== parentId)) {
+    // Defer briefly so the main fetch has a chance to resolve first — gives
+    // openThread a non-null parent snapshot for the thread header.
+    setTimeout(() => openThread(parentId), 600);
   }
 }
 
@@ -4009,6 +4234,20 @@ document.getElementById('cw-chat-send')?.addEventListener('click', sendCwMessage
 document.getElementById('cw-chat-input')?.addEventListener('keydown', (e) => {
   if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendCwMessage(); }
 });
+
+// Thread panel composer + close button
+document.getElementById('cw-thread-send')?.addEventListener('click', sendCwThreadMessage);
+document.getElementById('cw-thread-input-text')?.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendCwThreadMessage(); }
+});
+document.getElementById('cw-thread-close')?.addEventListener('click', () => closeThread());
+
+// Hash-routing: restore state on load, reconcile on history navigation.
+window.addEventListener('hashchange', () => applyCwUrl());
+// Apply initial URL after the coworker list has been populated. The first
+// applyState() call fills state.registeredGroups; this listener fires after
+// that the first time via a short deferral.
+setTimeout(() => applyCwUrl(), 500);
 
 // Memory editor is read-only (CLAUDE.md re-composed at container startup from coworkerType)
 

@@ -637,7 +637,7 @@ describe('dashboard server', () => {
         body += chunk.toString();
       });
       req.on('end', () => {
-        expect(JSON.parse(body)).toEqual({ group: 'dashboard-team-test', content: 'hello bridge' });
+        expect(JSON.parse(body)).toEqual({ group: 'dashboard-team-test', content: 'hello bridge', thread_id: null });
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end('{"ok":true}');
       });
@@ -2062,5 +2062,129 @@ describe('/api/messages system-id filter', () => {
     expect(coworkerMsg.senderCoworkerName).toBe('SenderBot');
     const human = data.messages.find((m) => m.id === 'dash-real-1');
     expect(human.senderKind).toBeUndefined();
+  });
+});
+
+describe('/api/messages — Slack-style thread filtering', () => {
+  function seedThreadScenario(): void {
+    const db = createTestDbWithSessions();
+    const now = new Date().toISOString();
+
+    // One coworker with both a dashboard channel AND a Slack channel wired.
+    db.prepare(
+      'INSERT INTO agent_groups (id, name, folder, is_admin, agent_provider, container_config, coworker_type, allowed_mcp_tools, created_at) VALUES (?, ?, ?, 0, NULL, NULL, NULL, NULL, ?)',
+    ).run('ag-thread', 'ThreadAgent', 'thread-agent', now);
+
+    db.prepare(
+      'INSERT INTO messaging_groups (id, channel_type, platform_id, name, is_group, unknown_sender_policy, created_at) VALUES (?, ?, ?, ?, 0, ?, ?)',
+    ).run('mg-dash', 'dashboard', 'dashboard:thread-agent', 'Dashboard', 'public', now);
+
+    db.prepare(
+      'INSERT INTO messaging_groups (id, channel_type, platform_id, name, is_group, unknown_sender_policy, created_at) VALUES (?, ?, ?, ?, 1, ?, ?)',
+    ).run('mg-slack', 'slack', 'slack:C123', 'Slack', 'public', now);
+
+    // Four active sessions under ag-thread:
+    //  - dash root (thread_id NULL, mg-dash)
+    //  - dash thread t1  (mg-dash)
+    //  - dash thread t2  (mg-dash)
+    //  - slack root (thread_id NULL, mg-slack) — the cross-channel leak guard
+    const sess = (id: string, mg: string, tid: string | null) =>
+      db
+        .prepare(
+          "INSERT INTO sessions (id, agent_group_id, messaging_group_id, thread_id, status, container_status, last_active, created_at) VALUES (?, ?, ?, ?, 'active', 'stopped', NULL, ?)",
+        )
+        .run(id, 'ag-thread', mg, tid, now);
+    sess('sess-dash-root', 'mg-dash', null);
+    sess('sess-dash-t1', 'mg-dash', 't1');
+    sess('sess-dash-t2', 'mg-dash', 't2');
+    sess('sess-slack-root', 'mg-slack', null);
+
+    // Seed one or two messages per session's inbound.db (the /api/messages
+    // handler also reads outbound.db but inbound is enough to exercise the
+    // filter). Each row carries a thread_id matching the session.
+    const seedInbound = (sid: string, msgs: Array<{ id: string; thread_id: string | null; text: string }>) => {
+      const sessDir = path.join(DATA_DIR, 'v2-sessions', 'ag-thread', sid);
+      mkdirSync(sessDir, { recursive: true });
+      const inDb = new Database(path.join(sessDir, 'inbound.db'));
+      inDb.exec(
+        `CREATE TABLE messages_in (id TEXT PRIMARY KEY, kind TEXT, content TEXT, timestamp TEXT, channel_type TEXT, platform_id TEXT, thread_id TEXT);
+         CREATE TABLE delivered (message_out_id TEXT PRIMARY KEY, platform_message_id TEXT, status TEXT);`,
+      );
+      const ins = inDb.prepare(
+        "INSERT INTO messages_in (id, kind, content, timestamp, channel_type, platform_id, thread_id) VALUES (?, 'chat', ?, ?, ?, ?, ?)",
+      );
+      let i = 0;
+      for (const m of msgs) {
+        const ts = new Date(Date.parse(now) + ++i * 1000).toISOString();
+        ins.run(m.id, JSON.stringify({ text: m.text }), ts, 'dashboard', 'dashboard:thread-agent', m.thread_id);
+      }
+      inDb.close();
+    };
+    seedInbound('sess-dash-root', [{ id: 'dash-root-1', thread_id: null, text: 'root msg 1' }]);
+    seedInbound('sess-dash-t1', [
+      { id: 'dash-t1-a', thread_id: 't1', text: 'thread t1 reply 1' },
+      { id: 'dash-t1-b', thread_id: 't1', text: 'thread t1 reply 2' },
+    ]);
+    seedInbound('sess-dash-t2', [{ id: 'dash-t2-a', thread_id: 't2', text: 'thread t2 reply' }]);
+    // Slack root uses slack channel_type — its rows must never surface in
+    // the dashboard /api/messages response regardless of thread_id.
+    {
+      const sessDir = path.join(DATA_DIR, 'v2-sessions', 'ag-thread', 'sess-slack-root');
+      mkdirSync(sessDir, { recursive: true });
+      const inDb = new Database(path.join(sessDir, 'inbound.db'));
+      inDb.exec(
+        `CREATE TABLE messages_in (id TEXT PRIMARY KEY, kind TEXT, content TEXT, timestamp TEXT, channel_type TEXT, platform_id TEXT, thread_id TEXT);
+         CREATE TABLE delivered (message_out_id TEXT PRIMARY KEY, platform_message_id TEXT, status TEXT);`,
+      );
+      inDb
+        .prepare(
+          "INSERT INTO messages_in (id, kind, content, timestamp, channel_type, platform_id, thread_id) VALUES (?, 'chat', ?, ?, 'slack', 'slack:C123', NULL)",
+        )
+        .run('slack-root-1', JSON.stringify({ text: 'slack root msg' }), now);
+      inDb.close();
+    }
+
+    db.close();
+    forceOpenDbForTests();
+  }
+
+  it('main view returns only the dashboard-channel root session (no threads, no cross-channel leak)', async () => {
+    seedThreadScenario();
+    const res = await fetch(`${baseUrl}/api/messages?group=thread-agent&limit=50`);
+    expect(res.status).toBe(200);
+    const data = (await res.json()) as { messages: any[] };
+    const ids = data.messages.map((m) => m.id).sort();
+    expect(ids).toEqual(['dash-root-1']);
+    // Thread rows stay out of the main view.
+    expect(ids).not.toContain('dash-t1-a');
+    expect(ids).not.toContain('dash-t2-a');
+    // Slack root stays out — its thread_id could otherwise collide with a
+    // dashboard thread_id, and it also wouldn't belong in the dashboard's
+    // Slack-style per-channel view.
+    expect(ids).not.toContain('slack-root-1');
+  });
+
+  it('thread view returns only that thread\'s messages', async () => {
+    seedThreadScenario();
+    const res = await fetch(`${baseUrl}/api/messages?group=thread-agent&thread_id=t1&limit=50`);
+    expect(res.status).toBe(200);
+    const data = (await res.json()) as { messages: any[] };
+    const ids = data.messages.map((m) => m.id).sort();
+    expect(ids).toEqual(['dash-t1-a', 'dash-t1-b']);
+    // The other thread + root + Slack must not bleed in.
+    expect(ids).not.toContain('dash-t2-a');
+    expect(ids).not.toContain('dash-root-1');
+    expect(ids).not.toContain('slack-root-1');
+  });
+
+  it('main view response includes threadSummaries for every per-thread session', async () => {
+    seedThreadScenario();
+    const res = await fetch(`${baseUrl}/api/messages?group=thread-agent&limit=50`);
+    const data = (await res.json()) as { threadSummaries: Record<string, { replyCount: number; lastReplyTs: string | null }> };
+    expect(data.threadSummaries).toBeDefined();
+    expect(Object.keys(data.threadSummaries).sort()).toEqual(['t1', 't2']);
+    expect(data.threadSummaries.t1.replyCount).toBe(2);
+    expect(data.threadSummaries.t2.replyCount).toBe(1);
+    expect(typeof data.threadSummaries.t1.lastReplyTs).toBe('string');
   });
 });

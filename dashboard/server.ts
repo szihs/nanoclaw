@@ -71,6 +71,31 @@ function getDbPath(): string {
 function getGroupsDir(): string {
   return resolve(process.env.NANOCLAW_DASHBOARD_GROUPS_DIR || join(getProjectRoot(), 'groups'));
 }
+/**
+ * Find the dashboard messaging_group row for a coworker. Primary lookup by
+ * canonical platform_id ('dashboard:<folder>'); fallback joins via
+ * messaging_group_agents for older rows that use a non-canonical
+ * platform_id. Returns null if the coworker has no dashboard wiring.
+ */
+function resolveDashboardMessagingGroupId(
+  db: Database.Database,
+  agentGroupId: string,
+  folder: string,
+): string | null {
+  const primary = db
+    .prepare(
+      "SELECT id FROM messaging_groups WHERE channel_type = 'dashboard' AND platform_id = ?",
+    )
+    .get(`dashboard:${folder}`) as { id: string } | undefined;
+  if (primary?.id) return primary.id;
+  const fallback = db
+    .prepare(
+      "SELECT mg.id AS id FROM messaging_groups mg JOIN messaging_group_agents mga ON mga.messaging_group_id = mg.id WHERE mga.agent_group_id = ? AND mg.channel_type = 'dashboard' LIMIT 1",
+    )
+    .get(agentGroupId) as { id: string } | undefined;
+  return fallback?.id ?? null;
+}
+
 function toSqliteDatetime(iso: string | null | undefined): string | null {
   if (!iso) return null;
   return iso.replace('T', ' ').replace(/\.\d{3}Z$/, '').replace(/Z$/, '');
@@ -624,13 +649,22 @@ export function ensureDashboardChatWiring(
       .run(mg.id, platformId, group.name, now);
   }
 
+  // Dashboard wirings use per-thread sessions so each Slack-style thread
+  // spawns its own isolated agent session. Upgrade existing rows in-place;
+  // first /api/chat/send after deploy self-heals pre-existing 'shared' rows.
+  wdb
+    .prepare(
+      "UPDATE messaging_group_agents SET session_mode = 'per-thread' WHERE messaging_group_id = ? AND agent_group_id = ? AND session_mode <> 'per-thread'",
+    )
+    .run(mg.id, group.id);
+
   const existingMga = wdb
     .prepare('SELECT 1 FROM messaging_group_agents WHERE messaging_group_id = ? AND agent_group_id = ? LIMIT 1')
     .get(mg.id, group.id);
   if (!existingMga) {
     wdb
       .prepare(
-        "INSERT INTO messaging_group_agents (id, messaging_group_id, agent_group_id, engage_mode, engage_pattern, sender_scope, session_mode, priority, created_at) VALUES (?, ?, ?, 'always', ?, 'all', 'shared', 0, ?)",
+        "INSERT INTO messaging_group_agents (id, messaging_group_id, agent_group_id, engage_mode, engage_pattern, sender_scope, session_mode, priority, created_at) VALUES (?, ?, ?, 'always', ?, 'all', 'per-thread', 0, ?)",
       )
       .run(
         `mga-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
@@ -3858,6 +3892,13 @@ export async function handleRequest(
     if (!requireAuth(req, res)) return;
     const group = url.searchParams.get('group');
     const limit = Math.min(parseInt(url.searchParams.get('limit') || '200', 10), 500);
+    // Slack-style thread filter. Absent → main view (root sessions only,
+    // rows with thread_id IS NULL). Present → thread view (the single
+    // per-thread session keyed on thread_id). `threadSummaries` is only
+    // emitted in main view.
+    const threadIdParam = url.searchParams.get('thread_id');
+    const threadMode = threadIdParam !== null && threadIdParam.length > 0;
+    const threadFilter = threadMode ? threadIdParam : null;
     // System/protocol traffic (CLAUDE.md refresh pings, agent-to-agent
     // acks) lives in the same inbound/outbound tables as real user chat and
     // clutters the channel view. Hidden by default for the single-coworker
@@ -3874,6 +3915,10 @@ export async function handleRequest(
     const coworkerNameById = new Map<string, string>();
     let messages: any[] = [];
     const hasMore = false;
+    // Per-agent-group thread summaries: { [parentMessageId]: { replyCount, lastReplyTs } }.
+    // Only populated in main view; the client uses it to render
+    // "↳ N replies" stubs under parent messages.
+    const threadSummaries: Record<string, { replyCount: number; lastReplyTs: string | null }> = {};
     if (db) {
       try {
         try {
@@ -3888,10 +3933,86 @@ export async function handleRequest(
           : (db.prepare('SELECT id, folder FROM agent_groups').all() as any[]);
         const perGroupLimit = group ? limit : Math.ceil(limit / Math.max(agRows.length, 1));
         for (const agRow of agRows) {
-          const sessions = db
-            .prepare("SELECT id FROM sessions WHERE agent_group_id = ? AND status = 'active'")
-            .all(agRow.id) as { id: string }[];
+          // Scope all dashboard /api/messages queries to this coworker's
+          // dashboard messaging_group. Without this, messages from other
+          // channels (Slack, Discord, email) leak into the dashboard view,
+          // because they share the same agent_group and can share
+          // thread_id values (Slack's thread_ts, Discord's thread id).
+          //
+          // If we can't resolve a dashboard messaging group (test fixture
+          // that predates dashboard wiring, misconfigured install), fall
+          // back to the agent-scoped lookup so the endpoint still returns
+          // results rather than going silent.
+          const dashMgId = resolveDashboardMessagingGroupId(db, agRow.id, agRow.folder);
+
+          let sessions: { id: string; thread_id: string | null }[];
+          if (threadMode) {
+            sessions = dashMgId
+              ? (db
+                  .prepare(
+                    "SELECT id, thread_id FROM sessions WHERE agent_group_id = ? AND messaging_group_id = ? AND status = 'active' AND thread_id = ?",
+                  )
+                  .all(agRow.id, dashMgId, threadFilter) as { id: string; thread_id: string | null }[])
+              : (db
+                  .prepare(
+                    "SELECT id, thread_id FROM sessions WHERE agent_group_id = ? AND status = 'active' AND thread_id = ?",
+                  )
+                  .all(agRow.id, threadFilter) as { id: string; thread_id: string | null }[]);
+          } else {
+            sessions = dashMgId
+              ? (db
+                  .prepare(
+                    "SELECT id, thread_id FROM sessions WHERE agent_group_id = ? AND messaging_group_id = ? AND status = 'active' AND thread_id IS NULL",
+                  )
+                  .all(agRow.id, dashMgId) as { id: string; thread_id: string | null }[])
+              : (db
+                  .prepare(
+                    "SELECT id, thread_id FROM sessions WHERE agent_group_id = ? AND status = 'active' AND thread_id IS NULL",
+                  )
+                  .all(agRow.id) as { id: string; thread_id: string | null }[]);
+          }
           const sessionsDir = join(getDataDir(), 'v2-sessions', agRow.id);
+
+          // Main-view summaries: scan this coworker's per-thread sessions
+          // scoped to the dashboard messaging group (so Slack/Discord
+          // thread sessions never surface as clickable dashboard summary
+          // stubs). Per-thread session DBs hold replies only — the parent
+          // message lives in the root session. If we ever mirror parents
+          // into thread DBs this count is off-by-one and needs WHERE id
+          // != parentId.
+          if (!threadMode && dashMgId) {
+            let threadSessions: Array<{ id: string; thread_id: string }> = [];
+            try {
+              threadSessions = db
+                .prepare(
+                  "SELECT id, thread_id FROM sessions WHERE agent_group_id = ? AND messaging_group_id = ? AND status = 'active' AND thread_id IS NOT NULL",
+                )
+                .all(agRow.id, dashMgId) as Array<{ id: string; thread_id: string }>;
+            } catch { /* ignore */ }
+            for (const ts of threadSessions) {
+              let count = 0;
+              let lastTs: string | null = null;
+              for (const file of ['inbound.db', 'outbound.db']) {
+                const p = join(sessionsDir, ts.id, file);
+                if (!existsSync(p)) continue;
+                try {
+                  const sdb = new Database(p, { readonly: true });
+                  try {
+                    const table = file === 'inbound.db' ? 'messages_in' : 'messages_out';
+                    const row = sdb
+                      .prepare(`SELECT COUNT(*) AS n, MAX(timestamp) AS ts FROM ${table}`)
+                      .get() as { n: number; ts: string | null };
+                    count += row.n || 0;
+                    if (row.ts && (!lastTs || row.ts > lastTs)) lastTs = row.ts;
+                  } catch { /* ignore */ }
+                  sdb.close();
+                } catch { /* ignore */ }
+              }
+              if (count > 0) {
+                threadSummaries[ts.thread_id] = { replyCount: count, lastReplyTs: lastTs };
+              }
+            }
+          }
           for (const sess of sessions) {
             const inDbPath = join(sessionsDir, sess.id, 'inbound.db');
             const outDbPath = join(sessionsDir, sess.id, 'outbound.db');
@@ -3915,14 +4036,30 @@ export async function handleRequest(
                 let rows: any[];
                 try {
                   rows = sdb
-                    .prepare('SELECT id, kind, content, timestamp, channel_type, platform_id FROM messages_in ORDER BY timestamp DESC LIMIT ?')
+                    .prepare('SELECT id, kind, content, timestamp, channel_type, platform_id, thread_id FROM messages_in ORDER BY timestamp DESC LIMIT ?')
                     .all(perGroupLimit) as any[];
                 } catch {
-                  rows = sdb
-                    .prepare('SELECT id, kind, content, timestamp FROM messages_in ORDER BY timestamp DESC LIMIT ?')
-                    .all(perGroupLimit) as any[];
+                  // Older session DBs without thread_id — fall back but keep
+                  // channel_type/platform_id so a2a detection still works.
+                  try {
+                    rows = sdb
+                      .prepare('SELECT id, kind, content, timestamp, channel_type, platform_id FROM messages_in ORDER BY timestamp DESC LIMIT ?')
+                      .all(perGroupLimit) as any[];
+                  } catch {
+                    rows = sdb
+                      .prepare('SELECT id, kind, content, timestamp FROM messages_in ORDER BY timestamp DESC LIMIT ?')
+                      .all(perGroupLimit) as any[];
+                  }
                 }
                 for (const r of rows) {
+                  // Row-level thread filter as correctness belt to the
+                  // session-level filter above — defends against legacy rows
+                  // in a session whose scope later changed.
+                  if (threadMode) {
+                    if (r.thread_id !== threadFilter) continue;
+                  } else {
+                    if (r.thread_id != null) continue;
+                  }
                   // Agent-to-agent: a2a-* with channel_type='agent' and a
                   // platform_id that resolves to a real agent_group is a legit
                   // inbound message from another coworker — show it with the
@@ -3951,14 +4088,25 @@ export async function handleRequest(
                 let rows: any[];
                 try {
                   rows = sdb
-                    .prepare('SELECT id, kind, content, timestamp, in_reply_to, channel_type, platform_id FROM messages_out ORDER BY timestamp DESC LIMIT ?')
+                    .prepare('SELECT id, kind, content, timestamp, in_reply_to, channel_type, platform_id, thread_id FROM messages_out ORDER BY timestamp DESC LIMIT ?')
                     .all(perGroupLimit) as any[];
                 } catch {
-                  rows = sdb
-                    .prepare('SELECT id, kind, content, timestamp, in_reply_to FROM messages_out ORDER BY timestamp DESC LIMIT ?')
-                    .all(perGroupLimit) as any[];
+                  try {
+                    rows = sdb
+                      .prepare('SELECT id, kind, content, timestamp, in_reply_to, channel_type, platform_id FROM messages_out ORDER BY timestamp DESC LIMIT ?')
+                      .all(perGroupLimit) as any[];
+                  } catch {
+                    rows = sdb
+                      .prepare('SELECT id, kind, content, timestamp, in_reply_to FROM messages_out ORDER BY timestamp DESC LIMIT ?')
+                      .all(perGroupLimit) as any[];
+                  }
                 }
                 for (const r of rows) {
+                  if (threadMode) {
+                    if (r.thread_id !== threadFilter) continue;
+                  } else {
+                    if (r.thread_id != null) continue;
+                  }
                   // Outbound directed at another coworker: channel_type='agent'
                   // and platform_id resolves to a real agent_group. Mark with
                   // recipient info so the client can render a "→ @coworker"
@@ -4022,7 +4170,7 @@ export async function handleRequest(
       }
     }
     res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ messages, hasMore }));
+    res.end(JSON.stringify({ messages, hasMore, threadSummaries }));
     return;
   }
 
@@ -6857,11 +7005,30 @@ export async function handleRequest(
     const body = await readBody(req, res);
     if (body === null) return;
     try {
-      const { group, content } = JSON.parse(body);
+      const { group, content, thread_id } = JSON.parse(body);
       if (!group || !content) {
         res.writeHead(400, { 'Content-Type': 'application/json' });
         res.end('{"error":"group and content required"}');
         return;
+      }
+      // Pass-through validation: ingress does the authoritative check,
+      // but we fail fast here so the public dashboard endpoint rejects
+      // garbage before the host bridge round-trip. Rules mirror ingress:
+      //   string or null/undefined; trim; empty → null; cap at 200 chars.
+      let threadIdOut: string | null = null;
+      if (thread_id !== undefined && thread_id !== null) {
+        if (typeof thread_id !== 'string') {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end('{"error":"thread_id must be a string"}');
+          return;
+        }
+        const trimmed = thread_id.trim();
+        if (trimmed.length > 200) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end('{"error":"thread_id too long (max 200 chars)"}');
+          return;
+        }
+        threadIdOut = trimmed.length > 0 ? trimmed : null;
       }
 
       const wdb = getWriteDb();
@@ -6888,7 +7055,7 @@ export async function handleRequest(
         const upstream = await fetch(`${getDashboardIngressBaseUrl()}/api/dashboard/inbound`, {
           method: 'POST',
           headers,
-          body: JSON.stringify({ group, content }),
+          body: JSON.stringify({ group, content, thread_id: threadIdOut }),
           signal: AbortSignal.timeout(5000),
         });
         const upstreamText = await upstream.text();
