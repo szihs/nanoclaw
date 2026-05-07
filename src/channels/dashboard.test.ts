@@ -27,25 +27,22 @@ describe('dashboard channel adapter', () => {
     expect(getRegisteredChannelNames()).toContain('dashboard');
   });
 
-  it('advertises channelType=dashboard and supportsThreads=false', async () => {
+  it('advertises channelType=dashboard and supportsThreads=true', async () => {
     const { registerChannelAdapter } = await import('./channel-registry.js');
-    // Re-import the adapter module so the side-effect register runs against
-    // the freshly reset registry.
     await import('./dashboard.js');
 
-    // Can't grab the adapter before initChannelAdapters; so we look at the
-    // registration by exercising the factory directly via registerChannelAdapter.
-    // Easier: invoke initChannelAdapters with a no-op setup, then fetch.
     const { initChannelAdapters, getChannelAdapter } = await import('./channel-registry.js');
     await initChannelAdapters(noopSetup);
 
     const adapter = getChannelAdapter('dashboard');
     expect(adapter).toBeDefined();
     expect(adapter!.channelType).toBe('dashboard');
-    expect(adapter!.supportsThreads).toBe(false);
+    // supportsThreads=true is required: router.ts line ~148 nulls threadId
+    // for any adapter advertising false, which collapses per-thread sessions
+    // back into the root session (breaks Slack-style dashboard threads).
+    expect(adapter!.supportsThreads).toBe(true);
     expect(adapter!.isConnected()).toBe(true);
 
-    // Silence unused-import warning.
     void registerChannelAdapter;
   });
 
