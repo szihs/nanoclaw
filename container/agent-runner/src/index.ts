@@ -115,7 +115,41 @@ async function main(): Promise<void> {
     codex: {
       command: 'codex',
       args: codexArgs,
-      env: {},
+      // Scope-narrow env for the `codex mcp-server` subprocess.
+      //
+      // Why NVIDIA_API_KEY has to be forwarded — even though OneCLI ought
+      // to handle auth transparently:
+      //
+      // OneCLI's HTTPS proxy DOES swap secrets transparently at the TLS
+      // layer (the value here is usually `onecli-placeholder`, not a real
+      // token — the real secret never enters the container). BUT codex-cli
+      // validates `model_providers.<p>.env_key` at SESSION START — before
+      // any HTTP call is attempted. If the named env var is undefined it
+      // errors `Missing environment variable: NVIDIA_API_KEY` and the
+      // subprocess exits before OneCLI gets a chance to inject. The
+      // var must therefore be *defined* in the child env (placeholder is
+      // fine); OneCLI will rewrite the Authorization header on the way out.
+      //
+      // Verified empirically 2026-05-07 via `codex exec` A/B test:
+      //   - without the var → codex errors at startup
+      //   - with `onecli-placeholder` → request reaches nvinference, OneCLI
+      //     swaps credentials, succeeds.
+      //
+      // HOME + PATH are minimal subprocess runtime needs. Proxy/cert vars
+      // are forwarded so the OneCLI trust chain stays intact.
+      // OPENAI_API_KEY is intentionally NOT forwarded — codex is routed
+      // through nvinference per the deployment's credential policy.
+      env: (() => {
+        const e: Record<string, string> = {
+          HOME: process.env.HOME ?? '/home/node',
+          PATH: process.env.PATH ?? '',
+        };
+        if (process.env.NVIDIA_API_KEY) e.NVIDIA_API_KEY = process.env.NVIDIA_API_KEY;
+        for (const k of ['HTTPS_PROXY', 'HTTP_PROXY', 'NO_PROXY', 'SSL_CERT_FILE', 'SSL_CERT_DIR', 'NODE_EXTRA_CA_CERTS']) {
+          if (process.env[k]) e[k] = process.env[k] as string;
+        }
+        return e;
+      })(),
     },
   };
 
@@ -161,7 +195,13 @@ async function main(): Promise<void> {
         Accept: 'application/json, text/event-stream',
       };
       if (process.env.MCP_PROXY_TOKEN) {
+        // Claude SDK-native: plaintext Authorization header
         headers.Authorization = `Bearer ${process.env.MCP_PROXY_TOKEN}`;
+        // Codex-friendly: env-var indirection so the token isn't written
+        // into ~/.codex/config.toml as plaintext. Codex emits
+        // `bearer_token_env_var = "MCP_PROXY_TOKEN"` and reads from the
+        // subprocess env (forwarded below) at request time.
+        serverConfig.bearerTokenEnvVar = 'MCP_PROXY_TOKEN';
       }
       serverConfig.headers = headers;
       mcpServers[serverName] = serverConfig as any;

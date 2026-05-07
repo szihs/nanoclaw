@@ -529,10 +529,49 @@ export async function startCodexTurn(server: AppServer, params: TurnParams): Pro
 // We rewrite it on every spawn from whatever mcpServers the agent-runner
 // passes in, so the container's config reflects the current host wiring.
 
-export interface CodexMcpServer {
-  command: string;
-  args?: string[];
-  env?: Record<string, string>;
+/**
+ * Codex MCP server config — stdio OR http.
+ *
+ * Codex config.toml discriminates on presence of `command` (stdio) vs `url`
+ * (streamable HTTP). There is no explicit `type = "stdio"|"http"` field per
+ * https://developers.openai.com/codex/config-reference.
+ *
+ * Accepts a superset of fields because the same record is passed to both
+ * Claude and Codex providers. Claude-SDK-native fields (`type`, `headers`)
+ * are accepted; codex-only fields (`bearerTokenEnvVar`, `envHttpHeaders`,
+ * `httpHeaders`) win when present to keep secrets out of TOML.
+ */
+export type CodexMcpServer =
+  | {
+      /** stdio transport */
+      command: string;
+      args?: string[];
+      env?: Record<string, string>;
+    }
+  | {
+      /** http (streamable) transport */
+      type?: 'http';
+      url: string;
+      /**
+       * Claude-SDK-native static headers. Serialized as
+       * `[mcp_servers.<name>.http_headers]` EXCEPT when
+       * `bearerTokenEnvVar` is also set — then the Authorization header
+       * is dropped from the plaintext block (codex reads the token from
+       * env at request time instead).
+       */
+      headers?: Record<string, string>;
+      /** Preferred codex-only static headers (wins over `headers`). */
+      httpHeaders?: Record<string, string>;
+      /** Header-name → env-var-name. Renders as `[env_http_headers]`. */
+      envHttpHeaders?: Record<string, string>;
+      /** Env-var containing a bearer token. Renders as `bearer_token_env_var = "..."`. */
+      bearerTokenEnvVar?: string;
+    };
+
+function isHttpServer(
+  s: CodexMcpServer,
+): s is Extract<CodexMcpServer, { url: string }> {
+  return typeof (s as { url?: unknown }).url === 'string';
 }
 
 export function writeCodexMcpConfigToml(
@@ -580,9 +619,53 @@ export function writeCodexMcpConfigToml(
     lines.push('');
   }
 
+  let writtenCount = 0;
   for (const [name, config] of Object.entries(servers)) {
+    if (isHttpServer(config)) {
+      // Streamable HTTP transport. Codex config keys:
+      //   url, bearer_token_env_var, http_headers, env_http_headers
+      // (per https://developers.openai.com/codex/config-reference — no
+      // `type` or `[...headers]` literal keys).
+      if (!config.url) {
+        log(`MCP ${name}: missing url on http server spec — skipping`);
+        continue;
+      }
+      lines.push(`[mcp_servers.${name}]`);
+      lines.push(`url = ${tomlBasicString(config.url)}`);
+      if (config.bearerTokenEnvVar) {
+        lines.push(`bearer_token_env_var = ${tomlBasicString(config.bearerTokenEnvVar)}`);
+      }
+      // Effective static headers: prefer `httpHeaders`, else fall back to
+      // Claude-SDK-native `headers`. When `bearerTokenEnvVar` is set,
+      // strip Authorization from BOTH sources — bearer-env wins.
+      const rawHeaders = config.httpHeaders ?? config.headers ?? {};
+      const effectiveHeaders: Record<string, string> = {};
+      for (const [key, value] of Object.entries(rawHeaders)) {
+        if (config.bearerTokenEnvVar && key.toLowerCase() === 'authorization') continue;
+        effectiveHeaders[key] = value;
+      }
+      if (Object.keys(effectiveHeaders).length > 0) {
+        lines.push(`[mcp_servers.${name}.http_headers]`);
+        for (const [key, value] of Object.entries(effectiveHeaders)) {
+          lines.push(`${key} = ${tomlBasicString(value)}`);
+        }
+      }
+      if (config.envHttpHeaders && Object.keys(config.envHttpHeaders).length > 0) {
+        lines.push(`[mcp_servers.${name}.env_http_headers]`);
+        for (const [key, varName] of Object.entries(config.envHttpHeaders)) {
+          lines.push(`${key} = ${tomlBasicString(varName)}`);
+        }
+      }
+      lines.push('');
+      writtenCount++;
+      continue;
+    }
+    // stdio transport
+    if (!config.command) {
+      log(`MCP ${name}: missing command on stdio server spec — skipping`);
+      continue;
+    }
     lines.push(`[mcp_servers.${name}]`);
-    lines.push('type = "stdio"');
     lines.push(`command = ${tomlBasicString(config.command)}`);
     if (config.args && config.args.length > 0) {
       const argsStr = config.args.map(tomlBasicString).join(', ');
@@ -595,10 +678,14 @@ export function writeCodexMcpConfigToml(
       }
     }
     lines.push('');
+    writtenCount++;
   }
 
   fs.writeFileSync(configTomlPath, lines.join('\n'));
-  log(`Wrote MCP config.toml (${Object.keys(servers).length} server(s), ${trustPaths.length} trusted project(s))`);
+  // `writeFileSync({mode})` only applies on file creation — existing files
+  // retain their prior mode. chmodSync unconditionally forces 0600.
+  fs.chmodSync(configTomlPath, 0o600);
+  log(`Wrote MCP config.toml (${writtenCount}/${Object.keys(servers).length} server(s), ${trustPaths.length} trusted project(s))`);
 }
 
 export function createCodexConfigOverrides(): string[] {
