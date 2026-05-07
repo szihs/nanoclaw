@@ -351,10 +351,10 @@ function renderAttachments(attachments) {
     if (!att || !att.url || !att.name) return '';
     if (att.isImage) {
       return `<a href="${escAttr(att.url)}" target="_blank" rel="noopener" style="display:block;margin-top:6px">
-        <img src="${escAttr(att.url)}" alt="${escAttr(att.name)}" style="max-width:100%;max-height:200px;border-radius:8px;border:1px solid rgba(255,255,255,0.12);object-fit:cover" />
+        <img src="${escAttr(att.url)}" alt="${escAttr(att.name)}" style="max-width:100%;max-height:200px;border-radius:8px;border:1px solid var(--hl-hover);object-fit:cover" />
       </a>`;
     }
-    return `<a href="${escAttr(att.url)}" target="_blank" rel="noopener" style="display:inline-flex;align-items:center;gap:6px;padding:6px 10px;border:1px solid rgba(255,255,255,0.14);border-radius:8px;text-decoration:none;color:inherit;margin-top:6px;font-size:11px">📎 ${esc(att.name)}</a>`;
+    return `<a href="${escAttr(att.url)}" target="_blank" rel="noopener" style="display:inline-flex;align-items:center;gap:6px;padding:6px 10px;border:1px solid var(--hl-hover);border-radius:8px;text-decoration:none;color:inherit;margin-top:6px;font-size:11px">📎 ${esc(att.name)}</a>`;
   }).filter(Boolean);
   return items.length > 0 ? `<div style="margin-top:4px">${items.join('')}</div>` : '';
 }
@@ -405,7 +405,7 @@ function renderCwMessages() {
     const text = m.displayContent || m.content || '';
     const attachHtml = renderAttachments(m.attachments);
     const isSystem = m.kind === 'task' || m.kind === 'system';
-    const kindLabel = m.kind && m.kind !== 'chat' ? ` <span style="font-size:7px;color:#999;font-style:italic">${esc(m.kind)}</span>` : '';
+    const kindLabel = m.kind && m.kind !== 'chat' ? ` <span style="font-size:7px;color:var(--text-muted);font-style:italic">${esc(m.kind)}</span>` : '';
     const systemCls = isSystem ? ' m-msg-system' : '';
 
     if (m.cardType === 'ask_question' && m.questionId && m.options && m.options.length > 0) {
@@ -425,7 +425,7 @@ function renderCwMessages() {
       </div>`;
     }
 
-    const bubbleBody = `${text ? (isOutgoing ? md(text) : esc(text)) : '<span style="color:#9ca3af">(empty)</span>'}${attachHtml}`;
+    const bubbleBody = `${text ? (isOutgoing ? md(text) : esc(text)) : '<span style="color:var(--text-muted)">(empty)</span>'}${attachHtml}`;
     return `<div class="m-msg ${cls}${systemCls}">
       <div class="m-msg-bubble">${bubbleBody}</div>
       <div class="m-msg-time">${time}${kindLabel}</div>
@@ -692,6 +692,25 @@ function updateTabBadges() {
   if (listBadge) listBadge.style.display = anyUnread ? 'block' : 'none';
   if (chatBadge) chatBadge.style.display = totalApprovals > 0 ? 'block' : 'none';
 }
+
+// --- Theme toggle ---
+(function() {
+  const themeBtn = document.getElementById('m-theme-toggle');
+  function setTheme(t) {
+    if (t === 'light') document.documentElement.setAttribute('data-theme', 'light');
+    else document.documentElement.removeAttribute('data-theme');
+    if (themeBtn) themeBtn.textContent = t === 'light' ? '☀️' : '🌙';
+    try { localStorage.setItem('nanoclaw-theme', t); } catch (e) {}
+    document.dispatchEvent(new CustomEvent('theme-change', { detail: t }));
+  }
+  const initial = (function() {
+    try { return localStorage.getItem('nanoclaw-theme') || 'dark'; } catch (e) { return 'dark'; }
+  })();
+  setTheme(initial);
+  themeBtn?.addEventListener('click', () => {
+    setTheme(document.documentElement.getAttribute('data-theme') === 'light' ? 'dark' : 'light');
+  });
+})();
 
 // --- Init ---
 (async function init() {

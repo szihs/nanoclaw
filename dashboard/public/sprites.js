@@ -211,7 +211,11 @@ function getCached(source, zoom) {
 
 const outlineCache = new Map();
 
-/** Generate a 1px white outline around opaque pixels. */
+if (typeof document !== 'undefined') {
+  document.addEventListener('theme-change', () => { outlineCache.clear(); });
+}
+
+/** Generate a 1px outline around opaque pixels, colored per current theme. */
 function getOutlineSprite(source, zoom) {
   if (!source) return null;
   const sw = source.width || source.naturalWidth;
@@ -230,7 +234,7 @@ function getOutlineSprite(source, zoom) {
   const c = document.createElement('canvas');
   c.width = ow * zoom; c.height = oh * zoom;
   const ctx = c.getContext('2d');
-  ctx.fillStyle = '#FFFFFF';
+  ctx.fillStyle = getComputedStyle(document.documentElement).getPropertyValue('--outline-stroke').trim() || '#FFFFFF';
   for (let y = 0; y < sh; y++) {
     for (let x = 0; x < sw; x++) {
       if (data[(y * sw + x) * 4 + 3] > 16) continue;

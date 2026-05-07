@@ -749,22 +749,26 @@ function mapSubagentColor(agentType) {
   return SUBAGENT_TYPE_COLORS[agentType] || SUBAGENT_TYPE_COLORS.default;
 }
 
+function cueColor(name) {
+  const v = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+  return v || '#10b981';
+}
 function getActorCue(notification, anim) {
   const n = (notification || '').toLowerCase();
   if (!n) {
     if (anim?.startCueUntil && Date.now() < anim.startCueUntil) {
-      return { label: '[x]', color: '#10b981', text: 'Started' };
+      return { label: '[x]', color: cueColor('--status-working'), text: 'Started' };
     }
     return null;
   }
   if (/(approval|permission|confirm|allow this|allow access|accept)/.test(n)) {
-    return { label: '?', color: '#f59e0b', text: 'Approval needed' };
+    return { label: '?', color: cueColor('--status-thinking'), text: 'Approval needed' };
   }
   if (/(waiting|input required|awaiting|need input|paused)/.test(n)) {
-    return { label: '...', color: '#3b82f6', text: 'Waiting' };
+    return { label: '...', color: cueColor('--status-active'), text: 'Waiting' };
   }
   if (/(blocked|failed|error|denied)/.test(n)) {
-    return { label: '!', color: '#ef4444', text: 'Blocked' };
+    return { label: '!', color: cueColor('--status-error'), text: 'Blocked' };
   }
   return null;
 }
@@ -1369,7 +1373,7 @@ let _lastOx = 0, _lastOy = 0, _lastScale = 1;
 
 // --- Canvas tooltip ---
 const canvasTooltip = document.createElement('div');
-canvasTooltip.style.cssText = 'position:absolute;display:none;pointer-events:none;background:#0f172aEE;border:1px solid #475569;border-radius:4px;padding:5px 8px;font-size:10px;color:#E2E8F0;font-family:"Courier New",monospace;white-space:nowrap;z-index:100;line-height:1.5';
+canvasTooltip.style.cssText = 'position:absolute;display:none;pointer-events:none;background:var(--tooltip-bg);border:1px solid var(--tooltip-border);border-radius:4px;padding:5px 8px;font-size:10px;color:var(--text);font-family:"Courier New",monospace;white-space:nowrap;z-index:100;line-height:1.5';
 canvas.parentElement.style.position = 'relative';
 canvas.parentElement.appendChild(canvasTooltip);
 
@@ -1378,6 +1382,25 @@ document.getElementById('legend-toggle')?.addEventListener('click', () => {
   const legend = document.getElementById('office-legend');
   if (legend) legend.style.display = legend.style.display === 'none' ? 'block' : 'none';
 });
+
+// --- Theme toggle ---
+(function() {
+  const themeBtn = document.getElementById('theme-toggle');
+  function setTheme(t) {
+    if (t === 'light') document.documentElement.setAttribute('data-theme', 'light');
+    else document.documentElement.removeAttribute('data-theme');
+    if (themeBtn) themeBtn.textContent = t === 'light' ? '☀️' : '🌙';
+    try { localStorage.setItem('nanoclaw-theme', t); } catch (e) {}
+    document.dispatchEvent(new CustomEvent('theme-change', { detail: t }));
+  }
+  const initial = (function() {
+    try { return localStorage.getItem('nanoclaw-theme') || 'dark'; } catch (e) { return 'dark'; }
+  })();
+  setTheme(initial);
+  themeBtn?.addEventListener('click', () => {
+    setTheme(document.documentElement.getAttribute('data-theme') === 'light' ? 'dark' : 'light');
+  });
+})();
 
 // --- Mouse ---
 //
