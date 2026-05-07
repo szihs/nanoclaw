@@ -3482,6 +3482,13 @@ function renderCwMessages() {
   const wasAtBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 60;
   const approvalHtml = (cwState.pendingApprovals || []).map(renderApprovalItem).join('');
   const credentialHtml = (cwState.pendingCredentials || []).map(renderCredentialItem).join('');
+  // Current coworker's agent_group_id — used to detect a self-addressed a2a
+  // outbound (the agent called send_message with itself as target). Those
+  // are legitimate status narrations ("Spawning slang-reader now…") and we
+  // want to keep them visible, but the default "orchestrator → @Orchestrator"
+  // label reads like a conversation between two strangers. Render them as a
+  // muted "· note" instead.
+  const selfAgentGroupId = (state.registeredGroups || []).find((g) => g.folder === cwState.selected)?.id || null;
   const messageHtml = cwState.messages.map((m) => {
     const isOutgoing = m.direction === 'outgoing';
     // Agent-to-agent styling: inbound from another coworker gets its own class
@@ -3489,6 +3496,7 @@ function renderCwMessages() {
     // card pattern so the operator can tell at a glance "this didn't come from me".
     const isFromCoworker = !isOutgoing && m.senderKind === 'coworker';
     const isToCoworker = isOutgoing && m.recipientKind === 'coworker';
+    const isSelfNote = isOutgoing && m.channel_type === 'agent' && !!selfAgentGroupId && m.platform_id === selfAgentGroupId;
     const cls = isFromCoworker ? 'coworker' : isOutgoing ? 'assistant' : (isToCoworker ? 'user to-coworker' : 'user');
     const time = m.timestamp ? formatTime(m.timestamp) : '';
     const text = m.displayContent || m.content || '';
@@ -3496,7 +3504,9 @@ function renderCwMessages() {
     const metaSuffix = renderMessageMetaSuffix(m);
     const isSystem = m.kind === 'task' || m.kind === 'system';
     const kindLabel = m.kind && m.kind !== 'chat' ? ` <span style="font-size:7px;color:#999;font-style:italic">${esc(m.kind)}</span>` : '';
-    const coworkerLabel = isFromCoworker && m.senderCoworkerName
+    const coworkerLabel = isSelfNote
+      ? ` <span style="font-size:7px;color:var(--text-muted);font-style:italic">note</span>`
+      : isFromCoworker && m.senderCoworkerName
       ? ` <span style="font-size:7px;color:#10b981;font-style:italic">from @${esc(m.senderCoworkerName)}</span>`
       : isToCoworker && m.recipientCoworkerName
       ? ` <span style="font-size:7px;color:#10b981;font-style:italic">→ @${esc(m.recipientCoworkerName)}</span>`
@@ -3541,9 +3551,11 @@ function renderCwMessages() {
     // So isOutgoing=true is the AGENT speaking; !isOutgoing is the user
     // (or another coworker via a2a). Author/monogram follow from that.
     const authorName = isOutgoing
-      ? (isToCoworker && m.recipientCoworkerName
-          ? `${esc(cwState.selected || 'agent')} → @${esc(m.recipientCoworkerName)}`
-          : esc(cwState.selected || 'agent'))
+      ? (isSelfNote
+          ? esc(cwState.selected || 'agent')  // drop the "→ @Self" decoration
+          : isToCoworker && m.recipientCoworkerName
+            ? `${esc(cwState.selected || 'agent')} → @${esc(m.recipientCoworkerName)}`
+            : esc(cwState.selected || 'agent'))
       : isFromCoworker && m.senderCoworkerName
         ? `@${esc(m.senderCoworkerName)}`
         : 'You';
@@ -3564,7 +3576,13 @@ function renderCwMessages() {
     const actionsHtml = canReply
       ? `<div class="cw-msg-actions"><button class="cw-msg-action-btn cw-reply-btn" data-parent-id="${esc(m.id)}" title="Reply in thread">↳ Reply</button></div>`
       : '';
-    return `<div class="cw-msg ${cls}" data-msg-id="${esc(m.id || '')}"${systemStyle}>
+    // Self-note: keep the content legible but mute it so operators read
+    // it as narration ("the agent is telling me what it's doing") rather
+    // than a message exchanged with something else. Adds `self-note`
+    // class so CSS can differentiate without other styles competing.
+    const rowClasses = `cw-msg ${cls}${isSelfNote ? ' self-note' : ''}`;
+    const selfNoteStyle = isSelfNote ? ' style="opacity:0.7;border-left-color:var(--text-muted)"' : systemStyle;
+    return `<div class="${rowClasses}" data-msg-id="${esc(m.id || '')}"${selfNoteStyle}>
       <div class="cw-msg-avatar">${monogram}</div>
       ${actionsHtml}
       <div class="cw-msg-header"><span class="cw-msg-author">${authorName}</span><span class="cw-msg-time">${time}${kindLabel}${coworkerLabel}${metaSuffix}</span></div>
