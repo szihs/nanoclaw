@@ -45,11 +45,23 @@ function destinationList(): string {
  *
  * If `to` is specified, look up the named destination. If it resolves to
  * the same channel the session is bound to, the session's thread_id is
- * preserved so replies land in the correct thread. Otherwise thread_id
- * is null (a cross-destination send starts a new conversation).
+ * preserved so replies land in the correct thread.
+ *
+ * For cross-channel sends and agent-to-agent (a2a) destinations, the
+ * sender's current `thread_id` auto-propagates so parallel delegations
+ * don't collapse into one shared recipient session ("I'm working on
+ * PR-A in my thread, reviewer gets a PR-A-scoped session; I delegate
+ * PR-B in a different thread, reviewer gets a PR-B-scoped session").
+ *
+ * `explicitThreadId`, if provided by the caller, always wins — enables
+ * fan-out (sender sends N distinct sub-delegations from one thread) and
+ * fan-in (two sender-threads collapse into one recipient session).
+ * Pass `null` or `undefined` to fall through to the auto-propagation
+ * rules above.
  */
 function resolveRouting(
   to: string | undefined,
+  explicitThreadId: string | null,
 ):
   | { channel_type: string; platform_id: string; thread_id: string | null; resolvedName: string }
   | { error: string } {
@@ -60,7 +72,7 @@ function resolveRouting(
       return {
         channel_type: session.channel_type,
         platform_id: session.platform_id,
-        thread_id: session.thread_id,
+        thread_id: explicitThreadId ?? session.thread_id,
         resolvedName: '(current conversation)',
       };
     }
@@ -81,10 +93,9 @@ function resolveRouting(
     // If the destination is the same channel the session is bound to,
     // preserve the thread_id so replies land in the correct thread.
     const session = getSessionRouting();
-    const threadId =
-      session.channel_type === dest.channelType && session.platform_id === dest.platformId
-        ? session.thread_id
-        : null;
+    const sameChannel =
+      session.channel_type === dest.channelType && session.platform_id === dest.platformId;
+    const threadId = explicitThreadId ?? (sameChannel ? session.thread_id : null);
     return {
       channel_type: dest.channelType!,
       platform_id: dest.platformId!,
@@ -92,19 +103,46 @@ function resolveRouting(
       resolvedName: to,
     };
   }
-  return { channel_type: 'agent', platform_id: dest.agentGroupId!, thread_id: null, resolvedName: to };
+  // Agent-to-agent destination: auto-propagate sender's thread so each
+  // sender-thread → one recipient-session. Explicit override wins for
+  // fan-out / fan-in flows. Null → recipient's agent-shared root session
+  // (back-compat with unthreaded installs).
+  const session = getSessionRouting();
+  const threadId = explicitThreadId ?? session.thread_id ?? null;
+  return {
+    channel_type: 'agent',
+    platform_id: dest.agentGroupId!,
+    thread_id: threadId,
+    resolvedName: to,
+  };
+}
+
+/** Normalise an optional thread_id tool argument. Matches the ingress
+ *  contract: trim, empty → null, non-string → reject. */
+function normalizeThreadIdArg(raw: unknown): { ok: true; value: string | null } | { ok: false; error: string } {
+  if (raw === undefined || raw === null) return { ok: true, value: null };
+  if (typeof raw !== 'string') return { ok: false, error: 'thread_id must be a string when provided' };
+  const trimmed = raw.trim();
+  if (trimmed.length === 0) return { ok: true, value: null };
+  if (trimmed.length > 200) return { ok: false, error: 'thread_id too long (max 200 chars)' };
+  return { ok: true, value: trimmed };
 }
 
 export const sendMessage: McpToolDefinition = {
   tool: {
     name: 'send_message',
     description:
-      'Send a message to a named destination. If you have only one destination, you can omit `to`.',
+      'Send a message to a named destination. If you have only one destination, you can omit `to`. For threaded contexts, thread_id auto-propagates from the sender\'s current thread unless explicitly overridden.',
     inputSchema: {
       type: 'object' as const,
       properties: {
         to: { type: 'string', description: 'Destination name (e.g., "family", "worker-1"). Optional if you have only one destination.' },
         text: { type: 'string', description: 'Message content' },
+        thread_id: {
+          type: 'string',
+          description:
+            'Optional thread identifier. Defaults to the current session\'s thread_id so parallel delegations (e.g. one PR review per thread) stay isolated. Pass an explicit value for fan-out ("review-PR-A"), fan-in (shared id), or leave empty string / omit for auto.',
+        },
       },
       required: ['text'],
     },
@@ -113,7 +151,10 @@ export const sendMessage: McpToolDefinition = {
     const text = args.text as string;
     if (!text) return err('text is required');
 
-    const routing = resolveRouting(args.to as string | undefined);
+    const threadIdArg = normalizeThreadIdArg(args.thread_id);
+    if (!threadIdArg.ok) return err(threadIdArg.error);
+
+    const routing = resolveRouting(args.to as string | undefined, threadIdArg.value);
     if ('error' in routing) return err(routing.error);
 
     const id = generateId();
@@ -126,7 +167,7 @@ export const sendMessage: McpToolDefinition = {
       content: JSON.stringify({ text }),
     });
 
-    log(`send_message: #${seq} → ${routing.resolvedName}`);
+    log(`send_message: #${seq} → ${routing.resolvedName}${routing.thread_id ? ` (thread=${routing.thread_id})` : ''}`);
     return ok(`Message sent to ${routing.resolvedName} (id: ${seq})`);
   },
 };
@@ -142,6 +183,11 @@ export const sendFile: McpToolDefinition = {
         path: { type: 'string', description: 'File path (relative to /workspace/agent/ or absolute)' },
         text: { type: 'string', description: 'Optional accompanying message' },
         filename: { type: 'string', description: 'Display name (default: basename of path)' },
+        thread_id: {
+          type: 'string',
+          description:
+            'Optional thread identifier. Same semantics as send_message: auto-propagates from the sender\'s current thread unless explicitly set.',
+        },
       },
       required: ['path'],
     },
@@ -150,7 +196,10 @@ export const sendFile: McpToolDefinition = {
     const filePath = args.path as string;
     if (!filePath) return err('path is required');
 
-    const routing = resolveRouting(args.to as string | undefined);
+    const threadIdArg = normalizeThreadIdArg(args.thread_id);
+    if (!threadIdArg.ok) return err(threadIdArg.error);
+
+    const routing = resolveRouting(args.to as string | undefined, threadIdArg.value);
     if ('error' in routing) return err(routing.error);
 
     const resolvedPath = path.isAbsolute(filePath) ? filePath : path.resolve('/workspace/agent', filePath);

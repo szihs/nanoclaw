@@ -23,12 +23,70 @@ import path from 'path';
 
 import { isSafeAttachmentName } from '../../attachment-safety.js';
 import { getAgentGroup } from '../../db/agent-groups.js';
+import {
+  createMessagingGroup,
+  createMessagingGroupAgent,
+  getMessagingGroupAgents,
+  getMessagingGroupByPlatform,
+} from '../../db/messaging-groups.js';
 import { getSession } from '../../db/sessions.js';
 import { wakeContainer } from '../../container-runner.js';
 import { log } from '../../log.js';
 import { resolveSession, sessionDir, writeSessionMessage } from '../../session-manager.js';
 import type { Session } from '../../types.js';
 import { hasDestination } from './db/agent-destinations.js';
+
+/**
+ * Ensure an `agent:<targetAgentGroupId>` messaging_group exists with a
+ * per-thread wiring for the recipient. Idempotent; returns the mg id.
+ *
+ * Rationale: per-thread session resolution needs a messaging_group_id as
+ * part of its lookup key. Old code used `agent-shared` which ignores
+ * messaging_group + thread_id entirely — that's kept as the fallback for
+ * unthreaded (thread_id=null) a2a calls. Threaded a2a calls route through
+ * this synthetic group so `(recipient, a2a_mg, thread_id)` can key a
+ * unique session per delegation.
+ *
+ * Back-compat: pre-existing a2a wirings (rare — most installs have none
+ * since agent-shared doesn't create mga rows) are upgraded via migration
+ * 019. This helper's own UPDATE catches any slipped-through `'shared'`
+ * rows on the synthetic group too, so first threaded delivery self-heals.
+ */
+export function ensureA2aWiring(targetAgentGroupId: string, now: string = new Date().toISOString()): string {
+  const platformId = `agent:${targetAgentGroupId}`;
+  let mg = getMessagingGroupByPlatform('agent', platformId);
+  if (!mg) {
+    const mgId = `mg-a2a-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    createMessagingGroup({
+      id: mgId,
+      channel_type: 'agent',
+      platform_id: platformId,
+      name: null,
+      is_group: 0,
+      unknown_sender_policy: 'public',
+      admin_user_id: null,
+      created_at: now,
+    });
+    mg = getMessagingGroupByPlatform('agent', platformId)!;
+  }
+
+  const existing = getMessagingGroupAgents(mg.id).find((a) => a.agent_group_id === targetAgentGroupId);
+  if (!existing) {
+    createMessagingGroupAgent({
+      id: `mga-a2a-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      messaging_group_id: mg.id,
+      agent_group_id: targetAgentGroupId,
+      engage_mode: 'always',
+      engage_pattern: null,
+      sender_scope: 'all',
+      ignored_message_policy: 'drop',
+      session_mode: 'per-thread',
+      priority: 0,
+      created_at: now,
+    } as never);
+  }
+  return mg.id;
+}
 
 export { isSafeAttachmentName };
 
@@ -100,6 +158,10 @@ export function forwardAttachedFiles(
 export interface RoutableAgentMessage {
   id: string;
   platform_id: string | null;
+  /** Thread identifier carried from sender's context. When non-null, routes
+   *  to a per-thread session under the recipient; when null, falls back to
+   *  agent-shared for back-compat with pre-threading installs. */
+  thread_id: string | null;
   content: string;
 }
 
@@ -119,7 +181,25 @@ export async function routeAgentMessage(msg: RoutableAgentMessage, session: Sess
   if (!getAgentGroup(targetAgentGroupId)) {
     throw new Error(`target agent group ${targetAgentGroupId} not found for message ${msg.id}`);
   }
-  const { session: targetSession } = resolveSession(targetAgentGroupId, null, null, 'agent-shared');
+
+  // Session resolution:
+  //  - thread_id present → per-thread session keyed on (recipient, a2a_mg,
+  //    thread_id). Each unique sender-thread starts its own isolated
+  //    recipient session (no cross-context bleed between parallel
+  //    delegations).
+  //  - thread_id null/empty → agent-shared (the original behaviour; every
+  //    unthreaded a2a message funnels into one recipient session). This
+  //    preserves back-compat for pre-threading installs.
+  const threadId = msg.thread_id && msg.thread_id.trim() !== '' ? msg.thread_id : null;
+  let targetSession;
+  if (threadId) {
+    const a2aMgId = ensureA2aWiring(targetAgentGroupId);
+    const { session: s } = resolveSession(targetAgentGroupId, a2aMgId, threadId, 'per-thread');
+    targetSession = s;
+  } else {
+    const { session: s } = resolveSession(targetAgentGroupId, null, null, 'agent-shared');
+    targetSession = s;
+  }
   const a2aMsgId = `a2a-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 
   // If the source message references files (via `send_file`), forward the
@@ -135,13 +215,14 @@ export async function routeAgentMessage(msg: RoutableAgentMessage, session: Sess
     timestamp: new Date().toISOString(),
     platformId: session.agent_group_id,
     channelType: 'agent',
-    threadId: null,
+    threadId,
     content: forwardedContent,
   });
   log.info('Agent message routed', {
     from: session.agent_group_id,
     to: targetAgentGroupId,
     targetSession: targetSession.id,
+    threadId,
     a2aMsgId,
     forwardedFileCount: countForwardedFiles(forwardedContent),
   });
