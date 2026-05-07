@@ -3535,15 +3535,22 @@ function renderCwMessages() {
     const bubbleBody = `${text ? (renderAsMd ? md(text) : esc(text)) : ''}${attachmentsHtml}`;
 
     // Slack-style row: monogram avatar + header (name · time) + body.
-    // Author label: You (self) · coworker name (a2a) · coworker folder
-    // (assistant). Hover reveals a small actions toolbar with "Reply in
-    // thread" (gated on persisted id — optimistic sends have no id yet).
+    // NOTE on "direction": the dashboard API tags rows with
+    //   direction='outgoing' ← came from messages_out.db (agent's reply)
+    //   direction='incoming' ← came from messages_in.db (sent TO the agent)
+    // So isOutgoing=true is the AGENT speaking; !isOutgoing is the user
+    // (or another coworker via a2a). Author/monogram follow from that.
     const authorName = isOutgoing
-      ? (isToCoworker && m.recipientCoworkerName ? `You → @${esc(m.recipientCoworkerName)}` : 'You')
+      ? (isToCoworker && m.recipientCoworkerName
+          ? `${esc(cwState.selected || 'agent')} → @${esc(m.recipientCoworkerName)}`
+          : esc(cwState.selected || 'agent'))
       : isFromCoworker && m.senderCoworkerName
         ? `@${esc(m.senderCoworkerName)}`
-        : (cwState.selected ? esc(cwState.selected) : 'agent');
-    const monogram = esc((isOutgoing ? 'You' : (m.senderCoworkerName || cwState.selected || 'A')).trim().charAt(0).toUpperCase() || 'A');
+        : 'You';
+    const monogramSource = isOutgoing
+      ? (cwState.selected || 'A')
+      : (isFromCoworker && m.senderCoworkerName ? m.senderCoworkerName : 'You');
+    const monogram = esc((monogramSource || 'A').trim().charAt(0).toUpperCase() || 'A');
 
     // Reply-count stub: only for main-view rows that are thread starters.
     const summary = cwState.threadSummaries && m.id ? cwState.threadSummaries[m.id] : null;
@@ -3772,8 +3779,12 @@ async function ensureContainerRunning(folder) {
  * message id). null/undefined routes to the root session.
  */
 async function sendMessage({ group, content, threadId = null, optimisticBucket }) {
+  // direction='incoming': user messages land in messages_in.db when
+  // persisted, so the optimistic row needs to match that for both the
+  // author renderer (shows "You" on !isOutgoing) and the dedupe matcher
+  // below to identify its server twin when it arrives.
   const optimistic = {
-    id: null, optimistic: true, content, direction: 'outgoing',
+    id: null, optimistic: true, content, direction: 'incoming',
     sender: 'web@dashboard', sender_name: 'Dashboard',
     is_from_me: 0, is_bot_message: 0, timestamp: new Date().toISOString(),
     thread_id: threadId,
@@ -3886,7 +3897,10 @@ async function fetchCwThread(parentId) {
       if (!Number.isFinite(optTs)) return false;
       if (now - optTs > OPTIMISTIC_MAX_AGE_MS) return true; // expire
       return incoming.some((m) => {
-        if (m.direction !== 'outgoing') return false;
+        // User-sent messages persist to messages_in.db and come back with
+        // direction='incoming'. Match on that (plus content + timestamp
+        // proximity) so the optimistic bubble is replaced cleanly.
+        if (m.direction !== 'incoming') return false;
         if ((m.content || '') !== (opt.content || '')) return false;
         const mTs = Date.parse(m.timestamp);
         return Number.isFinite(mTs) && Math.abs(mTs - optTs) <= MATCH_WINDOW_MS;
@@ -3910,11 +3924,11 @@ function renderCwThread() {
       const p = t.parentSnapshot;
       const pText = p.displayContent || p.content || '';
       const pIsOutgoing = p.direction === 'outgoing';
-      // esc() everything that comes from server-side strings. Keep the
-      // "@" prefix for coworker senders; everything inside esc().
+      // 'outgoing' = messages_out = agent reply → coworker folder as author.
+      // !outgoing = user or a2a sender → "You" or "@coworker".
       const pAuthor = pIsOutgoing
-        ? 'You'
-        : (p.senderCoworkerName ? `@${esc(p.senderCoworkerName)}` : esc(cwState.selected || 'agent'));
+        ? esc(cwState.selected || 'agent')
+        : (p.senderCoworkerName ? `@${esc(p.senderCoworkerName)}` : 'You');
       parentEl.innerHTML = `<div class="parent-author">${pAuthor} <span style="color:var(--text-muted);font-weight:400">· ${p.timestamp ? formatTime(p.timestamp) : ''}</span></div>
         <div class="parent-body">${md(pText)}</div>`;
     } else {
@@ -3931,8 +3945,14 @@ function renderCwThread() {
     const text = m.displayContent || m.content || '';
     const renderAsMd = isOutgoing || isFromCoworker;
     const body = text ? (renderAsMd ? md(text) : esc(text)) : '<span style="color:#9ca3af">(empty message)</span>';
-    const authorName = isOutgoing ? 'You' : (m.senderCoworkerName ? `@${esc(m.senderCoworkerName)}` : (cwState.selected || 'agent'));
-    const monogram = esc((isOutgoing ? 'You' : (m.senderCoworkerName || cwState.selected || 'A')).trim().charAt(0).toUpperCase() || 'A');
+    // direction='outgoing' = agent reply; !outgoing = user or a2a sender.
+    const authorName = isOutgoing
+      ? esc(cwState.selected || 'agent')
+      : (m.senderCoworkerName ? `@${esc(m.senderCoworkerName)}` : 'You');
+    const monogramSource = isOutgoing
+      ? (cwState.selected || 'A')
+      : (m.senderCoworkerName || 'You');
+    const monogram = esc((monogramSource || 'A').trim().charAt(0).toUpperCase() || 'A');
     return `<div class="cw-msg ${cls}"><div class="cw-msg-avatar">${monogram}</div>
       <div class="cw-msg-header"><span class="cw-msg-author">${authorName}</span><span class="cw-msg-time">${time}</span></div>
       <div class="cw-msg-bubble">${body}</div></div>`;
