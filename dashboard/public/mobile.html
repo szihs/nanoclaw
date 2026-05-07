@@ -6,6 +6,14 @@
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="mobile-web-app-capable" content="yes">
   <title>NanoClaw Mobile</title>
+  <script>
+    (function() {
+      try {
+        var saved = localStorage.getItem('nanoclaw-theme');
+        if (saved === 'light') document.documentElement.setAttribute('data-theme', 'light');
+      } catch (e) {}
+    })();
+  </script>
   <style>
     :root {
       --bg: #0f172a;
@@ -23,6 +31,59 @@
       --font: 'Courier New', monospace;
       --tab-bar-h: 56px;
       --safe-bottom: env(safe-area-inset-bottom, 0px);
+
+      --overlay-heavy: rgba(0,0,0,0.3);
+      --overlay-med:   rgba(0,0,0,0.25);
+      --overlay-light: rgba(0,0,0,0.2);
+      --hl-soft:       rgba(255,255,255,0.06);
+      --hl-med:        rgba(255,255,255,0.08);
+      --hl-hover:      rgba(255,255,255,0.12);
+      --modal-scrim:   rgba(0,0,0,0.7);
+      --link:          #60a5fa;
+      --tl-cyan:       #06b6d4;
+      --tl-orange:     #f97316;
+      --status-working:  #10b981;
+      --status-thinking: #f59e0b;
+      --status-active:   #3b82f6;
+      --status-error:    #ef4444;
+      --status-idle:     #6b7280;
+      --shell-bg:       #0d1117;
+      --shell-text:     #c9d1d9;
+      --shell-prompt:   #58a6ff;
+      --tooltip-bg:     #0f172aee;
+      --tooltip-border: #475569;
+      --outline-stroke: #ffffff;
+      --subagent-bg:    rgba(15, 23, 42, 0.45);
+    }
+
+    :root[data-theme="light"] {
+      --bg: #f8fafc;
+      --bg-card: #ffffff;
+      --bg-hover: #e2e8f0;
+      --border: #cbd5e1;
+      --text: #0f172a;
+      --text-dim: #475569;
+      --text-muted: #64748b;
+      --accent: #2563eb;
+      --green: #059669;
+      --yellow: #d97706;
+      --red: #dc2626;
+      --purple: #7c3aed;
+      --overlay-heavy: rgba(0,0,0,0.06);
+      --overlay-med:   rgba(0,0,0,0.04);
+      --overlay-light: rgba(0,0,0,0.03);
+      --hl-soft:       rgba(0,0,0,0.03);
+      --hl-med:        rgba(0,0,0,0.05);
+      --hl-hover:      rgba(0,0,0,0.08);
+      --modal-scrim:   rgba(0,0,0,0.4);
+      --link:          #1d4ed8;
+      --shell-bg:       #f6f8fa;
+      --shell-text:     #1f2328;
+      --shell-prompt:   #0969da;
+      --tooltip-bg:     rgba(255,255,255,0.96);
+      --tooltip-border: #cbd5e1;
+      --outline-stroke: #0f172a;
+      --subagent-bg:    rgba(15, 23, 42, 0.04);
     }
     * { margin: 0; padding: 0; box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
     body {
@@ -48,6 +109,15 @@
     .m-header-title span { color: var(--accent); }
     .m-status { display: flex; align-items: center; gap: 6px; font-size: 10px; color: var(--text-dim); }
     .m-status-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--green); animation: pulse 2s infinite; }
+    .m-theme-toggle {
+      display: flex; align-items: center; justify-content: center;
+      width: 28px; height: 28px;
+      background: none; border: 1px solid var(--border);
+      border-radius: 4px; cursor: pointer;
+      color: var(--text-dim); font-size: 14px;
+      padding: 0; line-height: 1;
+    }
+    .m-theme-toggle:active { background: var(--bg-hover); color: var(--text); }
     @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.4; } }
 
     /* --- Main content area --- */
@@ -183,10 +253,10 @@
     }
     .m-msg-bubble p { margin: 0; }
     .m-msg-bubble p + p { margin-top: 6px; }
-    .m-msg-bubble pre { background: #0f172a; border-radius: 6px; padding: 8px; margin: 6px 0; overflow-x: auto; font-size: 11px; }
-    .m-msg-bubble code { font-family: var(--font); font-size: 11px; background: rgba(0,0,0,0.3); padding: 1px 4px; border-radius: 3px; }
+    .m-msg-bubble pre { background: var(--bg); border-radius: 6px; padding: 8px; margin: 6px 0; overflow-x: auto; font-size: 11px; }
+    .m-msg-bubble code { font-family: var(--font); font-size: 11px; background: var(--overlay-heavy); padding: 1px 4px; border-radius: 3px; }
     .m-msg-bubble pre code { background: none; padding: 0; }
-    .m-msg-bubble a { color: #60a5fa; }
+    .m-msg-bubble a { color: var(--link); }
     .m-msg-bubble strong { font-weight: 700; }
     .m-msg-bubble em { font-style: italic; }
     .m-msg-bubble ul { margin: 4px 0; padding-left: 16px; }
@@ -296,7 +366,7 @@
       display: flex;
       justify-content: space-between;
       padding: 6px 0;
-      border-bottom: 1px solid rgba(51,65,85,0.5);
+      border-bottom: 1px solid var(--border);
       font-size: 12px;
     }
     .m-detail-label { color: var(--text-dim); }
@@ -338,7 +408,7 @@
     .m-modal-overlay {
       position: fixed;
       inset: 0;
-      background: rgba(0,0,0,0.7);
+      background: var(--modal-scrim);
       display: flex;
       align-items: center;
       justify-content: center;
@@ -401,6 +471,7 @@
         <div class="m-status-dot" id="m-live-dot"></div>
         <span id="m-live-label">Connecting...</span>
       </div>
+      <button id="m-theme-toggle" class="m-theme-toggle" title="Toggle theme" aria-label="Toggle theme">🌙</button>
     </div>
   </div>
 
