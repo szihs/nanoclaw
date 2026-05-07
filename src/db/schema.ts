@@ -107,6 +107,9 @@ CREATE TABLE sessions (
   agent_group_id     TEXT NOT NULL REFERENCES agent_groups(id),
   messaging_group_id TEXT REFERENCES messaging_groups(id),
   thread_id          TEXT,
+  display_title      TEXT,
+  title_source       TEXT, -- auto | heuristic | manual
+  title_updated_at   TEXT,
   agent_provider     TEXT,
   status             TEXT DEFAULT 'active',
   container_status   TEXT DEFAULT 'stopped',

@@ -57,6 +57,9 @@ export interface Session {
   agent_group_id: string;
   messaging_group_id: string | null;
   thread_id: string | null;
+  display_title?: string | null;
+  title_source?: 'auto' | 'manual' | 'heuristic' | null;
+  title_updated_at?: string | null;
   agent_provider: string | null;
   status: 'active' | 'closed';
   container_status: 'running' | 'idle' | 'stopped';

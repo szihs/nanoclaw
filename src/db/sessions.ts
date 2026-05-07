@@ -4,12 +4,41 @@ import { getDb, hasTable } from './connection.js';
 // ── Sessions ──
 
 export function createSession(session: Session): void {
+  // Migration 021 guarantees display_title / title_source / title_updated_at
+  // exist — runMigrations() runs at host startup before any createSession
+  // call. No defensive column probe here; trust the migration.
   getDb()
     .prepare(
-      `INSERT INTO sessions (id, agent_group_id, messaging_group_id, thread_id, agent_provider, status, container_status, last_active, created_at)
-       VALUES (@id, @agent_group_id, @messaging_group_id, @thread_id, @agent_provider, @status, @container_status, @last_active, @created_at)`,
+      `INSERT INTO sessions (id, agent_group_id, messaging_group_id, thread_id,
+                             display_title, title_source, title_updated_at,
+                             agent_provider, status, container_status, last_active, created_at)
+       VALUES (@id, @agent_group_id, @messaging_group_id, @thread_id,
+               @display_title, @title_source, @title_updated_at,
+               @agent_provider, @status, @container_status, @last_active, @created_at)`,
     )
-    .run(session);
+    .run({ display_title: null, title_source: null, title_updated_at: null, ...session });
+}
+
+/**
+ * Update the session's display title. `source='manual'` marks it
+ * operator-set so the heuristic titler won't re-derive on top of it.
+ * Returns true if a row was updated (i.e. the session still exists).
+ */
+export function updateSessionTitle(
+  sessionId: string,
+  displayTitle: string,
+  source: 'auto' | 'heuristic' | 'manual',
+  now: string = new Date().toISOString(),
+): boolean {
+  // Never overwrite a manual title unless the new write is also manual.
+  const clause =
+    source === 'manual'
+      ? 'WHERE id = ?'
+      : "WHERE id = ? AND (display_title IS NULL OR COALESCE(title_source, '') != 'manual')";
+  const res = getDb()
+    .prepare(`UPDATE sessions SET display_title = ?, title_source = ?, title_updated_at = ? ${clause}`)
+    .run(displayTitle, source, now, sessionId);
+  return res.changes > 0;
 }
 
 export function getSession(id: string): Session | undefined {
