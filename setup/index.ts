@@ -13,6 +13,7 @@ const STEPS: Record<
   'set-env': () => import('./set-env.js'),
   environment: () => import('./environment.js'),
   container: () => import('./container.js'),
+  local: () => import('./local.js'),
   register: () => import('./register.js'),
   groups: () => import('./groups.js'),
   'whatsapp-auth': () => import('./whatsapp-auth.js'),

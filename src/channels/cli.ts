@@ -42,7 +42,12 @@ import { log } from '../log.js';
 import type { ChannelAdapter, ChannelSetup, DeliveryAddress, InboundEvent, OutboundMessage } from './adapter.js';
 import { registerChannelAdapter } from './channel-registry.js';
 
-const PLATFORM_ID = 'local';
+// Use the namespaced form so the CLI adapter agrees with what setup/register
+// writes into messaging_groups (`namespacedPlatformId('cli', 'local')` = 'cli:local')
+// and with what the agent-runner writes on outbound.db rows via session routing.
+// Emitting the raw 'local' made inbound lookup miss and delivery error with
+// "unknown messaging group for cli/cli:local".
+const PLATFORM_ID = 'cli:local';
 
 function socketPath(): string {
   return path.join(DATA_DIR, 'cli.sock');

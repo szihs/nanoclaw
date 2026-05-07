@@ -73,7 +73,7 @@ function readAgentAndGlobalClaudeMd(): string | undefined {
   // coworkers, slim manager body + per-project fragments for Main). No
   // separate global-body appending is needed. The /workspace/shared/
   // mount is for cross-group facts (learnings), not prompt content.
-  const groupDir = '/workspace/agent';
+  const groupDir = process.env.WORKSPACE_AGENT || '/workspace/agent';
   const groupPath = `${groupDir}/CLAUDE.md`;
   const localPath = `${groupDir}/CLAUDE.local.md`;
   const parts: string[] = [];

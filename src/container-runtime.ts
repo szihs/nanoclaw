@@ -5,7 +5,7 @@
 import { execSync } from 'child_process';
 import os from 'os';
 
-import { CONTAINER_INSTALL_LABEL, CONTAINER_PREFIX } from './config.js';
+import { AGENT_RUNTIME, CONTAINER_INSTALL_LABEL, CONTAINER_PREFIX } from './config.js';
 import { log } from './log.js';
 
 /** The container runtime binary name. */
@@ -63,6 +63,10 @@ export function stopContainer(name: string): void {
 
 /** Ensure the container runtime is running, starting it if needed. */
 export function ensureContainerRuntimeRunning(): void {
+  if (AGENT_RUNTIME === 'local') {
+    log.debug('AGENT_RUNTIME=local — skipping Docker runtime check');
+    return;
+  }
   try {
     execSync(`${CONTAINER_RUNTIME_BIN} info`, {
       stdio: 'pipe',
@@ -93,6 +97,11 @@ export function ensureContainerRuntimeRunning(): void {
  * stamped onto every container at spawn time — see container-runner.ts.
  */
 export function cleanupOrphans(): void {
+  if (AGENT_RUNTIME === 'local') {
+    // No Docker containers to reap in local mode; worktree orphan cleanup
+    // runs from src/index.ts startup via pruneOrphanWorktrees().
+    return;
+  }
   try {
     const output = execSync(
       `${CONTAINER_RUNTIME_BIN} ps --filter label=${CONTAINER_INSTALL_LABEL} --format '{{.Names}}'`,

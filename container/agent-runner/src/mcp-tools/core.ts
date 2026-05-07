@@ -153,13 +153,15 @@ export const sendFile: McpToolDefinition = {
     const routing = resolveRouting(args.to as string | undefined);
     if ('error' in routing) return err(routing.error);
 
-    const resolvedPath = path.isAbsolute(filePath) ? filePath : path.resolve('/workspace/agent', filePath);
+    const workspaceAgent = process.env.WORKSPACE_AGENT || '/workspace/agent';
+    const resolvedPath = path.isAbsolute(filePath) ? filePath : path.resolve(workspaceAgent, filePath);
     if (!fs.existsSync(resolvedPath)) return err(`File not found: ${filePath}`);
 
     const id = generateId();
     const filename = (args.filename as string) || path.basename(resolvedPath);
 
-    const outboxDir = path.join('/workspace/outbox', id);
+    const outboxRoot = process.env.WORKSPACE_OUTBOX || '/workspace/outbox';
+    const outboxDir = path.join(outboxRoot, id);
     fs.mkdirSync(outboxDir, { recursive: true });
     fs.copyFileSync(resolvedPath, path.join(outboxDir, filename));
 

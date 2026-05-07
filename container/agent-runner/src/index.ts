@@ -41,7 +41,12 @@ function log(msg: string): void {
   console.error(`[agent-runner] ${msg}`);
 }
 
-const CWD = '/workspace/agent';
+// Workspace paths are env-var-addressable so AGENT_RUNTIME=local on the host
+// can point them at the real on-disk group dir instead of the Docker mount
+// (`/workspace/agent`). Defaults match the Docker mount so container mode
+// is unaffected.
+const CWD = process.env.WORKSPACE_AGENT || '/workspace/agent';
+const EXTRA_DIR = process.env.WORKSPACE_EXTRA || '/workspace/extra';
 
 async function main(): Promise<void> {
   // Load /workspace/agent/container.json once at startup. Without this call,
@@ -66,11 +71,11 @@ async function main(): Promise<void> {
   // provides the routing addendum — CLAUDE.md ownership lives in the provider.
   const instructions = buildSystemPromptAddendum();
 
-  // Discover additional directories: /workspace/extra/* (host-mounted)
-  // and /workspace/agent/* subdirs that have their own .claude/ config
+  // Discover additional directories: WORKSPACE_EXTRA/* (host-mounted)
+  // and CWD/* subdirs that have their own .claude/ config
   // (e.g. cloned repos with skills/commands/CLAUDE.md).
   const additionalDirectories: string[] = [];
-  for (const base of ['/workspace/extra', CWD]) {
+  for (const base of [EXTRA_DIR, CWD]) {
     if (!fs.existsSync(base)) continue;
     for (const entry of fs.readdirSync(base)) {
       const fullPath = path.join(base, entry);
