@@ -222,9 +222,12 @@ function renderActiveSessionBlock(cw, { wrapField = true } = {}) {
     const ago = lastMs ? timeAgo(lastMs) : '';
     const cs = nanoSess.container_status || 'unknown';
     const subCount = (nanoSess.sdk_subsessions || []).length;
+    const humanSess = typeof window.sessionLabel === 'function'
+      ? window.sessionLabel(nanoSess.nanoclaw_session_id, nanoSess.thread_id)
+      : nanoSess.nanoclaw_session_id;
     inner = `<div class="value" style="display:flex;flex-direction:column;gap:3px">
         <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">
-          <span style="font-size:10px;color:var(--text);font-family:monospace">${esc(nanoSess.nanoclaw_session_id)}</span>
+          <span style="font-size:10px;color:var(--text)" title="${escAttr(nanoSess.nanoclaw_session_id)}">${esc(humanSess)}</span>
           <span style="font-size:9px;color:var(--text-muted)">[container: ${esc(cs)}${ago ? ' · last ' + esc(ago) : ''}]</span>
           <button class="admin-action-btn" style="font-size:8px;padding:1px 6px"
             data-view-nanoclaw-session="${escAttr(nanoSess.nanoclaw_session_id)}"
@@ -2029,19 +2032,21 @@ function updateSessionSelector() {
     // When "All coworkers" is selected, prefix the option with the folder so rows are
     // distinguishable; when a specific coworker is selected, the prefix is redundant.
     const prefix = selectedCoworker ? '' : `${p.group_folder} · `;
-    // Slack-thread marker: "main" for root sessions (thread_id null),
-    // "thread <first 8 chars>" for thread sessions. Lets operators tell
-    // apart multiple concurrent sessions on the same coworker at a
-    // glance. Pre-threaded installs always render as "main".
-    const threadMarker = p.nanoclaw_session_id
-      ? (p.thread_id ? `thread ${String(p.thread_id).slice(0, 8)}` : 'main')
+    // Session label — "main · <slug>" / "thread · <slug>" via the shared
+    // sessionLabel() helper. Raw sess-xxx id surfaces as the option's
+    // title= attribute so operators can still copy it for log grepping.
+    const humanLabel = p.nanoclaw_session_id
+      ? (typeof window.sessionLabel === 'function'
+          ? window.sessionLabel(p.nanoclaw_session_id, p.thread_id)
+          : `${p.thread_id ? 'thread' : 'main'} · ${p.nanoclaw_session_id}`)
       : '';
     const parentLabel = p.nanoclaw_session_id
-      ? `${prefix}${threadMarker} · ${parentTs} (${parentAgo}) · ${p.event_count_total} ev · ${p.nanoclaw_session_id}`
+      ? `${prefix}${humanLabel} · ${parentTs} (${parentAgo}) · ${p.event_count_total} ev`
       : `${prefix}(no active nanoclaw session)`;
+    const parentTitle = p.nanoclaw_session_id ? p.nanoclaw_session_id : '';
     const parentVal = p.nanoclaw_session_id ? `nano:${p.agent_group_id}:${p.nanoclaw_session_id}` : '';
     if (parentVal) {
-      html += `<option value="${escAttr(parentVal)}" data-group="${escAttr(p.group_folder)}" data-kind="nanoclaw">${esc(parentLabel)}</option>`;
+      html += `<option value="${escAttr(parentVal)}" data-group="${escAttr(p.group_folder)}" data-kind="nanoclaw" title="${escAttr(parentTitle)}">${esc(parentLabel)}</option>`;
     }
     for (const s of (p.sdk_subsessions || [])) {
       // ALWAYS use last_ts (not first_ts — that was the old bug: ghost sessions showed their
@@ -3928,7 +3933,18 @@ function renderCwThread() {
   const parentEl = document.getElementById('cw-thread-parent');
   const parentLabel = document.getElementById('cw-thread-parent-label');
   const msgsEl = document.getElementById('cw-thread-messages');
-  if (parentLabel) parentLabel.textContent = t.parentId.slice(0, 12);
+  // Derive the thread's NanoClaw session id from any message row (server
+  // tags each row with session_id). Slug by session id, not parentId, so
+  // this label matches the same session's label in the Timeline dropdown
+  // and the detail panel. Fall back to parentId slug if the thread is
+  // newly opened with no persisted messages yet.
+  if (parentLabel) {
+    const sessionIdForSlug = (t.messages || []).find((m) => m.session_id)?.session_id || t.parentId;
+    parentLabel.textContent = typeof window.sessionLabel === 'function'
+      ? window.sessionLabel(sessionIdForSlug, t.parentId)  // second arg non-null → "thread · <slug>"
+      : String(t.parentId).slice(0, 12);
+    parentLabel.title = `session=${sessionIdForSlug}\nthread_id=${t.parentId}`;
+  }
   if (parentEl) {
     if (t.parentSnapshot) {
       const p = t.parentSnapshot;

@@ -1212,6 +1212,10 @@
   </div>
 
   <script src="sprites.js"></script>
+  <!-- session-slug.js is an ESM module that attaches window.sessionSlug /
+       window.sessionLabel on load. app.js reads the window.* aliases so
+       it doesn't need to import — keeps the lazy-load order simple. -->
+  <script type="module" src="session-slug.js"></script>
   <script type="module" src="app.js"></script>
 </body>
 </html>
