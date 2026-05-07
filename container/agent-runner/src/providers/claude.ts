@@ -4,6 +4,7 @@ import path from 'path';
 import { query as sdkQuery, type HookCallback, type PreCompactHookInput } from '@anthropic-ai/claude-agent-sdk';
 
 import { clearContainerToolInFlight, setContainerToolInFlight } from '../db/connection.js';
+import { resolveEnvInherit } from './codex-app-server.js';
 import { registerProvider } from './provider-registry.js';
 import type { AgentProvider, AgentQuery, McpServerConfig, ProviderEvent, ProviderOptions, QueryInput } from './types.js';
 
@@ -290,12 +291,28 @@ export class ClaudeProvider implements AgentProvider {
 
   constructor(options: ProviderOptions = {}) {
     this.assistantName = options.assistantName;
-    this.mcpServers = options.mcpServers ?? {};
     this.additionalDirectories = options.additionalDirectories;
     this.env = {
       ...(options.env ?? {}),
       CLAUDE_CODE_AUTO_COMPACT_WINDOW,
     };
+    // Resolve `envInherit` names → values from process env for every stdio
+    // MCP entry. Claude Agent SDK spawns MCP children with a literal env
+    // map and has no name-indirection; we resolve in-memory and drop the
+    // envInherit field. Resolved values live only in this record and are
+    // handed straight to the SDK (which uses them for child_process.spawn
+    // env); they MUST NOT be written anywhere on disk.
+    const src = options.mcpServers ?? {};
+    const resolved: Record<string, McpServerConfig> = {};
+    for (const [name, cfg] of Object.entries(src)) {
+      if ('url' in cfg) {
+        resolved[name] = cfg;
+        continue;
+      }
+      const mergedEnv = resolveEnvInherit(cfg, process.env, name);
+      resolved[name] = { command: cfg.command, args: cfg.args, env: mergedEnv };
+    }
+    this.mcpServers = resolved;
     this.extraAllowedTools = parseAllowedMcpTools(this.env);
     this.blockedTools = computeBlockedTools(this.env, this.extraAllowedTools);
   }
