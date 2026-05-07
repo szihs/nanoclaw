@@ -49,11 +49,35 @@ export interface QueryInput {
   };
 }
 
-export interface McpServerConfig {
-  command: string;
-  args: string[];
-  env: Record<string, string>;
-}
+/**
+ * MCP server config — stdio OR streamable HTTP.
+ *
+ * The shape accepts Claude Agent SDK native fields (`type`, `headers`) AND
+ * codex-friendly fields (`bearerTokenEnvVar`, `envHttpHeaders`) so the same
+ * record can be passed to either provider. Each provider picks the fields
+ * it understands; codex's serializer prefers env-var indirection over
+ * plaintext headers when both are present.
+ */
+export type McpServerConfig =
+  | {
+      /** stdio transport */
+      command: string;
+      args: string[];
+      env: Record<string, string>;
+    }
+  | {
+      /** http (streamable) transport */
+      type: 'http'; // Claude SDK requires literal; codex ignores
+      url: string;
+      /** Claude-SDK-native static headers (e.g. {Authorization: 'Bearer XYZ'}) */
+      headers?: Record<string, string>;
+      /** Codex-only: env-var name to read a Bearer token from at request time. */
+      bearerTokenEnvVar?: string;
+      /** Codex-only: header-name → env-var-name indirection. */
+      envHttpHeaders?: Record<string, string>;
+      /** Codex-only: static headers. If absent, `headers` is used as a fallback. */
+      httpHeaders?: Record<string, string>;
+    };
 
 export interface AgentQuery {
   /** Push a follow-up message into the active query. */

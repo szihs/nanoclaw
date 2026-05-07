@@ -115,7 +115,24 @@ async function main(): Promise<void> {
     codex: {
       command: 'codex',
       args: codexArgs,
-      env: {},
+      // Scope-narrow: the `codex mcp-server` subprocess only needs what it
+      // uses to authenticate and route. NVIDIA_API_KEY authenticates the
+      // nvinference provider (see model_providers.<p>.env_key in
+      // createCodexConfigOverrides). HOME + PATH are basic runtime needs.
+      // Proxy/cert vars are forwarded if present so the container's OneCLI
+      // trust chain still works. OPENAI_API_KEY is intentionally NOT
+      // forwarded — we want codex routed through nvinference, not OpenAI.
+      env: (() => {
+        const e: Record<string, string> = {
+          HOME: process.env.HOME ?? '/home/node',
+          PATH: process.env.PATH ?? '',
+        };
+        if (process.env.NVIDIA_API_KEY) e.NVIDIA_API_KEY = process.env.NVIDIA_API_KEY;
+        for (const k of ['HTTPS_PROXY', 'HTTP_PROXY', 'NO_PROXY', 'SSL_CERT_FILE', 'SSL_CERT_DIR', 'NODE_EXTRA_CA_CERTS']) {
+          if (process.env[k]) e[k] = process.env[k] as string;
+        }
+        return e;
+      })(),
     },
   };
 
@@ -161,7 +178,13 @@ async function main(): Promise<void> {
         Accept: 'application/json, text/event-stream',
       };
       if (process.env.MCP_PROXY_TOKEN) {
+        // Claude SDK-native: plaintext Authorization header
         headers.Authorization = `Bearer ${process.env.MCP_PROXY_TOKEN}`;
+        // Codex-friendly: env-var indirection so the token isn't written
+        // into ~/.codex/config.toml as plaintext. Codex emits
+        // `bearer_token_env_var = "MCP_PROXY_TOKEN"` and reads from the
+        // subprocess env (forwarded below) at request time.
+        serverConfig.bearerTokenEnvVar = 'MCP_PROXY_TOKEN';
       }
       serverConfig.headers = headers;
       mcpServers[serverName] = serverConfig as any;

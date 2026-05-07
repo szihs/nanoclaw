@@ -17,7 +17,7 @@ import fs from 'fs';
 import path from 'path';
 
 import { registerProvider } from './provider-registry.js';
-import type { AgentProvider, AgentQuery, ProviderEvent, ProviderOptions, QueryInput } from './types.js';
+import type { AgentProvider, AgentQuery, McpServerConfig, ProviderEvent, ProviderOptions, QueryInput } from './types.js';
 import {
   type AppServer,
   type JsonRpcNotification,
@@ -230,7 +230,7 @@ function composeBaseInstructions(
 export class CodexProvider implements AgentProvider {
   readonly supportsNativeSlashCommands = false;
 
-  private readonly mcpServers: Record<string, { command: string; args: string[]; env: Record<string, string> }>;
+  private readonly mcpServers: Record<string, McpServerConfig>;
   private readonly model: string;
   private readonly additionalDirectories?: string[];
 
