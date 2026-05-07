@@ -54,6 +54,78 @@ describe('dashboard ingress', () => {
     );
   });
 
+  async function startIngressForThreadTests() {
+    const routeInboundFn = vi.fn().mockResolvedValue(undefined);
+    const handle = startDashboardIngress({
+      host: '127.0.0.1',
+      port: 0,
+      isAdapterReady: () => true,
+      routeInboundFn,
+    });
+    handles.push(handle);
+    await once(handle.server, 'listening');
+    const address = handle.server.address();
+    if (!address || typeof address === 'string') {
+      throw new Error('Expected dashboard ingress to bind an ephemeral TCP port');
+    }
+    return { routeInboundFn, url: `http://127.0.0.1:${address.port}/api/dashboard/inbound` };
+  }
+
+  it('forwards a non-empty thread_id to routeInbound', async () => {
+    const { routeInboundFn, url } = await startIngressForThreadTests();
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ group: 'reviewer', content: 'reply', thread_id: 'parent-xyz' }),
+    });
+    expect(res.status).toBe(200);
+    expect(routeInboundFn).toHaveBeenCalledWith(expect.objectContaining({ threadId: 'parent-xyz' }));
+  });
+
+  it('treats empty thread_id as null (root session)', async () => {
+    const { routeInboundFn, url } = await startIngressForThreadTests();
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ group: 'reviewer', content: 'root msg', thread_id: '   ' }),
+    });
+    expect(res.status).toBe(200);
+    expect(routeInboundFn).toHaveBeenCalledWith(expect.objectContaining({ threadId: null }));
+  });
+
+  it('treats missing thread_id as null', async () => {
+    const { routeInboundFn, url } = await startIngressForThreadTests();
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ group: 'reviewer', content: 'root msg' }),
+    });
+    expect(res.status).toBe(200);
+    expect(routeInboundFn).toHaveBeenCalledWith(expect.objectContaining({ threadId: null }));
+  });
+
+  it('rejects non-string thread_id with 400', async () => {
+    const { routeInboundFn, url } = await startIngressForThreadTests();
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ group: 'reviewer', content: 'x', thread_id: 42 }),
+    });
+    expect(res.status).toBe(400);
+    expect(routeInboundFn).not.toHaveBeenCalled();
+  });
+
+  it('rejects thread_id longer than 200 chars with 400', async () => {
+    const { routeInboundFn, url } = await startIngressForThreadTests();
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ group: 'reviewer', content: 'x', thread_id: 'a'.repeat(201) }),
+    });
+    expect(res.status).toBe(400);
+    expect(routeInboundFn).not.toHaveBeenCalled();
+  });
+
   it('returns 503 when the dashboard adapter is not ready in the host', async () => {
     const routeInboundFn = vi.fn().mockResolvedValue(undefined);
     const handle = startDashboardIngress({

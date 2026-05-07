@@ -288,7 +288,7 @@ export async function handleCreateAgent(content: Record<string, unknown>, sessio
           engage_pattern: `@${name.replace(/\s+/g, '')}`,
           sender_scope: 'all',
           ignored_message_policy: 'drop',
-          session_mode: 'shared',
+          session_mode: 'per-thread',
           priority: 0,
           created_at: now,
         } as never);
