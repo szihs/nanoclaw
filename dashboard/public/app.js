@@ -2029,8 +2029,15 @@ function updateSessionSelector() {
     // When "All coworkers" is selected, prefix the option with the folder so rows are
     // distinguishable; when a specific coworker is selected, the prefix is redundant.
     const prefix = selectedCoworker ? '' : `${p.group_folder} · `;
+    // Slack-thread marker: "main" for root sessions (thread_id null),
+    // "thread <first 8 chars>" for thread sessions. Lets operators tell
+    // apart multiple concurrent sessions on the same coworker at a
+    // glance. Pre-threaded installs always render as "main".
+    const threadMarker = p.nanoclaw_session_id
+      ? (p.thread_id ? `thread ${String(p.thread_id).slice(0, 8)}` : 'main')
+      : '';
     const parentLabel = p.nanoclaw_session_id
-      ? `${prefix}${parentTs} (${parentAgo}) · ${p.event_count_total} ev · ${p.nanoclaw_session_id}`
+      ? `${prefix}${threadMarker} · ${parentTs} (${parentAgo}) · ${p.event_count_total} ev · ${p.nanoclaw_session_id}`
       : `${prefix}(no active nanoclaw session)`;
     const parentVal = p.nanoclaw_session_id ? `nano:${p.agent_group_id}:${p.nanoclaw_session_id}` : '';
     if (parentVal) {

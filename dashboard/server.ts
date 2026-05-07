@@ -3167,6 +3167,14 @@ export async function handleRequest(
     if (body === null) return;
     try {
       const raw = JSON.parse(body);
+      // Per-session identity headers emitted by container-runner since the
+      // sdk_session_routes migration. When present, the dashboard stamps
+      // an exact SDK → NanoClaw route at intake — no guessing. When
+      // absent (pre-upgrade containers, bespoke runners), routing falls
+      // through to the query-time fallback order.
+      const hookNanoSessId = typeof req.headers['x-nanoclaw-session-id'] === 'string'
+        ? (req.headers['x-nanoclaw-session-id'] as string).trim()
+        : '';
       // Normalize Claude Code's native HTTP hook payload into our HookEvent format.
       // HTTP hooks send the raw SDK JSON with different field names than our old
       // bash-script format. We accept both for backwards compatibility.
@@ -3274,6 +3282,31 @@ export async function handleRequest(
               event.extra ? JSON.stringify(event.extra) : null,
               event.timestamp,
             );
+          // Stamp sdk_session_routes when the container told us its nano
+          // session id. INSERT OR IGNORE so duplicates are cheap; always
+          // touch last_seen_at so Timeline sort stays fresh.
+          if (hookNanoSessId && event.session_id && event.group) {
+            try {
+              const ag = heDb
+                .prepare("SELECT id FROM agent_groups WHERE folder = ?")
+                .get(event.group) as { id: string } | undefined;
+              if (ag) {
+                heDb
+                  .prepare(
+                    `INSERT OR IGNORE INTO sdk_session_routes
+                       (sdk_session_id, nanoclaw_session_id, agent_group_id, group_folder,
+                        first_seen_at, last_seen_at, source)
+                     VALUES (?, ?, ?, ?, ?, ?, 'live')`,
+                  )
+                  .run(event.session_id, hookNanoSessId, ag.id, event.group, event.timestamp, event.timestamp);
+                heDb
+                  .prepare('UPDATE sdk_session_routes SET last_seen_at = ? WHERE sdk_session_id = ?')
+                  .run(event.timestamp, event.session_id);
+              }
+            } catch {
+              /* routes table may not exist pre-migration — non-fatal */
+            }
+          }
         } catch {
           /* DB write failure — non-fatal */
         }
@@ -3573,11 +3606,15 @@ export async function handleRequest(
         return;
       }
 
-      // Look up the active nanoclaw session per group_folder.
-      // Edge case: if multiple 'active' rows exist, pick the latest created_at.
+      // Look up ALL active nanoclaw sessions per group_folder, not just the
+      // most recent. With per-thread dashboards a single coworker owns N
+      // sessions (one root + one per thread); the older latest-wins logic
+      // silently dropped everything but the newest session. Keep sessions
+      // per folder ordered ascending by created_at so the query-time
+      // fallback can bracket unrouted SDK UUIDs correctly.
       const folderSet = new Set<string>(flatRows.map((r) => r.group_folder).filter(Boolean));
-      type NanoSess = { id: string; agent_group_id: string; folder: string; status: string; container_status: string; last_active: string | null; created_at: string };
-      const nanoByFolder = new Map<string, NanoSess>();
+      type NanoSess = { id: string; agent_group_id: string; folder: string; thread_id: string | null; status: string; container_status: string; last_active: string | null; created_at: string };
+      const nanoSessionsByFolder = new Map<string, NanoSess[]>();
       if (folderSet.size > 0) {
         const folders = Array.from(folderSet);
         const placeholders = folders.map(() => '?').join(',');
@@ -3586,12 +3623,13 @@ export async function handleRequest(
           nanoRows = heDb
             .prepare(
               `SELECT s.id AS id, s.agent_group_id AS agent_group_id, ag.folder AS folder,
+                      s.thread_id AS thread_id,
                       s.status AS status, s.container_status AS container_status,
                       s.last_active AS last_active, s.created_at AS created_at
                  FROM sessions s
                  JOIN agent_groups ag ON ag.id = s.agent_group_id
                  WHERE s.status = 'active' AND ag.folder IN (${placeholders})
-                 ORDER BY s.created_at DESC`,
+                 ORDER BY s.created_at ASC`,
             )
             .all(...folders) as any[];
         } catch {
@@ -3599,9 +3637,32 @@ export async function handleRequest(
           nanoRows = [];
         }
         for (const n of nanoRows) {
-          if (!nanoByFolder.has(n.folder)) nanoByFolder.set(n.folder, n); // latest created_at wins
+          const list = nanoSessionsByFolder.get(n.folder) ?? [];
+          list.push(n);
+          nanoSessionsByFolder.set(n.folder, list);
         }
       }
+
+      // Pre-fetch every sdk_session_routes row for the SDK UUIDs in flatRows
+      // so query-time lookup is O(1) per SDK. Empty table if migration 018
+      // hasn't run — routes stays empty and every SDK falls to fallback.
+      const routeBySdk = new Map<string, { nanoclaw_session_id: string; source: string }>();
+      try {
+        if (flatRows.length > 0) {
+          const sdkIds = flatRows.map((r) => r.session_id).filter(Boolean);
+          if (sdkIds.length > 0) {
+            const ph = sdkIds.map(() => '?').join(',');
+            const routeRows = heDb
+              .prepare(
+                `SELECT sdk_session_id, nanoclaw_session_id, source FROM sdk_session_routes WHERE sdk_session_id IN (${ph})`,
+              )
+              .all(...sdkIds) as any[];
+            for (const r of routeRows) {
+              routeBySdk.set(r.sdk_session_id, { nanoclaw_session_id: r.nanoclaw_session_id, source: r.source });
+            }
+          }
+        }
+      } catch { /* routes table absent — treat all as unrouted */ }
 
       // Classify each SDK sub-session.
       //  - "ghost": event_count <= 3 AND no UserPromptSubmit (i.e. only InstructionsLoaded / session bookkeeping)
@@ -3626,11 +3687,23 @@ export async function handleRequest(
         return 'session';
       }
 
-      // Group flat rows by their nanoclaw session id (one per group_folder for now).
-      // SDK sessions whose group has no active nanoclaw session are bucketed under a synthetic null parent
-      // — so the UI can still surface them (e.g. a coworker that was stopped).
+      // Group flat rows by their nanoclaw session id. Fallback order per
+      // unrouted SDK UUID (needed for pre-routed historical data and for
+      // hook events posted without X-NanoClaw-Session-Id):
+      //   1. routed   — sdk_session_routes has a row → use it
+      //   2. single-candidate shortcut — folder has exactly 1 active
+      //      nanoclaw session → bucket under it (old-shared installs
+      //      render correctly with no backfill)
+      //   3. heuristic — multi-session folder: bracket by
+      //      created_at ≤ first_ts < next_session.created_at
+      //      marked attribution_source='heuristic' in response
+      //   4. orphan   — no plausible nanoclaw session → synthetic parent
+      //
+      // Principle: unrouted is visible, not hidden. Better to show
+      // best-effort attribution than disappear data.
       type Parent = {
         nanoclaw_session_id: string | null;
+        thread_id: string | null;
         group_folder: string;
         agent_group_id: string | null;
         container_status: string | null;
@@ -3641,22 +3714,64 @@ export async function handleRequest(
         _last_ts_num: number; // for sorting
       };
       const parentByKey = new Map<string, Parent>();
+      const makeParent = (nano: NanoSess | null, folder: string): Parent => ({
+        nanoclaw_session_id: nano ? nano.id : null,
+        thread_id: nano ? nano.thread_id : null,
+        group_folder: folder,
+        agent_group_id: nano ? nano.agent_group_id : null,
+        container_status: nano ? nano.container_status : null,
+        last_active: nano ? nano.last_active : null,
+        created_at: nano ? nano.created_at : null,
+        event_count_total: 0,
+        sdk_subsessions: [],
+        _last_ts_num: 0,
+      });
+
+      const nanoById = new Map<string, NanoSess>();
+      for (const list of nanoSessionsByFolder.values()) {
+        for (const n of list) nanoById.set(n.id, n);
+      }
+
       for (const r of flatRows) {
-        const nano = nanoByFolder.get(r.group_folder);
-        const key = nano ? nano.id : `__orphan__${r.group_folder}`;
+        const folderSessions = nanoSessionsByFolder.get(r.group_folder) ?? [];
+        let pickedNano: NanoSess | null = null;
+        let attributionSource: 'live' | 'backfill' | 'single-candidate' | 'heuristic' | 'orphan' = 'orphan';
+
+        // 1. routed (via sdk_session_routes)
+        const route = routeBySdk.get(r.session_id);
+        if (route) {
+          const cand = nanoById.get(route.nanoclaw_session_id);
+          if (cand) {
+            pickedNano = cand;
+            attributionSource = route.source === 'backfill' ? 'backfill' : 'live';
+          }
+        }
+        // 2. single-candidate shortcut (works for old-shared installs
+        //    and any coworker with exactly one active session)
+        if (!pickedNano && folderSessions.length === 1) {
+          pickedNano = folderSessions[0];
+          attributionSource = 'single-candidate';
+        }
+        // 3. heuristic bracket (multi-candidate, unrouted)
+        if (!pickedNano && folderSessions.length > 1) {
+          const firstTsNum = Number(r.first_ts) || 0;
+          for (let i = 0; i < folderSessions.length; i++) {
+            const cur = folderSessions[i];
+            const curMs = Date.parse(cur.created_at);
+            if (curMs > firstTsNum) break;
+            const next = folderSessions[i + 1];
+            if (!next || Date.parse(next.created_at) > firstTsNum) {
+              pickedNano = cur;
+              attributionSource = 'heuristic';
+              break;
+            }
+          }
+        }
+        // 4. orphan — surface under synthetic parent keyed on folder
+        const key = pickedNano ? pickedNano.id : `__orphan__${r.group_folder}`;
         let parent = parentByKey.get(key);
         if (!parent) {
-          parent = {
-            nanoclaw_session_id: nano ? nano.id : null,
-            group_folder: r.group_folder,
-            agent_group_id: nano ? nano.agent_group_id : null,
-            container_status: nano ? nano.container_status : null,
-            last_active: nano ? nano.last_active : null,
-            created_at: nano ? nano.created_at : null,
-            event_count_total: 0,
-            sdk_subsessions: [],
-            _last_ts_num: 0,
-          };
+          parent = makeParent(pickedNano, r.group_folder);
           parentByKey.set(key, parent);
         }
         parent.event_count_total += Number(r.event_count) || 0;
@@ -3668,7 +3783,20 @@ export async function handleRequest(
           last_ts: r.last_ts,
           event_count: r.event_count,
           shape: classifyShape(r),
+          attribution_source: attributionSource,
         });
+      }
+
+      // Include active nanoclaw sessions that currently have NO SDK
+      // events yet (new session, container never woken). Without this,
+      // a freshly-created thread doesn't appear in Timeline until its
+      // first hook event arrives.
+      for (const [folder, list] of nanoSessionsByFolder) {
+        for (const n of list) {
+          if (!parentByKey.has(n.id)) {
+            parentByKey.set(n.id, makeParent(n, folder));
+          }
+        }
       }
 
       // Sort sub-sessions DESC by last_ts, then sort parents DESC by last_active (fall back to _last_ts_num).
@@ -3720,12 +3848,42 @@ export async function handleRequest(
         res.end('{"error":"nanoclaw session not found"}');
         return;
       }
+      // Prefer exact attribution via sdk_session_routes — returns only
+      // events from SDK UUIDs routed to this nanoclaw session, so thread
+      // events don't bleed into the root session and vice versa.
+      //
+      // Fall back to the legacy `timestamp >= created_at` filter when the
+      // routes table is empty (pre-migration) OR the folder has exactly
+      // one active nanoclaw session (old-shared install — the query
+      // naturally scopes to that session's lifetime). Multi-session
+      // folders without routes will still over-include in the legacy
+      // path; operators should run the backfill script to populate
+      // source='backfill' routes and silence this.
       const createdAtMs = nano.created_at ? new Date(nano.created_at).getTime() : 0;
-      const rows: any[] = heDb
-        .prepare(
-          `SELECT * FROM hook_events WHERE group_folder = ? AND timestamp >= ? ORDER BY timestamp ASC`,
-        )
-        .all(nano.folder, createdAtMs);
+      let rows: any[] = [];
+      let hasRoutes = false;
+      try {
+        const routeCountRow = heDb
+          .prepare('SELECT COUNT(*) AS c FROM sdk_session_routes WHERE nanoclaw_session_id = ?')
+          .get(nanoclawSessionId) as { c: number };
+        hasRoutes = routeCountRow.c > 0;
+      } catch { /* migration 018 not applied — treat as no routes */ }
+      if (hasRoutes) {
+        rows = heDb
+          .prepare(
+            `SELECT he.* FROM hook_events he
+               JOIN sdk_session_routes r ON r.sdk_session_id = he.session_id
+              WHERE r.nanoclaw_session_id = ?
+              ORDER BY he.timestamp ASC`,
+          )
+          .all(nanoclawSessionId);
+      } else {
+        rows = heDb
+          .prepare(
+            `SELECT * FROM hook_events WHERE group_folder = ? AND timestamp >= ? ORDER BY timestamp ASC`,
+          )
+          .all(nano.folder, createdAtMs);
+      }
 
       // Same pipeline as /api/hook-events/session-flow but without per-session_id filtering.
       const entries: any[] = [];
