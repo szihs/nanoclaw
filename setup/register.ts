@@ -44,8 +44,10 @@ interface RegisterArgs {
   requiresTrigger: boolean;
   /** Display name for the assistant */
   assistantName: string;
-  /** Session mode: 'shared' (one session per channel) or 'per-thread' */
+  /** Session mode: 'shared' (one session per channel), 'per-thread' (one per thread — needed for Slack-style UIs), or 'agent-shared' (one per agent across channels) */
   sessionMode: string;
+  /** Whether --session-mode was explicitly passed (suppresses channel-aware default below) */
+  sessionModeExplicit: boolean;
   /** Whether this agent group is an admin/orchestrator group */
   isAdmin: boolean;
   /** Coworker type from the lego registry (e.g. slang-triage, slang-fix) */
@@ -66,6 +68,7 @@ function parseArgs(args: string[]): RegisterArgs {
     requiresTrigger: false,
     assistantName: 'Andy',
     sessionMode: 'shared',
+    sessionModeExplicit: false,
     isAdmin: false,
     coworkerType: null,
     agentProvider: null,
@@ -97,6 +100,7 @@ function parseArgs(args: string[]): RegisterArgs {
         break;
       case '--session-mode':
         result.sessionMode = args[++i] || 'shared';
+        result.sessionModeExplicit = true;
         break;
       case '--is-admin':
         result.isAdmin = true;
@@ -116,6 +120,16 @@ function parseArgs(args: string[]): RegisterArgs {
   // Default coworker_type for admin groups to 'main' if not explicitly set
   if (result.isAdmin && !result.coworkerType) {
     result.coworkerType = 'main';
+  }
+
+  // Channel-aware session_mode default. Dashboard's Slack-style thread UI
+  // only renders correctly when each thread has its own agent session, so
+  // route dashboard wirings to 'per-thread' unless the caller overrode it
+  // with --session-mode. Other channels keep the conservative 'shared'
+  // default (one session per channel, threads collapse to the root) —
+  // that matches how Telegram/WhatsApp/iMessage already behave.
+  if (!result.sessionModeExplicit && result.channel === 'dashboard') {
+    result.sessionMode = 'per-thread';
   }
 
   return result;

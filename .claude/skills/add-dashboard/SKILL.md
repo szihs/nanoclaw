@@ -71,13 +71,17 @@ npx tsx setup/index.ts --step register -- \
   --channel dashboard \
   --no-trigger-required \
   --is-admin \
-  --assistant-name "Orchestrator"
+  --assistant-name "Orchestrator" \
+  --session-mode per-thread
 ```
 
 This creates:
 - An admin group that responds to all messages (no trigger prefix needed)
 - The group folder `groups/orchestrator/` with the agent's memory and workspace
 - The agent gets the project mounted read-only and uses the host's v2 management tools for orchestration
+- `session_mode='per-thread'` — each dashboard thread spawns its own isolated agent session (required for the Slack-style thread panel to work; without this, replies in threads disappear from both the main view and the thread panel because they route to a session keyed on `thread_id=NULL`)
+
+`--session-mode per-thread` is redundant as of the register-step channel-aware default (dashboard channels automatically pick `per-thread`), but kept here explicitly as belt-and-suspenders in case the default is ever overridden.
 
 ## Phase 4: Configure
 
