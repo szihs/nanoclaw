@@ -52,6 +52,11 @@ export const scheduleTask: McpToolDefinition = {
             'Cron expression for recurring tasks (e.g., "0 9 * * 1-5" = weekdays at 9am user-local). Evaluated in the user\'s timezone.',
         },
         script: { type: 'string', description: 'Optional pre-agent script to run before processing' },
+        new_session: {
+          type: 'boolean',
+          description:
+            'Scheduled-task session policy. DEFAULT TRUE for all scheduled tasks — each fire runs in a fresh Claude session so heartbeat/cron conversations do not accumulate prior fires\' context (which drives repeated compactions and growing cache-creation tokens). Set to FALSE explicitly only for multi-fire workflows that rely on in-conversation memory across fires (rare — most state belongs in files on disk). Omit to take the default.',
+        },
       },
       required: ['prompt', 'processAfter'],
     },
@@ -74,8 +79,14 @@ export const scheduleTask: McpToolDefinition = {
     const r = routing();
     const recurrence = (args.recurrence as string) || null;
     const script = (args.script as string) || null;
+    // Tri-state: only persist an explicit boolean. Omission = default (true)
+    // is applied by the poll-loop reader; storing nothing keeps the content
+    // blob minimal and preserves "omitted means default" semantics across
+    // future default changes.
+    const newSessionField =
+      args.new_session === true ? { new_session: true } : args.new_session === false ? { new_session: false } : {};
 
-    // Write as a system action — host will insert into inbound.db
+    // Write as a system action — host will insert into inbound.db.
     writeMessageOut({
       id,
       kind: 'system',
@@ -89,11 +100,18 @@ export const scheduleTask: McpToolDefinition = {
         script,
         processAfter,
         recurrence,
+        ...newSessionField,
       }),
     });
 
-    log(`schedule_task: ${id} at ${processAfter}${recurrence ? ` (recurring: ${recurrence})` : ''}`);
-    return ok(`Task scheduled (id: ${id}, runs at: ${processAfter}${recurrence ? `, recurrence: ${recurrence}` : ''})`);
+    const sessionTag =
+      args.new_session === true ? ' [new_session=true]' : args.new_session === false ? ' [new_session=false]' : '';
+    log(
+      `schedule_task: ${id} at ${processAfter}${recurrence ? ` (recurring: ${recurrence})` : ''}${sessionTag}`,
+    );
+    return ok(
+      `Task scheduled (id: ${id}, runs at: ${processAfter}${recurrence ? `, recurrence: ${recurrence}` : ''}${sessionTag})`,
+    );
   },
 };
 
@@ -260,6 +278,11 @@ export const updateTask: McpToolDefinition = {
           type: 'string',
           description: 'New pre-agent script (optional). Pass empty string to clear.',
         },
+        new_session: {
+          type: 'boolean',
+          description:
+            'Set or clear the new_session flag on the stored task content (optional). true: persist `new_session: true` explicitly. false: persist `new_session: false` as an opt-out (future fires resume the stored continuation). Omit to leave the current stored value unchanged. The system-wide default when no value is stored is true. See schedule_task docs for when to opt out.',
+        },
       },
       required: ['taskId'],
     },
@@ -282,6 +305,7 @@ export const updateTask: McpToolDefinition = {
     // Empty string clears recurrence/script; undefined leaves them as-is.
     if (typeof args.recurrence === 'string') update.recurrence = args.recurrence === '' ? null : args.recurrence;
     if (typeof args.script === 'string') update.script = args.script === '' ? null : args.script;
+    if (args.new_session === true || args.new_session === false) update.new_session = args.new_session;
 
     if (Object.keys(update).length === 1) return err('at least one field to update is required');
 

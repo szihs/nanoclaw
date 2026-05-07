@@ -43,17 +43,27 @@ import {
 } from './db/session-db.js';
 import { log } from './log.js';
 import { openInboundDb, openOutboundDb, inboundDbPath, heartbeatPath } from './session-manager.js';
-import { isContainerRunning, killContainer, wakeContainer } from './container-runner.js';
+import {
+  detectStaleContainers,
+  isContainerRunning,
+  killContainer,
+  recomposeAndUpdateHash,
+  wakeContainer,
+} from './container-runner.js';
+import { writeSessionMessage } from './session-manager.js';
 import type { Session } from './types.js';
 
 const SWEEP_INTERVAL_MS = 60_000;
 // Absolute idle ceiling for a running container. If the heartbeat file hasn't
 // been touched in this long, the container is either stuck or doing genuinely
 // nothing — kill and restart on the next inbound.
-export const ABSOLUTE_CEILING_MS = 30 * 60 * 1000;
+// Respects CONTAINER_TIMEOUT from .env (default 30 min).
+export const ABSOLUTE_CEILING_MS = parseInt(process.env.CONTAINER_TIMEOUT || '1800000', 10);
 // Stuck tolerance window applied per 'processing' claim — "did we see any
 // signs of life since this message was claimed?"
 export const CLAIM_STUCK_MS = 60 * 1000;
+// Service start time — claims older than this are orphans from a prior run.
+const SERVICE_START_MS = Date.now();
 const MAX_TRIES = 5;
 const BACKOFF_BASE_MS = 5000;
 
@@ -124,6 +134,37 @@ async function sweep(): Promise<void> {
     const sessions = getActiveSessions();
     for (const session of sessions) {
       await sweepSession(session);
+    }
+
+    // CLAUDE.md staleness: detect containers whose composed CLAUDE.md
+    // has changed since spawn (skills/overlays/instructions edited).
+    //
+    // Strategy: kill the container so it respawns with fresh CLAUDE.md.
+    // Session history is preserved in the inbound/outbound DBs — the
+    // agent picks up where it left off with updated instructions.
+    // No /clear: that wipes conversation context and causes amnesia.
+    const stale = detectStaleContainers();
+    for (const { sessionId, agentGroupId, folder } of stale) {
+      log.warn('CLAUDE.md stale — killing container for respawn', { sessionId, folder });
+      recomposeAndUpdateHash(sessionId);
+      killContainer(sessionId, 'claude-md-stale');
+      writeSessionMessage(agentGroupId, sessionId, {
+        id: `claudemd-refresh-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+        kind: 'chat',
+        timestamp: new Date().toISOString(),
+        platformId: agentGroupId,
+        channelType: 'agent',
+        threadId: null,
+        content: JSON.stringify({
+          text: 'Your instructions were updated. Container restarted to apply them. Continue your current task.',
+          sender: 'system',
+          senderId: 'system',
+        }),
+        processAfter: new Date(Date.now() + 5000)
+          .toISOString()
+          .replace('T', ' ')
+          .replace(/\.\d+Z$/, ''),
+      });
     }
   } catch (err) {
     log.error('Host sweep error', { err });
@@ -217,11 +258,20 @@ function enforceRunningContainerSla(
   session: Session,
   agentGroupId: string,
 ): void {
+  // Filter out orphan claims from before this service started — they're
+  // leftovers from a prior run. The container cleans its own processing_ack
+  // on startup; killing it before that cleanup runs causes a respawn loop.
+  const allClaims = getProcessingClaims(outDb);
+  const claims = allClaims.filter((c) => {
+    const ts = Date.parse(c.status_changed);
+    return !Number.isNaN(ts) && ts >= SERVICE_START_MS;
+  });
+
   const decision = decideStuckAction({
     now: Date.now(),
     heartbeatMtimeMs: heartbeatMtimeMs(agentGroupId, session.id),
     containerState: getContainerState(outDb),
-    claims: getProcessingClaims(outDb),
+    claims,
   });
 
   if (decision.action === 'ok') return;

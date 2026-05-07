@@ -280,9 +280,11 @@ After=network.target
 Type=simple
 ExecStart=${nodePath} ${projectRoot}/dist/index.js
 WorkingDirectory=${projectRoot}
+EnvironmentFile=-${projectRoot}/.env
 Restart=always
-RestartSec=5
-KillMode=process
+RestartSec=10
+KillMode=control-group
+TimeoutStopSec=10
 Environment=HOME=${homeDir}
 Environment=PATH=/usr/local/bin:/usr/bin:/bin:${homeDir}/.local/bin
 StandardOutput=append:${projectRoot}/logs/nanoclaw.log

@@ -5,11 +5,39 @@
 import { execSync } from 'child_process';
 import os from 'os';
 
-import { CONTAINER_INSTALL_LABEL } from './config.js';
+import { CONTAINER_INSTALL_LABEL, CONTAINER_PREFIX } from './config.js';
 import { log } from './log.js';
 
 /** The container runtime binary name. */
 export const CONTAINER_RUNTIME_BIN = 'docker';
+
+/** Cached GPU detection result. */
+let _gpuAvailable: boolean | null = null;
+
+/** Check if the NVIDIA container runtime is available. */
+export function hasGpuRuntime(): boolean {
+  if (_gpuAvailable !== null) return _gpuAvailable;
+  try {
+    const runtimes = execSync('docker info --format "{{json .Runtimes}}"', {
+      stdio: 'pipe',
+      timeout: 5000,
+    }).toString();
+    if (!runtimes.includes('nvidia')) throw new Error('nvidia runtime not found');
+    execSync('nvidia-smi', { stdio: 'pipe', timeout: 5000 });
+    _gpuAvailable = true;
+    log.info('NVIDIA GPU runtime detected — containers will get GPU access');
+  } catch {
+    _gpuAvailable = false;
+    log.debug('No NVIDIA GPU runtime available');
+  }
+  return _gpuAvailable;
+}
+
+/** Returns docker args to pass GPU access to containers. */
+export function gpuArgs(): string[] {
+  if (!hasGpuRuntime()) return [];
+  return ['--gpus', 'all'];
+}
 
 /** CLI args needed for the container to resolve the host gateway. */
 export function hostGatewayArgs(): string[] {

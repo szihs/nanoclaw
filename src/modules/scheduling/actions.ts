@@ -26,6 +26,20 @@ export async function handleScheduleTask(
   const script = content.script as string | null;
   const processAfter = content.processAfter as string;
   const recurrence = (content.recurrence as string) || null;
+  // Scheduled tasks default to fresh-session-per-fire (see the poll-loop's
+  // `isNewSessionBatch` predicate). Only persist the flag when the MCP
+  // caller set an explicit boolean:
+  //   new_session: true  → persist true (redundant with default, but harmless)
+  //   new_session: false → persist false (opt out; reader keeps continuation)
+  //   omitted / non-boolean → store nothing; reader applies the default
+  // Keeping the stored content minimal means the default can evolve without
+  // migrating historical rows.
+  const newSessionField =
+    content.new_session === true
+      ? { new_session: true }
+      : content.new_session === false
+        ? { new_session: false }
+        : ({} as Record<string, boolean>);
 
   insertTask(inDb, {
     id: taskId,
@@ -34,9 +48,15 @@ export async function handleScheduleTask(
     platformId: (content.platformId as string) ?? null,
     channelType: (content.channelType as string) ?? null,
     threadId: (content.threadId as string) ?? null,
-    content: JSON.stringify({ prompt, script }),
+    content: JSON.stringify({ prompt, script, ...newSessionField }),
   });
-  log.info('Scheduled task created', { taskId, processAfter, recurrence });
+  log.info('Scheduled task created', {
+    taskId,
+    processAfter,
+    recurrence,
+    newSession:
+      content.new_session === false ? 'explicit-false' : content.new_session === true ? 'explicit-true' : 'default',
+  });
 }
 
 export async function handleCancelTask(
@@ -83,6 +103,9 @@ export async function handleUpdateTask(
   }
   if (content.script === null || typeof content.script === 'string') {
     update.script = content.script as string | null;
+  }
+  if (content.new_session === true || content.new_session === false) {
+    update.newSession = content.new_session;
   }
   const touched = updateTask(inDb, taskId, update);
   log.info('Task updated', { taskId, touched, fields: Object.keys(update) });

@@ -4,18 +4,30 @@
  * Thin orchestrator: init DB, run migrations, start channel adapters,
  * start delivery polls, start sweep, handle shutdown.
  */
+import fs from 'fs';
 import path from 'path';
 
-import { DATA_DIR } from './config.js';
+import {
+  DASHBOARD_INGRESS_HOST,
+  DASHBOARD_INGRESS_PORT,
+  DATA_DIR,
+  MCP_PROXY_PORT,
+  PROXY_BIND_HOST,
+  validateContainerTimeouts,
+} from './config.js';
 import { enforceStartupBackoff, resetCircuitBreaker } from './circuit-breaker.js';
-import { migrateGroupsToClaudeLocal } from './claude-md-compose.js';
-import { initDb } from './db/connection.js';
+import { initDb, getDb } from './db/connection.js';
 import { runMigrations } from './db/migrations/index.js';
+import { runGlobalToSharedMigration } from './migrations/global-to-shared.js';
+import { getMessagingGroupsByChannel, getMessagingGroupAgents } from './db/messaging-groups.js';
 import { ensureContainerRuntimeRunning, cleanupOrphans } from './container-runtime.js';
 import { startActiveDeliveryPoll, startSweepDeliveryPoll, setDeliveryAdapter, stopDeliveryPolls } from './delivery.js';
 import { startHostSweep, stopHostSweep } from './host-sweep.js';
 import { routeInbound } from './router.js';
 import { log } from './log.js';
+import { startMcpServers, getRunningServerNames, getServerUpstreamPort } from './mcp-registry.js';
+import { startMcpAuthProxy, setUpstreamPortResolver, discoverTools } from './mcp-auth-proxy.js';
+import { startDashboardIngress } from './dashboard-ingress.js';
 
 // Response + shutdown registries live in response-registry.ts to break the
 // circular import cycle: src/index.ts imports src/modules/index.js for side
@@ -54,12 +66,71 @@ import './channels/index.js';
 import './modules/index.js';
 
 import type { ChannelAdapter, ChannelSetup } from './channels/adapter.js';
-import { initChannelAdapters, teardownChannelAdapters, getChannelAdapter } from './channels/channel-registry.js';
+import {
+  initChannelAdapters,
+  teardownChannelAdapters,
+  getChannelAdapter,
+  getActiveAdapters,
+} from './channels/channel-registry.js';
+
+/**
+ * Per-wiring configuration pushed to adapters so they can pre-filter
+ * messages client-side (engage_mode / engage_pattern). Adapters that
+ * implement the optional `updateConversations` method receive these when
+ * wiring changes (e.g., create_agent).
+ */
+export interface ConversationConfig {
+  platformId: string;
+  agentGroupId: string;
+  engageMode: 'pattern' | 'mention' | 'mention-sticky';
+  engagePattern?: string | null;
+  ignoredMessagePolicy?: 'drop' | 'accumulate';
+  sessionMode: 'shared' | 'per-thread' | 'agent-shared';
+}
+
+// Module-level so shutdown() can access
+let mcpStackHandle: { stop: () => void } | null = null;
+let mcpProxyHandle: { stop: () => void } | null = null;
+let dashboardIngressHandle: { stop: () => Promise<void> } | null = null;
 
 async function main(): Promise<void> {
+  // Singleton guard: prevent duplicate orchestrators on the same data directory
+  const pidfilePath = path.join(DATA_DIR, 'nanoclaw.pid');
+  if (fs.existsSync(pidfilePath)) {
+    const existingPid = parseInt(fs.readFileSync(pidfilePath, 'utf-8').trim(), 10);
+    try {
+      process.kill(existingPid, 0);
+      log.fatal('Another NanoClaw instance is already running', { existingPid, pidfilePath });
+      process.exit(1);
+    } catch {
+      log.warn('Removing stale pidfile', { existingPid });
+      fs.unlinkSync(pidfilePath);
+    }
+  }
+  fs.mkdirSync(DATA_DIR, { recursive: true });
+  fs.mkdirSync(path.join(DATA_DIR, 'shared', 'learnings'), { recursive: true });
+
+  fs.writeFileSync(pidfilePath, String(process.pid));
+  const cleanPidfile = () => {
+    try {
+      fs.unlinkSync(pidfilePath);
+    } catch {
+      /* ignore */
+    }
+  };
+  process.on('exit', cleanPidfile);
+
   log.info('NanoClaw starting');
 
-  // 0. Circuit breaker — backoff on rapid restarts
+  // 0a. Validate critical env invariants. Warn (don't crash) — see Issue #2:
+  //     an idle timeout >= container timeout means idle-sweep never fires
+  //     before the hard kill, producing orphaned-container churn.
+  const timeoutCheck = validateContainerTimeouts();
+  if (!timeoutCheck.ok && timeoutCheck.warning) {
+    log.warn(timeoutCheck.warning);
+  }
+
+  // 0b. Circuit breaker — backoff on rapid restarts
   await enforceStartupBackoff();
 
   // 1. Init central DB
@@ -68,12 +139,41 @@ async function main(): Promise<void> {
   runMigrations(db);
   log.info('Central DB ready', { path: dbPath });
 
-  // 1b. One-time filesystem cutover — idempotent, no-op after first run.
-  migrateGroupsToClaudeLocal();
+  // 1b. One-time filesystem+DB migration: demote groups/global/ to
+  // data/shared/. Idempotent via marker file. Must run AFTER schema
+  // migrations — it UPDATEs/DELETEs rows in agent_groups, so the
+  // table has to exist and be on the latest schema.
+  try {
+    runGlobalToSharedMigration(process.cwd());
+  } catch (err) {
+    log.warn('global-to-shared migration threw', { err: String(err) });
+  }
 
   // 2. Container runtime
   ensureContainerRuntimeRunning();
   cleanupOrphans();
+  // Reset stale container_status from previous host runs
+  getDb().prepare("UPDATE sessions SET container_status = 'stopped' WHERE container_status = 'running'").run();
+
+  // 2b. MCP server stack (registry + auth proxy)
+  const mcpStack = await startMcpServers(MCP_PROXY_PORT + 100);
+  mcpStackHandle = mcpStack;
+  setUpstreamPortResolver((serverName) => {
+    if (serverName) return mcpStack.getUpstreamPort(serverName);
+    const names = getRunningServerNames();
+    return names.length > 0 ? getServerUpstreamPort(names[0]) : null;
+  });
+  mcpProxyHandle = startMcpAuthProxy(PROXY_BIND_HOST, MCP_PROXY_PORT);
+
+  // Discover tools from all running MCP servers
+  for (const name of getRunningServerNames()) {
+    const port = mcpStack.getUpstreamPort(name);
+    if (port) {
+      await discoverTools(name, port).catch((err) => {
+        log.warn('MCP tool discovery failed', { server: name, err });
+      });
+    }
+  }
 
   // 3. Channel adapters
   await initChannelAdapters((adapter: ChannelAdapter): ChannelSetup => {
@@ -130,6 +230,51 @@ async function main(): Promise<void> {
     };
   });
 
+  // 3b. Dashboard inbound bridge — standalone dashboard server sends browser
+  // chat here so routing still happens inside the host process.
+  dashboardIngressHandle = startDashboardIngress({
+    host: DASHBOARD_INGRESS_HOST,
+    port: DASHBOARD_INGRESS_PORT,
+    onActionFn: async (questionId: string, selectedOption: string, userId: string) => {
+      const { getResponseHandlers } = await import('./response-registry.js');
+      for (const handler of getResponseHandlers()) {
+        if (
+          await handler({
+            questionId,
+            value: selectedOption,
+            userId,
+            channelType: 'dashboard',
+            platformId: 'dashboard',
+            threadId: null,
+          })
+        )
+          break;
+      }
+    },
+    onQuestionFn: async (questionId: string, selectedOption: string, userId: string) => {
+      const { getResponseHandlers } = await import('./response-registry.js');
+      for (const handler of getResponseHandlers()) {
+        if (
+          await handler({
+            questionId,
+            value: selectedOption,
+            userId,
+            channelType: 'dashboard',
+            platformId: 'dashboard',
+            threadId: null,
+          })
+        )
+          break;
+      }
+    },
+    onCredentialSubmitFn: async (_credentialId: string, _value: string) => {
+      log.debug('Dashboard credential submit — response registry not yet implemented');
+    },
+    onCredentialRejectFn: async (_credentialId: string) => {
+      log.debug('Dashboard credential reject — response registry not yet implemented');
+    },
+  });
+
   // 4. Delivery adapter bridge — dispatches to channel adapters
   const deliveryAdapter = {
     async deliver(
@@ -166,9 +311,52 @@ async function main(): Promise<void> {
   log.info('NanoClaw running');
 }
 
+/**
+ * Refresh all active adapters with updated conversation configs from the DB.
+ * Called when messaging_group_agents wiring changes (e.g., create_agent).
+ */
+export function refreshAdapterConversations(): void {
+  for (const adapter of getActiveAdapters()) {
+    const a = adapter as ChannelAdapter & { updateConversations?(configs: ConversationConfig[]): void };
+    if (a.updateConversations) {
+      const configs = buildConversationConfigs(a.channelType);
+      a.updateConversations(configs);
+      log.debug('Adapter conversations refreshed', { channel: a.channelType, count: configs.length });
+    }
+  }
+}
+
+/** Build ConversationConfig[] for a channel type from the central DB. */
+function buildConversationConfigs(channelType: string): ConversationConfig[] {
+  const groups = getMessagingGroupsByChannel(channelType);
+  const configs: ConversationConfig[] = [];
+
+  for (const mg of groups) {
+    const agents = getMessagingGroupAgents(mg.id);
+    for (const agent of agents) {
+      configs.push({
+        platformId: mg.platform_id,
+        agentGroupId: agent.agent_group_id,
+        engageMode: agent.engage_mode === 'always' || agent.engage_mode === 'never' ? 'pattern' : agent.engage_mode,
+        engagePattern: agent.engage_pattern,
+        ignoredMessagePolicy: agent.ignored_message_policy ?? undefined,
+        sessionMode: agent.session_mode,
+      });
+    }
+  }
+
+  return configs;
+}
+
 /** Graceful shutdown. */
 async function shutdown(signal: string): Promise<void> {
   log.info('Shutdown signal received', { signal });
+  // Remove pidfile immediately before any async work that might hang
+  try {
+    fs.unlinkSync(path.join(DATA_DIR, 'nanoclaw.pid'));
+  } catch {
+    /* ignore */
+  }
   for (const cb of getShutdownCallbacks()) {
     try {
       await cb();
@@ -178,12 +366,12 @@ async function shutdown(signal: string): Promise<void> {
   }
   stopDeliveryPolls();
   stopHostSweep();
+  mcpProxyHandle?.stop();
+  mcpStackHandle?.stop();
+  await dashboardIngressHandle?.stop();
   try {
     await teardownChannelAdapters();
   } finally {
-    // Always reset on graceful shutdown — even if teardown threw, we got here
-    // via SIGTERM/SIGINT, not a crash, so the next start shouldn't be counted
-    // as one.
     resetCircuitBreaker();
     process.exit(0);
   }

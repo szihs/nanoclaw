@@ -39,7 +39,11 @@ function seedAgentAndChannel(): void {
     id: 'ag-1',
     name: 'Test Agent',
     folder: 'test-agent',
+    is_admin: 0,
     agent_provider: null,
+    container_config: null,
+    coworker_type: null,
+    allowed_mcp_tools: null,
     created_at: now(),
   });
   createMessagingGroup({
@@ -48,6 +52,7 @@ function seedAgentAndChannel(): void {
     platform_id: 'telegram:123',
     name: 'Test Chat',
     is_group: 0,
+    admin_user_id: null,
     unknown_sender_policy: 'public',
     created_at: now(),
   });

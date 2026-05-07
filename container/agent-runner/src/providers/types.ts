@@ -49,11 +49,46 @@ export interface QueryInput {
   };
 }
 
-export interface McpServerConfig {
-  command: string;
-  args: string[];
-  env: Record<string, string>;
-}
+/**
+ * MCP server config — stdio OR streamable HTTP.
+ *
+ * The shape accepts Claude Agent SDK native fields (`type`, `headers`) AND
+ * codex-friendly fields (`bearerTokenEnvVar`, `envHttpHeaders`) so the same
+ * record can be passed to either provider. Each provider picks the fields
+ * it understands; codex's serializer prefers env-var indirection over
+ * plaintext headers when both are present.
+ */
+export type McpServerConfig =
+  | {
+      /** stdio transport */
+      command: string;
+      args: string[];
+      env: Record<string, string>;
+      /**
+       * Env-var names to forward by NAME (not value) to the subprocess.
+       * Codex's TOML writer emits `env_vars = [...]`; codex-cli resolves
+       * each name from its own process env at spawn time — so secrets
+       * (OneCLI proxy bearer in HTTPS_PROXY, API keys) never land in
+       * `~/.codex/config.toml`. Providers without TOML-style name
+       * indirection (Claude SDK, OpenCode) resolve names to values from
+       * `process.env` before handing the child's env map to the SDK;
+       * those providers keep secrets in-process only, never on disk.
+       */
+      envInherit?: string[];
+    }
+  | {
+      /** http (streamable) transport */
+      type: 'http'; // Claude SDK requires literal; codex ignores
+      url: string;
+      /** Claude-SDK-native static headers (e.g. {Authorization: 'Bearer XYZ'}) */
+      headers?: Record<string, string>;
+      /** Codex-only: env-var name to read a Bearer token from at request time. */
+      bearerTokenEnvVar?: string;
+      /** Codex-only: header-name → env-var-name indirection. */
+      envHttpHeaders?: Record<string, string>;
+      /** Codex-only: static headers. If absent, `headers` is used as a fallback. */
+      httpHeaders?: Record<string, string>;
+    };
 
 export interface AgentQuery {
   /** Push a follow-up message into the active query. */
@@ -74,6 +109,26 @@ export type ProviderEvent =
   | { type: 'result'; text: string | null }
   | { type: 'error'; message: string; retryable: boolean; classification?: string }
   | { type: 'progress'; message: string }
+  /**
+   * Per-turn usage accounting. Emitted once after a turn completes when the
+   * underlying provider surfaces token/cost numbers. Lets the poll-loop log
+   * a structured line per turn (grep/aggregate for perf investigations).
+   * Fields mirror the Anthropic usage shape; providers that don't know a
+   * value (e.g. Codex doesn't separate cache tiers) pass 0 rather than omit.
+   */
+  | {
+      type: 'usage';
+      inputTokens: number;
+      outputTokens: number;
+      cacheCreationInputTokens: number;
+      cacheReadInputTokens: number;
+      ephemeral1hInputTokens: number;
+      ephemeral5mInputTokens: number;
+      durationMs: number;
+      totalCostUsd: number;
+      numTurns: number;
+      sessionId: string | null;
+    }
   /**
    * Liveness signal. Providers MUST yield this on every underlying SDK
    * event (tool call, thinking, partial message, anything) so the

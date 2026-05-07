@@ -1,3 +1,6 @@
+import fs from 'fs';
+import path from 'path';
+
 import { findByName, getAllDestinations, type DestinationEntry } from './destinations.js';
 import { getPendingMessages, markProcessing, markCompleted, type MessageInRow } from './db/messages-in.js';
 import { writeMessageOut } from './db/messages-out.js';
@@ -8,13 +11,54 @@ import {
   setContinuation,
 } from './db/session-state.js';
 import { formatMessages, extractRouting, categorizeMessage, isClearCommand, stripInternalTags, type RoutingContext } from './formatter.js';
+import { classifyAndPrepend } from './intent-router-bridge.js';
 import type { AgentProvider, AgentQuery, ProviderEvent } from './providers/types.js';
 
 const POLL_INTERVAL_MS = 1000;
 const ACTIVE_POLL_INTERVAL_MS = 500;
+const IDLE_END_MS = 600_000; // End stream after 600s with no SDK events (background subagents need longer)
 
 function log(msg: string): void {
   console.error(`[poll-loop] ${msg}`);
+}
+
+/**
+ * True iff the message is a scheduled task that explicitly OPTS OUT of the
+ * fresh-session default by setting `content.new_session === false`. The
+ * default across the system is now fresh-session-on for recurring task
+ * batches (see isNewSessionBatch); tasks that genuinely need the stored
+ * continuation (chained workflows that carry state in conversation memory,
+ * rather than in files) must opt out explicitly.
+ *
+ * Strict `=== false` matters — an absent key or `true` both participate in
+ * the default; only an explicit `false` blocks it. Swallows malformed JSON
+ * rather than throwing.
+ */
+export function taskOptsOutOfNewSession(m: { kind: string; content: string }): boolean {
+  if (m.kind !== 'task') return false;
+  try {
+    return (JSON.parse(m.content) as Record<string, unknown>).new_session === false;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Default-on fresh-session policy for recurring task batches:
+ *   - Empty batch: false (defensive — no spurious fresh sessions).
+ *   - Any chat in the batch: false (mixed batches preserve chat history).
+ *   - All-tasks AND at least one opts out via `new_session: false`: false
+ *     (safer to preserve continuity than drop it when any task asks).
+ *   - All-tasks AND none opts out: true (the common heartbeat/cron case,
+ *     now the default without any flag needing to be set).
+ *
+ * Historical note: PR #58 introduced opt-in (`new_session: true`); PR #106
+ * fixed the follow-up-push bypass; empirical prod rollout (slang-discord-
+ * support: $0.57 after flip vs $1.00 before, on 11 turns vs 3) confirmed
+ * the delta is real enough to make opt-out the sane default.
+ */
+export function isNewSessionBatch(keep: Array<{ kind: string; content: string }>): boolean {
+  return keep.length > 0 && keep.every((m) => m.kind === 'task') && !keep.some(taskOptsOutOfNewSession);
 }
 
 function generateId(): string {
@@ -154,15 +198,30 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
       continue;
     }
 
+    // Scheduled tasks with new_session:true run in a fresh context so
+    // heartbeat/cron history doesn't accumulate across runs. Only applies
+    // when the entire batch is tasks (no chat messages mixed in) — mixed
+    // batches default to the stored continuation so chat history is preserved.
+    const newSessionBatch = isNewSessionBatch(keep);
+
     // Format messages: passthrough commands get raw text (only if the
     // provider natively handles slash commands), others get XML.
-    const prompt = formatMessagesWithCommands(keep, config.provider.supportsNativeSlashCommands);
+    let prompt = formatMessagesWithCommands(keep, config.provider.supportsNativeSlashCommands);
+
+    // Non-native providers: run intent router on the initial prompt too.
+    // Claude SDK fires UserPromptSubmit hooks natively; for Codex/OpenCode
+    // we call the same bridge so workflow classification applies to every
+    // user message regardless of provider.
+    if (!config.provider.supportsNativeSlashCommands) {
+      prompt = await classifyAndPrepend(prompt);
+    }
 
     log(`Processing ${keep.length} message(s), kinds: ${[...new Set(keep.map((m) => m.kind))].join(',')}`);
+    if (newSessionBatch) log('new_session flag set — running task in fresh context');
 
     const query = config.provider.query({
       prompt,
-      continuation,
+      continuation: newSessionBatch ? undefined : continuation,
       cwd: config.cwd,
       systemContext: config.systemContext,
     });
@@ -171,8 +230,9 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
     const skippedSet = new Set(skipped);
     const processingIds = ids.filter((id) => !commandIds.includes(id) && !skippedSet.has(id));
     try {
-      const result = await processQuery(query, routing, processingIds, config.providerName);
-      if (result.continuation && result.continuation !== continuation) {
+      const result = await processQuery(query, routing, processingIds, config.providerName, newSessionBatch);
+      // Don't overwrite the stored chat continuation with a task's ephemeral session.
+      if (!newSessionBatch && result.continuation && result.continuation !== continuation) {
         continuation = result.continuation;
         setContinuation(config.providerName, continuation);
       }
@@ -208,27 +268,77 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
 }
 
 /**
+ * For non-native providers, resolve a slash command to its SKILL.md body.
+ * Claude Code's SDK loads SKILL.md on demand via its Skill tool; for Codex
+ * and other providers we inject the body directly into the prompt so the
+ * agent gets the same information without needing to `cat` the file.
+ */
+function resolveSkillBody(command: string): string | null {
+  const skillName = command.replace(/^\//, '').split(/\s/)[0];
+  if (!skillName) return null;
+
+  const candidates = [
+    path.join('/home/node/.claude/skills', skillName, 'SKILL.md'),
+    // Additional dirs: cloned repos may put skills under the agent workspace
+    ...fs.readdirSync('/workspace/agent').flatMap((dir) => {
+      const p = path.join('/workspace/agent', dir, '.claude', 'skills', skillName, 'SKILL.md');
+      return fs.existsSync(p) ? [p] : [];
+    }),
+  ];
+
+  for (const candidate of candidates) {
+    try {
+      if (!fs.existsSync(candidate)) continue;
+      let body = fs.readFileSync(candidate, 'utf-8');
+      // Strip YAML frontmatter
+      body = body.replace(/^---\s*\n[\s\S]*?\n---\s*\n/, '');
+      return body.trim();
+    } catch { /* skip */ }
+  }
+  return null;
+}
+
+/**
  * Format messages, handling passthrough commands differently.
  * When the provider handles slash commands natively (Claude Code),
  * passthrough commands are sent raw (no XML wrapping) so the SDK can
- * dispatch them. Otherwise they fall through to standard XML formatting.
+ * dispatch them. For non-native providers, skill bodies are resolved and
+ * injected so the agent gets the full SKILL.md content on invocation.
  */
 function formatMessagesWithCommands(messages: MessageInRow[], nativeSlashCommands: boolean): string {
   const parts: string[] = [];
   const normalBatch: MessageInRow[] = [];
 
   for (const msg of messages) {
-    if (nativeSlashCommands && (msg.kind === 'chat' || msg.kind === 'chat-sdk')) {
+    if ((msg.kind === 'chat' || msg.kind === 'chat-sdk')) {
       const cmdInfo = categorizeMessage(msg);
       if (cmdInfo.category === 'passthrough' || cmdInfo.category === 'admin') {
-        // Flush normal batch first
-        if (normalBatch.length > 0) {
-          parts.push(formatMessages(normalBatch));
-          normalBatch.length = 0;
+        if (nativeSlashCommands) {
+          // Flush normal batch first
+          if (normalBatch.length > 0) {
+            parts.push(formatMessages(normalBatch));
+            normalBatch.length = 0;
+          }
+          // Pass raw command text (no XML wrapping) — SDK handles it natively
+          parts.push(cmdInfo.text);
+          continue;
         }
-        // Pass raw command text (no XML wrapping) — SDK handles it natively
-        parts.push(cmdInfo.text);
-        continue;
+
+        // Non-native provider: resolve SKILL.md body and inject it
+        if (cmdInfo.category === 'passthrough') {
+          const body = resolveSkillBody(cmdInfo.command);
+          if (body) {
+            if (normalBatch.length > 0) {
+              parts.push(formatMessages(normalBatch));
+              normalBatch.length = 0;
+            }
+            const args = cmdInfo.text.slice(cmdInfo.command.length).trim();
+            parts.push(
+              `<skill-invocation name="${cmdInfo.command.slice(1)}"${args ? ` args="${args}"` : ''}>\n${body}\n</skill-invocation>`,
+            );
+            continue;
+          }
+        }
       }
     }
     normalBatch.push(msg);
@@ -250,9 +360,11 @@ async function processQuery(
   routing: RoutingContext,
   initialBatchIds: string[],
   providerName: string,
+  skipPersistContinuation = false,
 ): Promise<QueryResult> {
   let queryContinuation: string | undefined;
   let done = false;
+  let lastEventTime = Date.now();
 
   // Concurrent polling: push follow-ups into the active query as they arrive.
   // We do NOT force-end the stream on silence — keeping the query open is
@@ -260,7 +372,7 @@ async function processQuery(
   // Stream liveness is decided host-side via the heartbeat file + processing
   // claim age (see src/host-sweep.ts); if something is truly stuck, the host
   // will kill the container and messages get reset to pending.
-  const pollHandle = setInterval(() => {
+  const pollHandle = setInterval(async () => {
     if (done) return;
 
     // Skip system messages (MCP tool responses) and /clear (needs fresh query).
@@ -276,19 +388,77 @@ async function processQuery(
       return true;
     });
     if (newMessages.length > 0) {
+      // new_session bypass guard: if any arriving task defaults to fresh
+      // session (a task kind with no `new_session: false` opt-out), DO NOT
+      // push into the active query — that would resume the stored
+      // continuation and defeat the default (the cost-growth-from-accumulated-
+      // context problem PRs #58/#103/#106 were meant to solve).
+      // Instead, end the active query; the next poll iteration's initial-batch
+      // path will pick up the pending rows, `isNewSessionBatch` will return
+      // true, and the provider.query call will run with continuation:
+      // undefined.
+      //
+      // Without this guard, any heartbeat-style recurring task fires within
+      // IDLE_END_MS (10 min) of each other and bypasses the default — making
+      // new_session effectively a no-op for all realistic prod cadences.
+      // Empirically reproduced on dev 2026-05-05 (see PR #106 description).
+      //
+      // We leave rows as 'pending' (no markProcessing/markCompleted) so the
+      // next loop iteration re-reads them fresh.
+      const wantsFreshSession = (m: { kind: string; content: string }) =>
+        m.kind === 'task' && !taskOptsOutOfNewSession(m);
+      if (newMessages.some(wantsFreshSession)) {
+        log(
+          `fresh-session task arrived mid-query (${newMessages.length} msg) — ending active query to route through fresh-session path`,
+        );
+        query.end();
+        done = true;
+        return;
+      }
+
+      // Update the shared routing when a follow-up brings richer routing
+      // than the initial batch had. Common case: the initial batch was a
+      // scheduled task (no channel/platform) and a chat arrives mid-turn —
+      // we want the chat's reply to land back on that channel, not get
+      // silently dropped because the initial routing was null. Prefer any
+      // non-null channelType+platformId from the new batch; otherwise keep
+      // the existing routing.
+      const followUpRouting = extractRouting(newMessages);
+      if (followUpRouting.channelType && followUpRouting.platformId) {
+        if (!routing.channelType || !routing.platformId) {
+          log(
+            `Promoting routing from follow-up (${followUpRouting.channelType}:${followUpRouting.platformId}); initial routing was null`,
+          );
+        }
+        routing = followUpRouting;
+      }
+
       const newIds = newMessages.map((m) => m.id);
       markProcessing(newIds);
 
       const prompt = formatMessages(newMessages);
+      // The SDK fires UserPromptSubmit (and the intent-router hook) only on
+      // the initial query prompt. Mid-query pushes bypass the hook, so run
+      // the router ourselves here so workflow classification is applied to
+      // every user message — not just the first.
+      const routedPrompt = await classifyAndPrepend(prompt);
       log(`Pushing ${newMessages.length} follow-up message(s) into active query`);
-      query.push(prompt);
+      query.push(routedPrompt);
 
       markCompleted(newIds);
+      lastEventTime = Date.now(); // new input counts as activity
+    }
+
+    // End stream when agent is idle: no SDK events and no pending messages
+    if (Date.now() - lastEventTime > IDLE_END_MS) {
+      log(`No SDK events for ${IDLE_END_MS / 1000}s, ending query`);
+      query.end();
     }
   }, ACTIVE_POLL_INTERVAL_MS);
 
   try {
     for await (const event of query.events) {
+      lastEventTime = Date.now();
       handleEvent(event, routing);
       touchHeartbeat();
 
@@ -300,7 +470,7 @@ async function processQuery(
         // container died between `init` and `result`, the SDK session was
         // effectively orphaned and the next message started a blank
         // Claude session with no prior context.
-        setContinuation(providerName, event.continuation);
+        if (!skipPersistContinuation) setContinuation(providerName, event.continuation);
       } else if (event.type === 'result') {
         // A result — with or without text — means the turn is done. Mark
         // the initial batch completed now so the host sweep doesn't see
@@ -335,6 +505,24 @@ function handleEvent(event: ProviderEvent, _routing: RoutingContext): void {
       break;
     case 'progress':
       log(`Progress: ${event.message}`);
+      break;
+    case 'usage':
+      // Structured per-turn accounting. Grep-friendly: every field is a
+      // bare keyword=value token, same line. Stable schema so downstream
+      // tooling (ccusage / ad-hoc awk / the 2×2 stress-test harness)
+      // can parse without JSON.
+      log(
+        `Usage: sessionId=${event.sessionId ?? 'null'} ` +
+          `durationMs=${event.durationMs} ` +
+          `numTurns=${event.numTurns} ` +
+          `input=${event.inputTokens} ` +
+          `output=${event.outputTokens} ` +
+          `cacheCreate=${event.cacheCreationInputTokens} ` +
+          `cacheRead=${event.cacheReadInputTokens} ` +
+          `ephemeral1h=${event.ephemeral1hInputTokens} ` +
+          `ephemeral5m=${event.ephemeral5mInputTokens} ` +
+          `costUsd=${event.totalCostUsd}`,
+      );
       break;
   }
 }

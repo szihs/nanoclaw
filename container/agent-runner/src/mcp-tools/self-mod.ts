@@ -117,4 +117,31 @@ export const addMcpServer: McpToolDefinition = {
   },
 };
 
-registerTools([installPackages, addMcpServer]);
+export const requestRestart: McpToolDefinition = {
+  tool: {
+    name: 'request_restart',
+    description:
+      'Request that your container be restarted with fresh instructions (CLAUDE.md). Use when told your instructions are stale, or when you need a clean session. No admin approval required.',
+    inputSchema: {
+      type: 'object' as const,
+      properties: {
+        reason: { type: 'string', description: 'Why restart is needed' },
+      },
+    },
+  },
+  async handler(args) {
+    const requestId = generateId();
+    writeMessageOut({
+      id: requestId,
+      kind: 'system',
+      content: JSON.stringify({
+        action: 'request_restart',
+        reason: (args.reason as string) || 'agent requested restart',
+      }),
+    });
+    log(`request_restart: ${requestId}`);
+    return ok('Restart requested. Container will restart shortly with fresh instructions.');
+  },
+};
+
+registerTools([installPackages, addMcpServer, requestRestart]);

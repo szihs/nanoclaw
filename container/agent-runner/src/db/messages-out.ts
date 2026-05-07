@@ -38,9 +38,9 @@ export interface WriteMessageOut {
  *
  * The disjoint namespace is load-bearing, not just collision avoidance:
  * seq is the agent-facing message ID returned by send_message and accepted
- * by edit_message / add_reaction, and getMessageIdBySeq() below looks up
- * by seq across BOTH tables. If inbound and outbound could share a seq,
- * the agent's "edit message #5" could resolve to the wrong row.
+ * by add_reaction, and getMessageIdBySeq() below looks up by seq across
+ * BOTH tables. If inbound and outbound could share a seq, the agent's
+ * "react to message #5" could resolve to the wrong row.
  */
 export function writeMessageOut(msg: WriteMessageOut): number {
   const outbound = getOutboundDb();

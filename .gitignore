@@ -39,3 +39,11 @@ groups/*
 .nanoclaw/
 
 agents-sdk-docs
+repos/
+
+!groups/templates/
+coworkers/*.yaml
+coworkers/*.yaml.bak
+coworkers/*.tar.gz
+.codex
+.claude/projects/*/memory/

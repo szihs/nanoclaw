@@ -1,5 +1,6 @@
 ---
 name: slack-formatting
+license: MIT
 description: Format messages for Slack using mrkdwn syntax. Use when responding to Slack channels (folder starts with "slack_" or JID contains slack identifiers).
 ---
 
@@ -11,7 +12,7 @@ When responding to Slack channels, use Slack's mrkdwn syntax instead of standard
 
 Check your group folder name or workspace path:
 - Folder starts with `slack_` (e.g., `slack_engineering`, `slack_general`)
-- Or check `/workspace/group/` path for `slack_` prefix
+- Or check `/workspace/agent/` path for `slack_` prefix
 
 ## Formatting reference
 

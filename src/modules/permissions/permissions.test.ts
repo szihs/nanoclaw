@@ -230,6 +230,7 @@ describe('ensureUserDm', () => {
       platform_id: '555',
       name: 'Pre-existing',
       is_group: 0 as const,
+      admin_user_id: null,
       unknown_sender_policy: 'strict' as const,
       created_at: now(),
     };

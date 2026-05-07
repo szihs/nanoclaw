@@ -2,15 +2,16 @@ import fs from 'fs';
 import path from 'path';
 
 import { DATA_DIR, GROUPS_DIR } from './config.js';
-import { initContainerConfig } from './container-config.js';
 import { log } from './log.js';
 import type { AgentGroup } from './types.js';
 
 const DEFAULT_SETTINGS_JSON =
   JSON.stringify(
     {
+      preferences: {
+        reasoningEffort: 'max',
+      },
       env: {
-        CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: '1',
         CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD: '1',
         CLAUDE_CODE_DISABLE_AUTO_MEMORY: '0',
       },
@@ -20,21 +21,59 @@ const DEFAULT_SETTINGS_JSON =
   ) + '\n';
 
 /**
+ * Deepest mtime under `p` (file or directory, recursive). Returns 0 on
+ * missing path. Used to decide whether a source tree is newer than its
+ * mirrored destination.
+ */
+function latestMtimeMs(p: string): number {
+  let st: fs.Stats;
+  try {
+    st = fs.statSync(p);
+  } catch {
+    return 0;
+  }
+  if (!st.isDirectory()) return st.mtimeMs;
+  let max = st.mtimeMs;
+  let entries: string[];
+  try {
+    entries = fs.readdirSync(p);
+  } catch {
+    return max;
+  }
+  for (const entry of entries) {
+    const child = latestMtimeMs(path.join(p, entry));
+    if (child > max) max = child;
+  }
+  return max;
+}
+
+/**
+ * Refresh a source→destination mirror when the source is newer than the
+ * mirror (or the mirror does not exist). Removes the destination first so
+ * files deleted upstream are not left behind. Returns true if a copy ran.
+ */
+export function refreshMirror(src: string, dst: string): boolean {
+  const srcMtime = latestMtimeMs(src);
+  const dstMtime = latestMtimeMs(dst);
+  if (dstMtime >= srcMtime) return false;
+  if (fs.existsSync(dst)) fs.rmSync(dst, { recursive: true, force: true });
+  fs.cpSync(src, dst, { recursive: true });
+  return true;
+}
+
+/**
  * Initialize the on-disk filesystem state for an agent group. Idempotent —
- * every step is gated on the target not already existing, so re-running on
- * an already-initialized group is a no-op.
+ * re-running on an already-initialized group only refreshes mirrored
+ * source trees (skills, subagent definitions) when their sources are newer.
  *
- * Called once per group lifetime at creation, or defensively from
- * `buildMounts()` for groups that pre-date this code path.
- *
- * Source code and skills are shared RO mounts — not copied per-group.
- * Skill symlinks are synced at spawn time by container-runner.ts.
- *
- * The composed `CLAUDE.md` is NOT written here — it's regenerated on every
- * spawn by `composeGroupClaudeMd()` (see `claude-md-compose.ts`). Initial
- * per-group instructions (if provided) seed `CLAUDE.local.md`.
+ * Called on every wake via `buildMounts()`. Agent-owned paths (groupDir,
+ * .instructions.md, settings.json) are created once and then left alone;
+ * host-owned mirrors of `container/skills/` and `container/overlays/`
+ * agent.md siblings are kept current automatically so upstream skill
+ * changes propagate without a manual refresh tool.
  */
 export function initGroupFilesystem(group: AgentGroup, opts?: { instructions?: string }): void {
+  const projectRoot = process.cwd();
   const initialized: string[] = [];
 
   // 1. groups/<folder>/ — group memory + working dir
@@ -44,20 +83,19 @@ export function initGroupFilesystem(group: AgentGroup, opts?: { instructions?: s
     initialized.push('groupDir');
   }
 
-  // groups/<folder>/CLAUDE.local.md — per-group agent memory, auto-loaded by
-  // Claude Code. Seeded with caller-provided instructions on first creation.
-  const claudeLocalFile = path.join(groupDir, 'CLAUDE.local.md');
-  if (!fs.existsSync(claudeLocalFile)) {
-    const body = opts?.instructions ? opts.instructions + '\n' : '';
-    fs.writeFileSync(claudeLocalFile, body);
-    initialized.push('CLAUDE.local.md');
-  }
+  // groups/<folder>/CLAUDE.md is composed by composeCoworkerClaudeMd in
+  // container-runner.ts on every wake — for both 'main' (flat body +
+  // additive fragments) and typed coworkers (full spine). The host never
+  // hand-writes the file here. The pre-lego '.claude-global.md' symlink
+  // and '@./.claude-global.md' @-import are retired; if any install still
+  // has them, scripts/migrate-global-to-shared.ts cleans them up.
 
-  // groups/<folder>/container.json — empty container config, replaces the
-  // former agent_groups.container_config DB column. Self-modification flows
-  // read and write this file directly.
-  if (initContainerConfig(group.folder)) {
-    initialized.push('container.json');
+  // groups/<folder>/.instructions.md — user-owned instructions.
+  // CLAUDE.md is system-composed from templates + .instructions.md on every wake.
+  const instructionsFile = path.join(groupDir, '.instructions.md');
+  if (!fs.existsSync(instructionsFile) && opts?.instructions) {
+    fs.writeFileSync(instructionsFile, opts.instructions + '\n');
+    initialized.push('.instructions.md');
   }
 
   // 2. data/v2-sessions/<id>/.claude-shared/ — Claude state + per-group skills
@@ -73,12 +111,70 @@ export function initGroupFilesystem(group: AgentGroup, opts?: { instructions?: s
     initialized.push('settings.json');
   }
 
-  // Skills directory — created empty here; symlinks are synced at spawn
-  // time by container-runner.ts based on container.json skills selection.
+  // mtime-based mirror: re-copy any skill whose source tree is newer than
+  // the destination. This fixes silent skill-mirror staleness — prior
+  // copy-once-at-init left existing groups stuck on old skill versions
+  // indefinitely after upstream changes.
   const skillsDst = path.join(claudeDir, 'skills');
-  if (!fs.existsSync(skillsDst)) {
+  const skillsSrc = path.join(projectRoot, 'container', 'skills');
+  if (fs.existsSync(skillsSrc)) {
     fs.mkdirSync(skillsDst, { recursive: true });
-    initialized.push('skills/');
+    for (const skill of fs.readdirSync(skillsSrc)) {
+      const src = path.join(skillsSrc, skill);
+      const dst = path.join(skillsDst, skill);
+      const existed = fs.existsSync(dst);
+      if (refreshMirror(src, dst)) {
+        initialized.push(existed ? `skills/${skill} (refreshed)` : `skills/${skill}`);
+      }
+    }
+  }
+
+  // 2b. data/v2-sessions/<id>/.claude-shared/agents/ — subagent definitions.
+  // A sibling `agent.md` inside any skill or overlay dir is copied as a
+  // subagent definition. Overlays like `codex-critique` ship both an
+  // OVERLAY.md (compose-time body) and an agent.md (runtime subagent).
+  // mtime-refreshed on each wake for the same reason as skills/.
+  const agentsDst = path.join(claudeDir, 'agents');
+  fs.mkdirSync(agentsDst, { recursive: true });
+  for (const subdir of ['skills', 'overlays']) {
+    const srcRoot = path.join(projectRoot, 'container', subdir);
+    if (!fs.existsSync(srcRoot)) continue;
+    for (const entry of fs.readdirSync(srcRoot)) {
+      const agentFile = path.join(srcRoot, entry, 'agent.md');
+      if (fs.existsSync(agentFile)) {
+        const dst = path.join(agentsDst, `${entry}.md`);
+        const existed = fs.existsSync(dst);
+        const srcMtime = latestMtimeMs(agentFile);
+        const dstMtime = latestMtimeMs(dst);
+        if (dstMtime < srcMtime) {
+          fs.copyFileSync(agentFile, dst);
+          initialized.push(existed ? `agents/${entry}.md (refreshed)` : `agents/${entry}.md`);
+        }
+      }
+    }
+  }
+
+  // Prune mirrors for agent.md files removed upstream so stale definitions
+  // (e.g. sandbox:'read-only' from an old codex-critique) can't persist.
+  for (const existing of fs.readdirSync(agentsDst)) {
+    const name = existing.replace(/\.md$/, '');
+    const stillExists = ['skills', 'overlays'].some((sub) =>
+      fs.existsSync(path.join(projectRoot, 'container', sub, name, 'agent.md')),
+    );
+    if (!stillExists) {
+      fs.rmSync(path.join(agentsDst, existing));
+      initialized.push(`agents/${existing} (pruned orphan)`);
+    }
+  }
+
+  // 3. data/v2-sessions/<id>/agent-runner-src/ — per-group source copy
+  const groupRunnerDir = path.join(DATA_DIR, 'v2-sessions', group.id, 'agent-runner-src');
+  if (!fs.existsSync(groupRunnerDir)) {
+    const agentRunnerSrc = path.join(projectRoot, 'container', 'agent-runner', 'src');
+    if (fs.existsSync(agentRunnerSrc)) {
+      fs.cpSync(agentRunnerSrc, groupRunnerDir, { recursive: true });
+      initialized.push('agent-runner-src/');
+    }
   }
 
   if (initialized.length > 0) {
