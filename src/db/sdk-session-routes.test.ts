@@ -6,20 +6,38 @@ import {
   getRoutesForNanoSession,
   recordBackfillRoute,
   recordLiveRoute,
+  stampLiveRouteValidated,
   touchRouteLastSeen,
 } from './sdk-session-routes.js';
 import { migration018 } from './migrations/018-sdk-session-routes.js';
 
 function freshDb(): Database.Database {
   const db = new Database(':memory:');
+  // The validated stamp joins sessions + agent_groups, so seed both when
+  // testing it. Other helpers don't touch those tables.
+  db.exec(`
+    CREATE TABLE agent_groups (id TEXT PRIMARY KEY, folder TEXT NOT NULL);
+    CREATE TABLE sessions (id TEXT PRIMARY KEY, agent_group_id TEXT NOT NULL);
+  `);
   migration018.up(db);
   return db;
+}
+
+function seedSession(db: Database.Database, sessionId: string, agentGroupId: string, folder: string) {
+  db.prepare('INSERT OR IGNORE INTO agent_groups (id, folder) VALUES (?, ?)').run(agentGroupId, folder);
+  db.prepare('INSERT OR IGNORE INTO sessions (id, agent_group_id) VALUES (?, ?)').run(sessionId, agentGroupId);
 }
 
 describe('sdk-session-routes helpers', () => {
   let db: Database.Database;
   beforeEach(() => {
     db = freshDb();
+    // Seed the referenced rows so FK constraints pass for the basic
+    // helper tests — the validated-stamp tests reseed via seedSession
+    // for their own scenarios.
+    seedSession(db, 'sess-root', 'ag-1', 'orchestrator');
+    seedSession(db, 'sess-other', 'ag-1', 'orchestrator');
+    seedSession(db, 'sess-thread', 'ag-1', 'orchestrator');
   });
 
   it('recordLiveRoute inserts on first-seen and returns true', () => {
@@ -110,5 +128,51 @@ describe('sdk-session-routes helpers', () => {
     expect(cols.map((c) => c.name).sort()).toEqual(
       ['agent_group_id', 'first_seen_at', 'group_folder', 'last_seen_at', 'nanoclaw_session_id', 'sdk_session_id', 'source'].sort(),
     );
+  });
+
+  describe('stampLiveRouteValidated', () => {
+    it('routes when session exists and folder matches', () => {
+      seedSession(db, 'sess-root', 'ag-1', 'orchestrator');
+      const res = stampLiveRouteValidated(db, {
+        sdkSessionId: 'sdk-a',
+        nanoclawSessionId: 'sess-root',
+        groupFolder: 'orchestrator',
+        now: 1000,
+      });
+      expect(res).toEqual({ status: 'routed', inserted: true });
+      expect(getRoute(db, 'sdk-a')!.nanoclaw_session_id).toBe('sess-root');
+    });
+
+    it('returns unknown_session when the claimed session does not exist', () => {
+      const res = stampLiveRouteValidated(db, {
+        sdkSessionId: 'sdk-x',
+        nanoclawSessionId: 'sess-fake',
+        groupFolder: 'orchestrator',
+        now: 1000,
+      });
+      expect(res.status).toBe('unknown_session');
+      expect(getRoute(db, 'sdk-x')).toBeNull();
+    });
+
+    it('returns folder_mismatch when the session belongs to a different folder', () => {
+      seedSession(db, 'sess-root', 'ag-1', 'orchestrator');
+      const res = stampLiveRouteValidated(db, {
+        sdkSessionId: 'sdk-x',
+        nanoclawSessionId: 'sess-root',
+        groupFolder: 'other-coworker',
+        now: 1000,
+      });
+      expect(res.status).toBe('folder_mismatch');
+      expect(getRoute(db, 'sdk-x')).toBeNull();
+    });
+
+    it('touches last_seen_at on re-stamp of the same SDK UUID', () => {
+      seedSession(db, 'sess-root', 'ag-1', 'orchestrator');
+      stampLiveRouteValidated(db, { sdkSessionId: 'sdk-a', nanoclawSessionId: 'sess-root', groupFolder: 'orchestrator', now: 1000 });
+      const second = stampLiveRouteValidated(db, { sdkSessionId: 'sdk-a', nanoclawSessionId: 'sess-root', groupFolder: 'orchestrator', now: 5000 });
+      expect(second).toEqual({ status: 'routed', inserted: false });
+      expect(getRoute(db, 'sdk-a')!.last_seen_at).toBe(5000);
+      expect(getRoute(db, 'sdk-a')!.first_seen_at).toBe(1000);
+    });
   });
 });

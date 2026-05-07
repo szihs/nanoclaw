@@ -51,6 +51,54 @@ export function recordLiveRoute(
   return res.changes > 0;
 }
 
+/**
+ * Live-intake entry point for the dashboard hook endpoint. Validates that
+ * the claimed `nanoclawSessionId` actually exists AND belongs to an agent
+ * group whose folder matches `groupFolder`, then stamps the route. Returns
+ * the outcome so the caller can log or increment metrics; errors are
+ * swallowed (never crash the hook path on a bad claim).
+ *
+ * Without this validation a malicious or misconfigured container could
+ * write sdk_session_routes rows pointing at sessions it doesn't own,
+ * corrupting Timeline attribution on the victim side.
+ */
+export type LiveStampResult =
+  | { status: 'routed'; inserted: boolean }
+  | { status: 'unknown_session' }
+  | { status: 'folder_mismatch' }
+  | { status: 'error'; error: string };
+
+export function stampLiveRouteValidated(
+  db: Database.Database,
+  params: { sdkSessionId: string; nanoclawSessionId: string; groupFolder: string; now: number },
+): LiveStampResult {
+  try {
+    const row = db
+      .prepare(
+        `SELECT s.id AS session_id, s.agent_group_id AS agent_group_id, ag.folder AS folder
+           FROM sessions s
+           JOIN agent_groups ag ON ag.id = s.agent_group_id
+          WHERE s.id = ?
+          LIMIT 1`,
+      )
+      .get(params.nanoclawSessionId) as { session_id: string; agent_group_id: string; folder: string } | undefined;
+    if (!row) return { status: 'unknown_session' };
+    if (row.folder !== params.groupFolder) return { status: 'folder_mismatch' };
+
+    const inserted = recordLiveRoute(db, {
+      sdkSessionId: params.sdkSessionId,
+      nanoclawSessionId: row.session_id,
+      agentGroupId: row.agent_group_id,
+      groupFolder: row.folder,
+      now: params.now,
+    });
+    touchRouteLastSeen(db, params.sdkSessionId, params.now);
+    return { status: 'routed', inserted };
+  } catch (e) {
+    return { status: 'error', error: e instanceof Error ? e.message : String(e) };
+  }
+}
+
 export function touchRouteLastSeen(
   db: Database.Database,
   sdkSessionId: string,

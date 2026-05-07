@@ -57,6 +57,8 @@ function run(): void {
 
   let routed = 0;
   let orphan = 0;
+  let singleCandidate = 0;
+  let heuristic = 0;
   const orphanSamples: string[] = [];
 
   for (const r of unrouted) {
@@ -77,13 +79,22 @@ function run(): void {
     }
 
     let pick: NanoSessionRow | null = null;
+    let method: 'single-candidate' | 'heuristic' = 'heuristic';
     if (folderSessions.length === 1) {
       // Shared-install / old-data case: unambiguous. Covers scheduled-task
       // newSession:true fires — all SDK UUIDs belong to the single session.
       pick = folderSessions[0];
+      method = 'single-candidate';
     } else {
       // Multi-candidate: bracket by (created_at <= first_seen_at < next.created_at).
       // Compare sessions.created_at (ISO text) to hook first_seen_at (epoch ms).
+      //
+      // WARNING: this heuristic misattributes root-session activity that
+      // happens AFTER a thread is created (the new root SDK UUID's
+      // first_seen_at > thread.created_at so it brackets to the thread).
+      // That's an acceptable failure mode for historical data only. Live
+      // events from here on stamp source='live' at intake with exact
+      // attribution; this script is purely a one-shot repair.
       for (let i = 0; i < folderSessions.length; i++) {
         const cur = folderSessions[i];
         const curMs = Date.parse(cur.created_at);
@@ -91,12 +102,10 @@ function run(): void {
         const next = folderSessions[i + 1];
         if (!next || Date.parse(next.created_at) > r.first_seen_at) {
           pick = cur;
+          method = 'heuristic';
           break;
         }
       }
-      // If no bracket matched and all sessions started AFTER first_seen_at
-      // (shouldn't happen in practice — hook events can't predate their
-      // session), leave as orphan.
     }
 
     if (!pick) {
@@ -116,12 +125,29 @@ function run(): void {
       firstSeenAt: r.first_seen_at,
       lastSeenAt: r.last_seen_at,
     });
-    if (inserted) routed++;
+    if (inserted) {
+      routed++;
+      if (method === 'single-candidate') singleCandidate++;
+      else heuristic++;
+    }
   }
+
+  // Confirm on-disk totals for source='backfill' — exposes duplicates /
+  // re-run idempotency at a glance.
+  const backfillTotal = (db.prepare("SELECT COUNT(*) AS n FROM sdk_session_routes WHERE source='backfill'").get() as { n: number }).n;
+  const liveTotal = (db.prepare("SELECT COUNT(*) AS n FROM sdk_session_routes WHERE source='live'").get() as { n: number }).n;
 
   db.close();
 
-  console.log(`[backfill] routed=${routed}  orphan=${orphan}`);
+  console.log(`[backfill] routed=${routed}  (single-candidate=${singleCandidate}, heuristic=${heuristic})  orphan=${orphan}`);
+  console.log(`[backfill] table totals: source='live'=${liveTotal}  source='backfill'=${backfillTotal}`);
+  if (heuristic > 0) {
+    console.log(
+      `[backfill] WARNING: ${heuristic} route(s) used the multi-session timestamp-bracket heuristic.` +
+        ` This can misattribute root-session activity that ran after a thread session was created.` +
+        ` Treat these as best-effort historical repair only; live events stamp exact routes at intake.`,
+    );
+  }
   if (orphanSamples.length) {
     console.log(`[backfill] orphan samples:\n  ${orphanSamples.join('\n  ')}`);
   }

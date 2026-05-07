@@ -31,15 +31,20 @@ export const migration018: Migration = {
         .c > 0;
     if (hasTable('sdk_session_routes')) return;
 
+    // FK declarations document intent even when PRAGMA foreign_keys is off
+    // (the default for this DB). Helpers in src/db/sdk-session-routes.ts
+    // additionally validate nanoclaw_session_id + agent_group_id exist
+    // before inserting, so bad routes can't slip in via the live-intake
+    // path even without FK enforcement.
     db.exec(`
       CREATE TABLE sdk_session_routes (
         sdk_session_id       TEXT PRIMARY KEY,
-        nanoclaw_session_id  TEXT NOT NULL,
-        agent_group_id       TEXT NOT NULL,
+        nanoclaw_session_id  TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+        agent_group_id       TEXT NOT NULL REFERENCES agent_groups(id) ON DELETE CASCADE,
         group_folder         TEXT NOT NULL,
         first_seen_at        INTEGER NOT NULL,
         last_seen_at         INTEGER NOT NULL,
-        source               TEXT NOT NULL DEFAULT 'live'
+        source               TEXT NOT NULL DEFAULT 'live' CHECK (source IN ('live','backfill'))
       );
       CREATE INDEX idx_sdk_session_routes_nano  ON sdk_session_routes(nanoclaw_session_id);
       CREATE INDEX idx_sdk_session_routes_group ON sdk_session_routes(group_folder, last_seen_at);
