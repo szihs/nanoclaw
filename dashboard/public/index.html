@@ -732,14 +732,33 @@
     .cw-view-toggle { display: flex; gap: 2px; }
     .cw-toggle-btn { background: var(--bg); color: var(--text-muted); border: 1px solid var(--border); padding: 2px 10px; font-size: 0.6875rem; font-family: var(--font); cursor: pointer; border-radius: 3px; }
     .cw-toggle-btn.active { background: var(--green); color: #fff; border-color: var(--green); }
-    .cw-msg { margin-bottom: 10px; max-width: 80%; }
-    .cw-msg.user { margin-left: auto; }
-    .cw-msg.assistant { margin-right: auto; }
-    .cw-msg-bubble { padding: 6px 10px; border-radius: 6px; font-size: 0.8125rem; line-height: 1.5; word-break: break-word; }
-    .cw-msg.user .cw-msg-bubble { background: #1d4ed8; color: #fff; white-space: pre-wrap; }
-    .cw-msg.assistant .cw-msg-bubble { background: var(--bg-hover); color: var(--text); }
-    .cw-msg.assistant .cw-msg-bubble p { margin: 0 0 6px 0; }
-    .cw-msg.assistant .cw-msg-bubble p:last-child { margin-bottom: 0; }
+    /* Slack-style flat message row (replaces bubble look). Row has a hover
+       bg, avatar-monogram + name-bold + muted-time header, then body. Side
+       accent stripe replaces the coloured bubble so user/assistant/coworker
+       remain distinguishable without the chatbot aesthetic. */
+    .cw-msg { margin: 0; padding: 6px 12px 6px 44px; position: relative; font-size: 0.8125rem; line-height: 1.45; border-left: 2px solid transparent; }
+    .cw-msg:hover { background: rgba(255,255,255,0.02); }
+    .cw-msg:hover .cw-msg-actions { opacity: 1; }
+    .cw-msg-avatar { position: absolute; left: 12px; top: 8px; width: 24px; height: 24px; border-radius: 4px; background: var(--bg-hover); color: var(--text); display: flex; align-items: center; justify-content: center; font-size: 0.6875rem; font-weight: bold; }
+    .cw-msg-header { display: flex; align-items: baseline; gap: 8px; margin-bottom: 2px; }
+    .cw-msg-author { font-weight: 600; color: var(--text); }
+    .cw-msg-time { font-size: 0.6875rem; color: var(--text-muted); }
+    .cw-msg-bubble { padding: 0; background: none; border-radius: 0; font-size: 0.8125rem; line-height: 1.5; word-break: break-word; color: var(--text); }
+    .cw-msg.user .cw-msg-avatar { background: #1d4ed8; color: #fff; }
+    .cw-msg.assistant .cw-msg-avatar { background: #374151; }
+    .cw-msg.coworker { border-left-color: var(--green); }
+    .cw-msg.coworker .cw-msg-avatar { background: rgba(16,185,129,0.2); color: var(--green); }
+    .cw-msg.user.to-coworker { border-left-color: var(--green); }
+    .cw-msg.user .cw-msg-bubble { white-space: pre-wrap; }
+    .cw-msg-actions { position: absolute; right: 12px; top: 4px; opacity: 0; transition: opacity 0.1s; display: flex; gap: 4px; background: var(--bg-card); border: 1px solid var(--border); border-radius: 4px; padding: 2px; }
+    .cw-msg-action-btn { background: transparent; color: var(--text-muted); border: none; font-size: 0.6875rem; cursor: pointer; padding: 2px 6px; border-radius: 3px; font-family: var(--font); }
+    .cw-msg-action-btn:hover { background: var(--bg-hover); color: var(--text); }
+    .cw-thread-stub { display: inline-flex; align-items: center; gap: 6px; margin-top: 4px; padding: 3px 8px; background: var(--bg-card); border: 1px solid var(--border); border-radius: 12px; font-size: 0.6875rem; color: #60a5fa; cursor: pointer; }
+    .cw-thread-stub:hover { background: var(--bg-hover); border-color: #60a5fa; }
+    .cw-thread-stub-count { font-weight: 600; }
+    .cw-thread-stub-time { color: var(--text-muted); font-weight: 400; }
+    .cw-msg .cw-msg-bubble p { margin: 0 0 6px 0; }
+    .cw-msg .cw-msg-bubble p:last-child { margin-bottom: 0; }
     .cw-msg.assistant .cw-msg-bubble strong { color: #e2e8f0; }
     .cw-msg.assistant .cw-msg-bubble hr { border: none; border-top: 1px solid var(--border); margin: 8px 0; }
     .cw-msg.assistant .cw-msg-bubble code { background: rgba(0,0,0,0.3); padding: 1px 4px; border-radius: 3px; font-size: 0.75rem; }
@@ -754,13 +773,32 @@
     .cw-msg.assistant .cw-msg-bubble a:hover { text-decoration: underline; }
     .cw-msg-time { font-size: 0.625rem; color: var(--text-muted); margin-top: 2px; }
     .cw-msg.user .cw-msg-time { text-align: right; }
-    /* Agent-to-agent: inbound from another coworker (mirrors approval/question card styling) */
-    .cw-msg.coworker { margin-right: auto; }
-    .cw-msg.coworker .cw-msg-bubble { background: var(--bg-hover); color: var(--text); border-left: 3px solid var(--green); padding-left: 8px; }
-    .cw-msg.coworker .cw-msg-bubble p { margin: 0 0 6px 0; }
-    .cw-msg.coworker .cw-msg-bubble p:last-child { margin-bottom: 0; }
-    /* Outbound directed at another coworker — visible accent on the outgoing (right) side */
-    .cw-msg.user.to-coworker .cw-msg-bubble { background: #1d4ed8; border-right: 3px solid var(--green); padding-right: 8px; }
+    /* Thread panel — appears to the right of .cw-chat when a thread is open. */
+    .cw-thread-panel { width: 380px; min-width: 280px; flex-shrink: 0; border-left: 1px solid var(--border); background: var(--bg-card); display: flex; flex-direction: column; min-height: 0; }
+    .cw-thread-header { padding: 10px 12px; border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; align-items: center; background: var(--bg-card); }
+    .cw-thread-title { font-size: 0.8125rem; display: flex; flex-direction: column; gap: 2px; }
+    .cw-thread-parent-label { font-size: 0.6875rem; color: var(--text-muted); font-weight: 400; }
+    .cw-thread-close { background: transparent; color: var(--text-muted); border: none; font-size: 1.1rem; cursor: pointer; padding: 2px 8px; line-height: 1; }
+    .cw-thread-close:hover { color: var(--text); }
+    .cw-thread-parent { padding: 10px 12px; border-bottom: 1px solid var(--border); background: rgba(255,255,255,0.015); font-size: 0.75rem; color: var(--text-muted); max-height: 140px; overflow-y: auto; }
+    .cw-thread-parent .parent-author { font-weight: 600; color: var(--text); font-size: 0.75rem; }
+    .cw-thread-parent .parent-body { margin-top: 2px; line-height: 1.4; }
+    .cw-thread-messages { flex: 1; overflow-y: auto; padding: 10px 0; min-height: 0; }
+    .cw-thread-input { padding: 8px 12px; border-top: 1px solid var(--border); display: flex; gap: 6px; align-items: flex-end; }
+    .cw-thread-input textarea { flex: 1; background: var(--bg); color: var(--text); border: 1px solid var(--border); border-radius: 4px; padding: 6px 8px; font-family: var(--font); font-size: 0.75rem; resize: none; min-height: 32px; max-height: 100px; }
+    .cw-thread-input button { background: var(--green); color: #fff; border: none; border-radius: 4px; padding: 6px 12px; font-family: var(--font); font-size: 0.75rem; cursor: pointer; height: 32px; }
+    .cw-thread-input button:hover { opacity: 0.85; }
+
+    /* Read-only a2a inspector panel (Option C). Reuses .cw-thread-panel's
+       geometry so it can occupy the same right-side slot, but adds a
+       subtle amber left border + lock badge so operators can tell at a
+       glance that writes are disabled. */
+    .cw-a2a-inspector-panel { width: 380px; min-width: 280px; flex-shrink: 0; border-left: 2px solid #d97706; background: var(--bg-card); display: flex; flex-direction: column; min-height: 0; }
+    .cw-a2a-inspector-panel .cw-thread-header { border-bottom: 1px solid var(--border); }
+    .cw-a2a-inspector-readonly-badge { font-size: 0.625rem; color: #d97706; font-weight: 600; letter-spacing: 0.05em; text-transform: uppercase; }
+    .cw-a2a-inspector-messages { flex: 1; overflow-y: auto; padding: 10px 0; min-height: 0; }
+    .cw-a2a-inspector-empty { padding: 16px 12px; color: var(--text-muted); font-size: 0.75rem; text-align: center; }
+
     .cw-chat-input { padding: 8px 16px; border-top: 1px solid var(--border); display: flex; gap: 8px; align-items: flex-end; }
     .cw-chat-input textarea { flex: 1; background: var(--bg); color: var(--text); border: 1px solid var(--border); border-radius: 4px; padding: 6px 8px; font-family: var(--font); font-size: 0.75rem; resize: none; min-height: 32px; max-height: 100px; }
     .cw-chat-input button { background: var(--green); color: #fff; border: none; border-radius: 4px; padding: 6px 14px; font-family: var(--font); font-size: 0.75rem; cursor: pointer; height: 32px; }
@@ -818,7 +856,7 @@
     </div>
     <div class="header-right">
       <div class="obs-summary" aria-label="Actor observability summary">
-        <span class="obs-chip">Actors<b id="hdr-actors-total">0</b></span>
+        <span class="obs-chip" title="Distinct coworkers (folders). A single coworker can run N concurrent sessions internally (root + Slack-style threads); each coworker's detail panel lists its sessions.">Coworkers<b id="hdr-actors-total">0</b></span>
         <span class="obs-chip working">Working<b id="hdr-actors-working">0</b></span>
         <span class="obs-chip thinking">Thinking<b id="hdr-actors-thinking">0</b></span>
         <span class="obs-chip idle">Idle<b id="hdr-actors-idle">0</b></span>
@@ -950,6 +988,32 @@
         <textarea id="cw-chat-input" placeholder="Type a message..."></textarea>
         <button id="cw-chat-send">Send</button>
       </div>
+    </div>
+    <div class="cw-thread-panel" id="cw-thread-panel" style="display:none">
+      <div class="cw-thread-header">
+        <div class="cw-thread-title">
+          <strong>Thread</strong>
+          <span id="cw-thread-parent-label" class="cw-thread-parent-label"></span>
+        </div>
+        <button class="cw-thread-close" id="cw-thread-close" title="Close thread">&times;</button>
+      </div>
+      <div class="cw-thread-parent" id="cw-thread-parent"></div>
+      <div class="cw-thread-messages" id="cw-thread-messages"></div>
+      <div class="cw-thread-input">
+        <textarea id="cw-thread-input-text" placeholder="Reply in thread..."></textarea>
+        <button id="cw-thread-send">Reply</button>
+      </div>
+    </div>
+    <div class="cw-a2a-inspector-panel" id="cw-a2a-inspector-panel" style="display:none">
+      <div class="cw-thread-header">
+        <div class="cw-thread-title">
+          <strong id="cw-a2a-inspector-title">@reviewer session</strong>
+          <span id="cw-a2a-inspector-label" class="cw-thread-parent-label"></span>
+          <span class="cw-a2a-inspector-readonly-badge">&#x1F512; read-only</span>
+        </div>
+        <button class="cw-thread-close" id="cw-a2a-inspector-close" title="Close inspector">&times;</button>
+      </div>
+      <div class="cw-a2a-inspector-messages" id="cw-a2a-inspector-messages"></div>
     </div>
     <div class="cw-detail" id="cw-detail" style="display:none">
       <h3 id="cw-detail-name">Details</h3>
@@ -1169,6 +1233,10 @@
   </div>
 
   <script src="sprites.js"></script>
+  <!-- session-slug.js is an ESM module that attaches window.sessionSlug /
+       window.sessionLabel on load. app.js reads the window.* aliases so
+       it doesn't need to import — keeps the lazy-load order simple. -->
+  <script type="module" src="session-slug.js"></script>
   <script type="module" src="app.js"></script>
 </body>
 </html>

@@ -74,6 +74,31 @@ function getDbPath(): string {
 function getGroupsDir(): string {
   return resolve(process.env.NANOCLAW_DASHBOARD_GROUPS_DIR || join(getProjectRoot(), 'groups'));
 }
+/**
+ * Find the dashboard messaging_group row for a coworker. Primary lookup by
+ * canonical platform_id ('dashboard:<folder>'); fallback joins via
+ * messaging_group_agents for older rows that use a non-canonical
+ * platform_id. Returns null if the coworker has no dashboard wiring.
+ */
+function resolveDashboardMessagingGroupId(
+  db: Database.Database,
+  agentGroupId: string,
+  folder: string,
+): string | null {
+  const primary = db
+    .prepare(
+      "SELECT id FROM messaging_groups WHERE channel_type = 'dashboard' AND platform_id = ?",
+    )
+    .get(`dashboard:${folder}`) as { id: string } | undefined;
+  if (primary?.id) return primary.id;
+  const fallback = db
+    .prepare(
+      "SELECT mg.id AS id FROM messaging_groups mg JOIN messaging_group_agents mga ON mga.messaging_group_id = mg.id WHERE mga.agent_group_id = ? AND mg.channel_type = 'dashboard' LIMIT 1",
+    )
+    .get(agentGroupId) as { id: string } | undefined;
+  return fallback?.id ?? null;
+}
+
 function toSqliteDatetime(iso: string | null | undefined): string | null {
   if (!iso) return null;
   return iso.replace('T', ' ').replace(/\.\d{3}Z$/, '').replace(/Z$/, '');
@@ -657,13 +682,22 @@ export function ensureDashboardChatWiring(
       .run(mg.id, platformId, group.name, now);
   }
 
+  // Dashboard wirings use per-thread sessions so each Slack-style thread
+  // spawns its own isolated agent session. Upgrade existing rows in-place;
+  // first /api/chat/send after deploy self-heals pre-existing 'shared' rows.
+  wdb
+    .prepare(
+      "UPDATE messaging_group_agents SET session_mode = 'per-thread' WHERE messaging_group_id = ? AND agent_group_id = ? AND session_mode <> 'per-thread'",
+    )
+    .run(mg.id, group.id);
+
   const existingMga = wdb
     .prepare('SELECT 1 FROM messaging_group_agents WHERE messaging_group_id = ? AND agent_group_id = ? LIMIT 1')
     .get(mg.id, group.id);
   if (!existingMga) {
     wdb
       .prepare(
-        "INSERT INTO messaging_group_agents (id, messaging_group_id, agent_group_id, engage_mode, engage_pattern, sender_scope, session_mode, priority, created_at) VALUES (?, ?, ?, 'always', ?, 'all', 'shared', 0, ?)",
+        "INSERT INTO messaging_group_agents (id, messaging_group_id, agent_group_id, engage_mode, engage_pattern, sender_scope, session_mode, priority, created_at) VALUES (?, ?, ?, 'always', ?, 'all', 'per-thread', 0, ?)",
       )
       .run(
         `mga-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
@@ -1632,11 +1666,22 @@ try {
   }
 } catch { /* hook_events table may not exist yet */ }
 
-// Cached set of running container name prefixes (refreshed async every 5s)
+// Cached set of running container name prefixes (refreshed async every 5s).
+// Scoped to the instance's CONTAINER_PREFIX so containers belonging to
+// sibling NanoClaw instances on the same host (prod, another dev, etc.)
+// don't bleed into this dashboard's running-state view.
 const runningContainers = new Set<string>();
 
+/** Container-name prefix used for docker ps --filter. Falls back to
+ * 'nanoclaw-' for historical setups that never set CONTAINER_PREFIX. */
+function getContainerNameFilter(): string {
+  const prefix = process.env.CONTAINER_PREFIX || 'nanoclaw';
+  return `${prefix}-`;
+}
+
 function refreshContainerStatus(): void {
-  exec('docker ps --format "{{.Names}}" 2>/dev/null', { timeout: 3000 }, (_err, stdout) => {
+  const filter = getContainerNameFilter();
+  exec(`docker ps --filter name=${filter} --format "{{.Names}}" 2>/dev/null`, { timeout: 3000 }, (_err, stdout) => {
     runningContainers.clear();
     if (stdout) {
       for (const name of stdout.trim().split('\n')) {
@@ -1783,13 +1828,68 @@ function resolveLegoMcpTools(coworkerType: string): string[] {
   return [...tools].sort();
 }
 
-function findRunningContainer(folder: string): string | null {
+/**
+ * Resolve a coworker folder (and optionally a specific NanoClaw session id)
+ * to a running docker container name.
+ *
+ * With per-thread sessions, a single folder can have N concurrent
+ * containers. When `sessionId` is provided we match exactly on the
+ * container-name embedding format written by container-runner.ts:
+ *   `<prefix>-<folder>-<session-tail>-<ts>`
+ * (where `<session-tail>` is `sess-xxx` with the `sess-` prefix stripped).
+ *
+ * When `sessionId` is omitted the old folder-only match is preserved so
+ * unthreaded callers keep working — this is a compatibility shim while
+ * UI callers migrate to passing `sessionId` / `threadId`.
+ */
+function findRunningContainer(folder: string, sessionId?: string | null): string | null {
   const prefix = process.env.CONTAINER_PREFIX || 'nanoclaw';
-  const containerName = folder.replace(/_/g, '-');
+  const containerFolder = folder.replace(/_/g, '-');
+  const folderPrefix = `${prefix}-${containerFolder}`;
+  if (sessionId) {
+    const tail = sessionId.startsWith('sess-') ? sessionId.slice(5) : sessionId;
+    const exactPrefix = `${folderPrefix}-${tail}-`;
+    for (const name of runningContainers) {
+      if (name.startsWith(exactPrefix)) return name;
+    }
+    return null;
+  }
   for (const name of runningContainers) {
-    if (name.startsWith(`${prefix}-${containerName}`)) return name;
+    if (name.startsWith(folderPrefix)) return name;
   }
   return null;
+}
+
+/**
+ * Resolve `(folder, thread_id)` → active NanoClaw session id. Used by the
+ * shell-exec endpoints to thread UI context (currently-viewed session)
+ * through to `findRunningContainer`. Returns null when no matching active
+ * session exists — callers should fall back to the folder-scoped match
+ * for back-compat.
+ */
+function sessionIdForThread(
+  db: import('better-sqlite3').Database,
+  folder: string,
+  threadId: string | null,
+): string | null {
+  try {
+    const row = db
+      .prepare(
+        threadId
+          ? `SELECT s.id AS id FROM sessions s
+               JOIN agent_groups ag ON ag.id = s.agent_group_id
+              WHERE ag.folder = ? AND s.thread_id = ? AND s.status = 'active'
+              ORDER BY s.created_at DESC LIMIT 1`
+          : `SELECT s.id AS id FROM sessions s
+               JOIN agent_groups ag ON ag.id = s.agent_group_id
+              WHERE ag.folder = ? AND s.thread_id IS NULL AND s.status = 'active'
+              ORDER BY s.created_at DESC LIMIT 1`,
+      )
+      .get(...(threadId ? [folder, threadId] : [folder])) as { id: string } | undefined;
+    return row?.id ?? null;
+  } catch {
+    return null;
+  }
 }
 
 /** Load coworker type colors from coworker-types.json. Cached. */
@@ -3122,6 +3222,14 @@ export async function handleRequest(
     if (body === null) return;
     try {
       const raw = JSON.parse(body);
+      // Per-session identity headers emitted by container-runner since the
+      // sdk_session_routes migration. When present, the dashboard stamps
+      // an exact SDK → NanoClaw route at intake — no guessing. When
+      // absent (pre-upgrade containers, bespoke runners), routing falls
+      // through to the query-time fallback order.
+      const hookNanoSessId = typeof req.headers['x-nanoclaw-session-id'] === 'string'
+        ? (req.headers['x-nanoclaw-session-id'] as string).trim()
+        : '';
       // Normalize Claude Code's native HTTP hook payload into our HookEvent format.
       // HTTP hooks send the raw SDK JSON with different field names than our old
       // bash-script format. We accept both for backwards compatibility.
@@ -3229,6 +3337,44 @@ export async function handleRequest(
               event.extra ? JSON.stringify(event.extra) : null,
               event.timestamp,
             );
+          // Stamp sdk_session_routes when the container told us its nano
+          // session id. We validate the claim before writing — the header
+          // is attacker-addressable, so a bad/stale/custom hook must not
+          // be able to corrupt another session's attribution. The
+          // validated INSERT joins sessions → agent_groups and only
+          // commits when the claimed session exists AND its agent
+          // group's folder matches the event's X-Group-Folder.
+          if (hookNanoSessId && event.session_id && event.group) {
+            try {
+              const row = heDb
+                .prepare(
+                  `SELECT s.id AS session_id, s.agent_group_id AS agent_group_id, ag.folder AS folder
+                     FROM sessions s
+                     JOIN agent_groups ag ON ag.id = s.agent_group_id
+                    WHERE s.id = ?
+                    LIMIT 1`,
+                )
+                .get(hookNanoSessId) as { session_id: string; agent_group_id: string; folder: string } | undefined;
+              if (row && row.folder === event.group) {
+                heDb
+                  .prepare(
+                    `INSERT OR IGNORE INTO sdk_session_routes
+                       (sdk_session_id, nanoclaw_session_id, agent_group_id, group_folder,
+                        first_seen_at, last_seen_at, source)
+                     VALUES (?, ?, ?, ?, ?, ?, 'live')`,
+                  )
+                  .run(event.session_id, row.session_id, row.agent_group_id, row.folder, event.timestamp, event.timestamp);
+                heDb
+                  .prepare('UPDATE sdk_session_routes SET last_seen_at = ? WHERE sdk_session_id = ?')
+                  .run(event.timestamp, event.session_id);
+              }
+              // Silent skip when unknown_session or folder_mismatch —
+              // log if we add structured audit later. The query-time
+              // fallback will still bucket the event via heuristic.
+            } catch {
+              /* routes table may not exist pre-migration — non-fatal */
+            }
+          }
         } catch {
           /* DB write failure — non-fatal */
         }
@@ -3528,11 +3674,15 @@ export async function handleRequest(
         return;
       }
 
-      // Look up the active nanoclaw session per group_folder.
-      // Edge case: if multiple 'active' rows exist, pick the latest created_at.
+      // Look up ALL active nanoclaw sessions per group_folder, not just the
+      // most recent. With per-thread dashboards a single coworker owns N
+      // sessions (one root + one per thread); the older latest-wins logic
+      // silently dropped everything but the newest session. Keep sessions
+      // per folder ordered ascending by created_at so the query-time
+      // fallback can bracket unrouted SDK UUIDs correctly.
       const folderSet = new Set<string>(flatRows.map((r) => r.group_folder).filter(Boolean));
-      type NanoSess = { id: string; agent_group_id: string; folder: string; status: string; container_status: string; last_active: string | null; created_at: string };
-      const nanoByFolder = new Map<string, NanoSess>();
+      type NanoSess = { id: string; agent_group_id: string; folder: string; thread_id: string | null; status: string; container_status: string; last_active: string | null; created_at: string };
+      const nanoSessionsByFolder = new Map<string, NanoSess[]>();
       if (folderSet.size > 0) {
         const folders = Array.from(folderSet);
         const placeholders = folders.map(() => '?').join(',');
@@ -3541,12 +3691,13 @@ export async function handleRequest(
           nanoRows = heDb
             .prepare(
               `SELECT s.id AS id, s.agent_group_id AS agent_group_id, ag.folder AS folder,
+                      s.thread_id AS thread_id,
                       s.status AS status, s.container_status AS container_status,
                       s.last_active AS last_active, s.created_at AS created_at
                  FROM sessions s
                  JOIN agent_groups ag ON ag.id = s.agent_group_id
                  WHERE s.status = 'active' AND ag.folder IN (${placeholders})
-                 ORDER BY s.created_at DESC`,
+                 ORDER BY s.created_at ASC`,
             )
             .all(...folders) as any[];
         } catch {
@@ -3554,9 +3705,32 @@ export async function handleRequest(
           nanoRows = [];
         }
         for (const n of nanoRows) {
-          if (!nanoByFolder.has(n.folder)) nanoByFolder.set(n.folder, n); // latest created_at wins
+          const list = nanoSessionsByFolder.get(n.folder) ?? [];
+          list.push(n);
+          nanoSessionsByFolder.set(n.folder, list);
         }
       }
+
+      // Pre-fetch every sdk_session_routes row for the SDK UUIDs in flatRows
+      // so query-time lookup is O(1) per SDK. Empty table if migration 018
+      // hasn't run — routes stays empty and every SDK falls to fallback.
+      const routeBySdk = new Map<string, { nanoclaw_session_id: string; source: string }>();
+      try {
+        if (flatRows.length > 0) {
+          const sdkIds = flatRows.map((r) => r.session_id).filter(Boolean);
+          if (sdkIds.length > 0) {
+            const ph = sdkIds.map(() => '?').join(',');
+            const routeRows = heDb
+              .prepare(
+                `SELECT sdk_session_id, nanoclaw_session_id, source FROM sdk_session_routes WHERE sdk_session_id IN (${ph})`,
+              )
+              .all(...sdkIds) as any[];
+            for (const r of routeRows) {
+              routeBySdk.set(r.sdk_session_id, { nanoclaw_session_id: r.nanoclaw_session_id, source: r.source });
+            }
+          }
+        }
+      } catch { /* routes table absent — treat all as unrouted */ }
 
       // Classify each SDK sub-session.
       //  - "ghost": event_count <= 3 AND no UserPromptSubmit (i.e. only InstructionsLoaded / session bookkeeping)
@@ -3581,11 +3755,23 @@ export async function handleRequest(
         return 'session';
       }
 
-      // Group flat rows by their nanoclaw session id (one per group_folder for now).
-      // SDK sessions whose group has no active nanoclaw session are bucketed under a synthetic null parent
-      // — so the UI can still surface them (e.g. a coworker that was stopped).
+      // Group flat rows by their nanoclaw session id. Fallback order per
+      // unrouted SDK UUID (needed for pre-routed historical data and for
+      // hook events posted without X-NanoClaw-Session-Id):
+      //   1. routed   — sdk_session_routes has a row → use it
+      //   2. single-candidate shortcut — folder has exactly 1 active
+      //      nanoclaw session → bucket under it (old-shared installs
+      //      render correctly with no backfill)
+      //   3. heuristic — multi-session folder: bracket by
+      //      created_at ≤ first_ts < next_session.created_at
+      //      marked attribution_source='heuristic' in response
+      //   4. orphan   — no plausible nanoclaw session → synthetic parent
+      //
+      // Principle: unrouted is visible, not hidden. Better to show
+      // best-effort attribution than disappear data.
       type Parent = {
         nanoclaw_session_id: string | null;
+        thread_id: string | null;
         group_folder: string;
         agent_group_id: string | null;
         container_status: string | null;
@@ -3593,25 +3779,78 @@ export async function handleRequest(
         created_at: string | null;
         event_count_total: number;
         sdk_subsessions: any[];
+        /** Per-session activity state derived from the most recent hook
+         *  event routed to this session. Lets the UI show idle/working/
+         *  thinking chips per NanoClaw session instead of per folder —
+         *  important once multiple concurrent sessions exist. */
+        activity_status: 'idle' | 'thinking' | 'working' | 'error' | 'active' | null;
+        /** Last few hook events on this session (most recent first),
+         *  max 5. Used by the Coworker detail panel's per-session
+         *  "Recent Events" block. */
+        recent_events: Array<{ event: string; tool: string | null; timestamp: number; session_id: string }>;
         _last_ts_num: number; // for sorting
       };
       const parentByKey = new Map<string, Parent>();
+      const makeParent = (nano: NanoSess | null, folder: string): Parent => ({
+        nanoclaw_session_id: nano ? nano.id : null,
+        thread_id: nano ? nano.thread_id : null,
+        group_folder: folder,
+        agent_group_id: nano ? nano.agent_group_id : null,
+        container_status: nano ? nano.container_status : null,
+        last_active: nano ? nano.last_active : null,
+        created_at: nano ? nano.created_at : null,
+        event_count_total: 0,
+        sdk_subsessions: [],
+        activity_status: null,
+        recent_events: [],
+        _last_ts_num: 0,
+      });
+
+      const nanoById = new Map<string, NanoSess>();
+      for (const list of nanoSessionsByFolder.values()) {
+        for (const n of list) nanoById.set(n.id, n);
+      }
+
       for (const r of flatRows) {
-        const nano = nanoByFolder.get(r.group_folder);
-        const key = nano ? nano.id : `__orphan__${r.group_folder}`;
+        const folderSessions = nanoSessionsByFolder.get(r.group_folder) ?? [];
+        let pickedNano: NanoSess | null = null;
+        let attributionSource: 'live' | 'backfill' | 'single-candidate' | 'heuristic' | 'orphan' = 'orphan';
+
+        // 1. routed (via sdk_session_routes)
+        const route = routeBySdk.get(r.session_id);
+        if (route) {
+          const cand = nanoById.get(route.nanoclaw_session_id);
+          if (cand) {
+            pickedNano = cand;
+            attributionSource = route.source === 'backfill' ? 'backfill' : 'live';
+          }
+        }
+        // 2. single-candidate shortcut (works for old-shared installs
+        //    and any coworker with exactly one active session)
+        if (!pickedNano && folderSessions.length === 1) {
+          pickedNano = folderSessions[0];
+          attributionSource = 'single-candidate';
+        }
+        // 3. heuristic bracket (multi-candidate, unrouted)
+        if (!pickedNano && folderSessions.length > 1) {
+          const firstTsNum = Number(r.first_ts) || 0;
+          for (let i = 0; i < folderSessions.length; i++) {
+            const cur = folderSessions[i];
+            const curMs = Date.parse(cur.created_at);
+            if (curMs > firstTsNum) break;
+            const next = folderSessions[i + 1];
+            if (!next || Date.parse(next.created_at) > firstTsNum) {
+              pickedNano = cur;
+              attributionSource = 'heuristic';
+              break;
+            }
+          }
+        }
+        // 4. orphan — surface under synthetic parent keyed on folder
+        const key = pickedNano ? pickedNano.id : `__orphan__${r.group_folder}`;
         let parent = parentByKey.get(key);
         if (!parent) {
-          parent = {
-            nanoclaw_session_id: nano ? nano.id : null,
-            group_folder: r.group_folder,
-            agent_group_id: nano ? nano.agent_group_id : null,
-            container_status: nano ? nano.container_status : null,
-            last_active: nano ? nano.last_active : null,
-            created_at: nano ? nano.created_at : null,
-            event_count_total: 0,
-            sdk_subsessions: [],
-            _last_ts_num: 0,
-          };
+          parent = makeParent(pickedNano, r.group_folder);
           parentByKey.set(key, parent);
         }
         parent.event_count_total += Number(r.event_count) || 0;
@@ -3623,7 +3862,20 @@ export async function handleRequest(
           last_ts: r.last_ts,
           event_count: r.event_count,
           shape: classifyShape(r),
+          attribution_source: attributionSource,
         });
+      }
+
+      // Include active nanoclaw sessions that currently have NO SDK
+      // events yet (new session, container never woken). Without this,
+      // a freshly-created thread doesn't appear in Timeline until its
+      // first hook event arrives.
+      for (const [folder, list] of nanoSessionsByFolder) {
+        for (const n of list) {
+          if (!parentByKey.has(n.id)) {
+            parentByKey.set(n.id, makeParent(n, folder));
+          }
+        }
       }
 
       // Sort sub-sessions DESC by last_ts, then sort parents DESC by last_active (fall back to _last_ts_num).
@@ -3631,6 +3883,57 @@ export async function handleRequest(
       for (const p of parents) {
         p.sdk_subsessions.sort((a, b) => (Number(b.last_ts) || 0) - (Number(a.last_ts) || 0));
       }
+
+      // Per-session activity enrichment: pull the most recent hook events
+      // for each parent's SDK UUIDs, derive an activity_status, and
+      // stash the top 5 for a "Recent Events" block in the UI. Without
+      // this, Pixel Office + Recent Events aggregate by folder only —
+      // two concurrent sessions on the same coworker can't be told
+      // apart visually. With it, the client can render one status chip
+      // per session, per-session event feeds, and (future) one
+      // Pixel Office character per session.
+      for (const p of parents) {
+        const sdkIds = p.sdk_subsessions.map((s) => s.session_id).filter(Boolean);
+        if (sdkIds.length === 0) continue;
+        try {
+          const ph = sdkIds.map(() => '?').join(',');
+          const recent = heDb
+            .prepare(
+              `SELECT event, tool, message, timestamp, session_id
+                 FROM hook_events
+                WHERE session_id IN (${ph})
+                ORDER BY timestamp DESC
+                LIMIT 5`,
+            )
+            .all(...sdkIds) as Array<{
+              event: string;
+              tool: string | null;
+              message: string | null;
+              timestamp: number;
+              session_id: string;
+            }>;
+          p.recent_events = recent.map((r) => ({
+            event: r.event,
+            tool: r.tool,
+            timestamp: r.timestamp,
+            session_id: r.session_id,
+          }));
+          // Status rule: if container isn't running, force 'idle'. Otherwise
+          // derive from the most-recent event via classifyEventStatus.
+          if (p.container_status !== 'running') {
+            p.activity_status = 'idle';
+          } else if (recent.length > 0) {
+            p.activity_status = classifyEventStatus({
+              event: recent[0].event,
+              tool: recent[0].tool,
+              message: recent[0].message,
+            });
+          } else {
+            p.activity_status = 'active';
+          }
+        } catch { /* hook_events may be unavailable in degraded fixtures */ }
+      }
+
       parents.sort((a, b) => {
         const at = a.last_active ? new Date(a.last_active).getTime() : a._last_ts_num;
         const bt = b.last_active ? new Date(b.last_active).getTime() : b._last_ts_num;
@@ -3675,12 +3978,62 @@ export async function handleRequest(
         res.end('{"error":"nanoclaw session not found"}');
         return;
       }
+      // Exact attribution via sdk_session_routes PLUS a time-bracketed
+      // fallback for unrouted rows, unioned in a single query. This way
+      // a partial backfill (new live events routed, some historical
+      // rows still lacking routes) doesn't silently hide the unrouted
+      // ones — they fall through to the bracket filter instead.
+      //
+      // Bracket bounds:
+      //   lower = this session's created_at
+      //   upper = the next session's created_at for the same
+      //           agent_group_id (or +inf when this is the latest)
+      // Upper bound matters: without it, a thread session's "fallback
+      // window" would run forever and swallow root events that ran AFTER
+      // the thread was created.
       const createdAtMs = nano.created_at ? new Date(nano.created_at).getTime() : 0;
-      const rows: any[] = heDb
-        .prepare(
-          `SELECT * FROM hook_events WHERE group_folder = ? AND timestamp >= ? ORDER BY timestamp ASC`,
-        )
-        .all(nano.folder, createdAtMs);
+      let upperBoundMs = Number.MAX_SAFE_INTEGER;
+      try {
+        const nextRow = heDb
+          .prepare(
+            `SELECT created_at FROM sessions
+              WHERE agent_group_id = (SELECT agent_group_id FROM sessions WHERE id = ?)
+                AND created_at > (SELECT created_at FROM sessions WHERE id = ?)
+              ORDER BY created_at ASC LIMIT 1`,
+          )
+          .get(nanoclawSessionId, nanoclawSessionId) as { created_at: string } | undefined;
+        if (nextRow?.created_at) upperBoundMs = new Date(nextRow.created_at).getTime();
+      } catch { /* sessions may be missing in degraded fixtures */ }
+
+      let rows: any[] = [];
+      try {
+        rows = heDb
+          .prepare(
+            `SELECT he.* FROM hook_events he
+               LEFT JOIN sdk_session_routes r ON r.sdk_session_id = he.session_id
+              WHERE he.group_folder = ?
+                AND (
+                      r.nanoclaw_session_id = ?
+                   OR (
+                      r.sdk_session_id IS NULL
+                      AND he.timestamp >= ?
+                      AND he.timestamp <  ?
+                   )
+                )
+              ORDER BY he.timestamp ASC`,
+          )
+          .all(nano.folder, nanoclawSessionId, createdAtMs, upperBoundMs);
+      } catch {
+        // Routes table absent (pre-migration 018) — fall back to pure
+        // time-bracket so old installs keep working.
+        rows = heDb
+          .prepare(
+            `SELECT * FROM hook_events
+              WHERE group_folder = ? AND timestamp >= ? AND timestamp < ?
+              ORDER BY timestamp ASC`,
+          )
+          .all(nano.folder, createdAtMs, upperBoundMs);
+      }
 
       // Same pipeline as /api/hook-events/session-flow but without per-session_id filtering.
       const entries: any[] = [];
@@ -3891,6 +4244,13 @@ export async function handleRequest(
     if (!requireAuth(req, res)) return;
     const group = url.searchParams.get('group');
     const limit = Math.min(parseInt(url.searchParams.get('limit') || '200', 10), 500);
+    // Slack-style thread filter. Absent → main view (root sessions only,
+    // rows with thread_id IS NULL). Present → thread view (the single
+    // per-thread session keyed on thread_id). `threadSummaries` is only
+    // emitted in main view.
+    const threadIdParam = url.searchParams.get('thread_id');
+    const threadMode = threadIdParam !== null && threadIdParam.length > 0;
+    const threadFilter = threadMode ? threadIdParam : null;
     // System/protocol traffic (CLAUDE.md refresh pings, agent-to-agent
     // acks) lives in the same inbound/outbound tables as real user chat and
     // clutters the channel view. Hidden by default for the single-coworker
@@ -3907,6 +4267,10 @@ export async function handleRequest(
     const coworkerNameById = new Map<string, string>();
     let messages: any[] = [];
     const hasMore = false;
+    // Per-agent-group thread summaries: { [parentMessageId]: { replyCount, lastReplyTs } }.
+    // Only populated in main view; the client uses it to render
+    // "↳ N replies" stubs under parent messages.
+    const threadSummaries: Record<string, { replyCount: number; lastReplyTs: string | null }> = {};
     if (db) {
       try {
         try {
@@ -3921,10 +4285,86 @@ export async function handleRequest(
           : (db.prepare('SELECT id, folder FROM agent_groups').all() as any[]);
         const perGroupLimit = group ? limit : Math.ceil(limit / Math.max(agRows.length, 1));
         for (const agRow of agRows) {
-          const sessions = db
-            .prepare("SELECT id FROM sessions WHERE agent_group_id = ? AND status = 'active'")
-            .all(agRow.id) as { id: string }[];
+          // Scope all dashboard /api/messages queries to this coworker's
+          // dashboard messaging_group. Without this, messages from other
+          // channels (Slack, Discord, email) leak into the dashboard view,
+          // because they share the same agent_group and can share
+          // thread_id values (Slack's thread_ts, Discord's thread id).
+          //
+          // If we can't resolve a dashboard messaging group (test fixture
+          // that predates dashboard wiring, misconfigured install), fall
+          // back to the agent-scoped lookup so the endpoint still returns
+          // results rather than going silent.
+          const dashMgId = resolveDashboardMessagingGroupId(db, agRow.id, agRow.folder);
+
+          let sessions: { id: string; thread_id: string | null }[];
+          if (threadMode) {
+            sessions = dashMgId
+              ? (db
+                  .prepare(
+                    "SELECT id, thread_id FROM sessions WHERE agent_group_id = ? AND messaging_group_id = ? AND status = 'active' AND thread_id = ?",
+                  )
+                  .all(agRow.id, dashMgId, threadFilter) as { id: string; thread_id: string | null }[])
+              : (db
+                  .prepare(
+                    "SELECT id, thread_id FROM sessions WHERE agent_group_id = ? AND status = 'active' AND thread_id = ?",
+                  )
+                  .all(agRow.id, threadFilter) as { id: string; thread_id: string | null }[]);
+          } else {
+            sessions = dashMgId
+              ? (db
+                  .prepare(
+                    "SELECT id, thread_id FROM sessions WHERE agent_group_id = ? AND messaging_group_id = ? AND status = 'active' AND thread_id IS NULL",
+                  )
+                  .all(agRow.id, dashMgId) as { id: string; thread_id: string | null }[])
+              : (db
+                  .prepare(
+                    "SELECT id, thread_id FROM sessions WHERE agent_group_id = ? AND status = 'active' AND thread_id IS NULL",
+                  )
+                  .all(agRow.id) as { id: string; thread_id: string | null }[]);
+          }
           const sessionsDir = join(getDataDir(), 'v2-sessions', agRow.id);
+
+          // Main-view summaries: scan this coworker's per-thread sessions
+          // scoped to the dashboard messaging group (so Slack/Discord
+          // thread sessions never surface as clickable dashboard summary
+          // stubs). Per-thread session DBs hold replies only — the parent
+          // message lives in the root session. If we ever mirror parents
+          // into thread DBs this count is off-by-one and needs WHERE id
+          // != parentId.
+          if (!threadMode && dashMgId) {
+            let threadSessions: Array<{ id: string; thread_id: string }> = [];
+            try {
+              threadSessions = db
+                .prepare(
+                  "SELECT id, thread_id FROM sessions WHERE agent_group_id = ? AND messaging_group_id = ? AND status = 'active' AND thread_id IS NOT NULL",
+                )
+                .all(agRow.id, dashMgId) as Array<{ id: string; thread_id: string }>;
+            } catch { /* ignore */ }
+            for (const ts of threadSessions) {
+              let count = 0;
+              let lastTs: string | null = null;
+              for (const file of ['inbound.db', 'outbound.db']) {
+                const p = join(sessionsDir, ts.id, file);
+                if (!existsSync(p)) continue;
+                try {
+                  const sdb = new Database(p, { readonly: true });
+                  try {
+                    const table = file === 'inbound.db' ? 'messages_in' : 'messages_out';
+                    const row = sdb
+                      .prepare(`SELECT COUNT(*) AS n, MAX(timestamp) AS ts FROM ${table}`)
+                      .get() as { n: number; ts: string | null };
+                    count += row.n || 0;
+                    if (row.ts && (!lastTs || row.ts > lastTs)) lastTs = row.ts;
+                  } catch { /* ignore */ }
+                  sdb.close();
+                } catch { /* ignore */ }
+              }
+              if (count > 0) {
+                threadSummaries[ts.thread_id] = { replyCount: count, lastReplyTs: lastTs };
+              }
+            }
+          }
           for (const sess of sessions) {
             const inDbPath = join(sessionsDir, sess.id, 'inbound.db');
             const outDbPath = join(sessionsDir, sess.id, 'outbound.db');
@@ -3948,14 +4388,30 @@ export async function handleRequest(
                 let rows: any[];
                 try {
                   rows = sdb
-                    .prepare('SELECT id, kind, content, timestamp, channel_type, platform_id FROM messages_in ORDER BY timestamp DESC LIMIT ?')
+                    .prepare('SELECT id, kind, content, timestamp, channel_type, platform_id, thread_id FROM messages_in ORDER BY timestamp DESC LIMIT ?')
                     .all(perGroupLimit) as any[];
                 } catch {
-                  rows = sdb
-                    .prepare('SELECT id, kind, content, timestamp FROM messages_in ORDER BY timestamp DESC LIMIT ?')
-                    .all(perGroupLimit) as any[];
+                  // Older session DBs without thread_id — fall back but keep
+                  // channel_type/platform_id so a2a detection still works.
+                  try {
+                    rows = sdb
+                      .prepare('SELECT id, kind, content, timestamp, channel_type, platform_id FROM messages_in ORDER BY timestamp DESC LIMIT ?')
+                      .all(perGroupLimit) as any[];
+                  } catch {
+                    rows = sdb
+                      .prepare('SELECT id, kind, content, timestamp FROM messages_in ORDER BY timestamp DESC LIMIT ?')
+                      .all(perGroupLimit) as any[];
+                  }
                 }
                 for (const r of rows) {
+                  // Row-level thread filter as correctness belt to the
+                  // session-level filter above — defends against legacy rows
+                  // in a session whose scope later changed.
+                  if (threadMode) {
+                    if (r.thread_id !== threadFilter) continue;
+                  } else {
+                    if (r.thread_id != null) continue;
+                  }
                   // Agent-to-agent: a2a-* with channel_type='agent' and a
                   // platform_id that resolves to a real agent_group is a legit
                   // inbound message from another coworker — show it with the
@@ -3984,14 +4440,25 @@ export async function handleRequest(
                 let rows: any[];
                 try {
                   rows = sdb
-                    .prepare('SELECT id, kind, content, timestamp, in_reply_to, channel_type, platform_id FROM messages_out ORDER BY timestamp DESC LIMIT ?')
+                    .prepare('SELECT id, kind, content, timestamp, in_reply_to, channel_type, platform_id, thread_id FROM messages_out ORDER BY timestamp DESC LIMIT ?')
                     .all(perGroupLimit) as any[];
                 } catch {
-                  rows = sdb
-                    .prepare('SELECT id, kind, content, timestamp, in_reply_to FROM messages_out ORDER BY timestamp DESC LIMIT ?')
-                    .all(perGroupLimit) as any[];
+                  try {
+                    rows = sdb
+                      .prepare('SELECT id, kind, content, timestamp, in_reply_to, channel_type, platform_id FROM messages_out ORDER BY timestamp DESC LIMIT ?')
+                      .all(perGroupLimit) as any[];
+                  } catch {
+                    rows = sdb
+                      .prepare('SELECT id, kind, content, timestamp, in_reply_to FROM messages_out ORDER BY timestamp DESC LIMIT ?')
+                      .all(perGroupLimit) as any[];
+                  }
                 }
                 for (const r of rows) {
+                  if (threadMode) {
+                    if (r.thread_id !== threadFilter) continue;
+                  } else {
+                    if (r.thread_id != null) continue;
+                  }
                   // Outbound directed at another coworker: channel_type='agent'
                   // and platform_id resolves to a real agent_group. Mark with
                   // recipient info so the client can render a "→ @coworker"
@@ -4055,7 +4522,116 @@ export async function handleRequest(
       }
     }
     res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ messages, hasMore }));
+    res.end(JSON.stringify({ messages, hasMore, threadSummaries }));
+    return;
+  }
+
+  // API: a2a read-only session inspector. Option C from the thread-aware
+  // a2a plan. Given a recipient agent_group_id and the sender's thread
+  // (the bubble is rendered on the sender's side as "from @reviewer"),
+  // resolve the recipient's per-thread session on the a2a messaging
+  // group and return its joined inbound+outbound messages. No writes,
+  // no composer — operator can peek into the other side of the
+  // delegation without being able to post.
+  if (url.pathname === '/api/a2a-session') {
+    if (!requireAuth(req, res)) return;
+    const recipientAg = url.searchParams.get('recipient_agent_group_id');
+    const senderThreadRaw = url.searchParams.get('sender_thread');
+    const senderThread = senderThreadRaw && senderThreadRaw.length > 0 ? senderThreadRaw : null;
+    if (!recipientAg) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'recipient_agent_group_id required' }));
+      return;
+    }
+    if (!db) {
+      res.writeHead(503, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'database unavailable' }));
+      return;
+    }
+    try {
+      // a2a messaging_group for the recipient follows the `agent:<ag>`
+      // platform_id convention stamped by ensureA2aWiring().
+      const a2aMg = db
+        .prepare(
+          "SELECT id FROM messaging_groups WHERE channel_type = 'agent' AND platform_id = ?",
+        )
+        .get(`agent:${recipientAg}`) as { id: string } | undefined;
+      // Per-thread sessions live under (recipient_ag, a2a_mg, thread_id).
+      // If the sender is in root (thread_id=null), delivery takes the
+      // `agent-shared` path which keys on (recipient_ag, null, null) —
+      // so fall back to the messaging_group_id=null match for that case.
+      let sessRow: { id: string; thread_id: string | null; created_at: string | null } | undefined;
+      if (senderThread !== null && a2aMg) {
+        sessRow = db
+          .prepare(
+            "SELECT id, thread_id, created_at FROM sessions WHERE agent_group_id = ? AND messaging_group_id = ? AND thread_id = ? AND status = 'active' ORDER BY created_at DESC LIMIT 1",
+          )
+          .get(recipientAg, a2aMg.id, senderThread) as any;
+      } else {
+        // Root / unthreaded delegation — agent-shared session. Prefer a
+        // match on the recipient's agent-shared session (null mg, null
+        // thread) but tolerate rows that were written with the a2aMg id.
+        sessRow = db
+          .prepare(
+            "SELECT id, thread_id, created_at FROM sessions WHERE agent_group_id = ? AND thread_id IS NULL AND status = 'active' AND (messaging_group_id IS NULL OR messaging_group_id = ?) ORDER BY created_at DESC LIMIT 1",
+          )
+          .get(recipientAg, a2aMg?.id ?? '') as any;
+      }
+      if (!sessRow) {
+        res.writeHead(404, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'no recipient session found for this thread' }));
+        return;
+      }
+      const sessionsDir = join(getDataDir(), 'v2-sessions', recipientAg, sessRow.id);
+      const msgs: Array<{ id: string; direction: 'incoming' | 'outgoing'; content: string | null; timestamp: string; thread_id?: string | null }> = [];
+      const inPath = join(sessionsDir, 'inbound.db');
+      if (existsSync(inPath)) {
+        try {
+          const sdb = new Database(inPath, { readonly: true });
+          try {
+            const rows = sdb
+              .prepare('SELECT id, content, timestamp, thread_id FROM messages_in ORDER BY timestamp DESC LIMIT 100')
+              .all() as Array<{ id: string; content: string | null; timestamp: string; thread_id: string | null }>;
+            for (const r of rows) msgs.push({ id: r.id, direction: 'incoming', content: r.content, timestamp: r.timestamp, thread_id: r.thread_id });
+          } catch { /* older schema without thread_id */
+            const rows = sdb
+              .prepare('SELECT id, content, timestamp FROM messages_in ORDER BY timestamp DESC LIMIT 100')
+              .all() as Array<{ id: string; content: string | null; timestamp: string }>;
+            for (const r of rows) msgs.push({ id: r.id, direction: 'incoming', content: r.content, timestamp: r.timestamp });
+          }
+          sdb.close();
+        } catch { /* ignore */ }
+      }
+      const outPath = join(sessionsDir, 'outbound.db');
+      if (existsSync(outPath)) {
+        try {
+          const sdb = new Database(outPath, { readonly: true });
+          try {
+            const rows = sdb
+              .prepare('SELECT id, content, timestamp, thread_id FROM messages_out ORDER BY timestamp DESC LIMIT 100')
+              .all() as Array<{ id: string; content: string | null; timestamp: string; thread_id: string | null }>;
+            for (const r of rows) msgs.push({ id: r.id, direction: 'outgoing', content: r.content, timestamp: r.timestamp, thread_id: r.thread_id });
+          } catch {
+            const rows = sdb
+              .prepare('SELECT id, content, timestamp FROM messages_out ORDER BY timestamp DESC LIMIT 100')
+              .all() as Array<{ id: string; content: string | null; timestamp: string }>;
+            for (const r of rows) msgs.push({ id: r.id, direction: 'outgoing', content: r.content, timestamp: r.timestamp });
+          }
+          sdb.close();
+        } catch { /* ignore */ }
+      }
+      // Sort descending by timestamp (string ISO compares lexicographically) — newest first, client reverses if desired.
+      msgs.sort((a, b) => (b.timestamp || '').localeCompare(a.timestamp || ''));
+      const limited = msgs.slice(0, 100);
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({
+        session: { id: sessRow.id, thread_id: sessRow.thread_id, created_at: sessRow.created_at },
+        messages: limited,
+      }));
+    } catch (err) {
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: String((err as Error).message || err) }));
+    }
     return;
   }
 
@@ -4664,7 +5240,14 @@ export async function handleRequest(
     return;
   }
 
-  // API: get container name for shell exec
+  // API: get container name for shell exec.
+  //
+  // Accepts optional `?thread_id=<id>` to scope to a specific session when
+  // the coworker has multiple concurrent sessions (root + Slack-style
+  // threads). Empty / missing `thread_id` resolves to the coworker's root
+  // session. Falls back to folder-only match if no matching session row
+  // exists (pre-threading installs or a newly-spawned session that hasn't
+  // yet appeared in the central DB).
   if (req.method === 'GET' && /^\/api\/coworkers\/[^/]+\/container$/.test(url.pathname)) {
     if (!requireAuth(req, res)) return;
     const folder = safeDecode(url.pathname.replace('/api/coworkers/', '').replace('/container', ''));
@@ -4673,12 +5256,18 @@ export async function handleRequest(
       res.end('{"error":"invalid folder"}');
       return;
     }
-    const found = findRunningContainer(folder);
+    const threadIdRaw = url.searchParams.get('thread_id');
+    const threadId = threadIdRaw && threadIdRaw.trim() !== '' ? threadIdRaw.trim() : null;
+    const sessDb = getHookEventsDb();
+    const sessionId = sessDb ? sessionIdForThread(sessDb, folder, threadId) : null;
+    const found = findRunningContainer(folder, sessionId) ?? (sessionId ? null : findRunningContainer(folder));
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(
       JSON.stringify({
         running: !!found,
         container: found,
+        session_id: sessionId,
+        thread_id: threadId,
         execCommand: found ? `docker exec -it ${found} bash` : null,
       }),
     );
@@ -4701,14 +5290,20 @@ export async function handleRequest(
     const body = await readBody(req, res);
     if (body === null) return;
     try {
-      const { command } = JSON.parse(body);
+      const { command, thread_id: threadIdRaw } = JSON.parse(body) as { command?: unknown; thread_id?: unknown };
       if (!command || typeof command !== 'string') {
         res.writeHead(400, { 'Content-Type': 'application/json' });
         res.end('{"error":"command required"}');
         return;
       }
-      // Find running container
-      const found = findRunningContainer(folder);
+      // Session-aware exec: optional `thread_id` in the POST body picks the
+      // session whose container to exec into. Default (null / missing) =
+      // root session. Fall back to folder-only match for pre-threading
+      // installs or new sessions not yet in the central DB.
+      const threadId = typeof threadIdRaw === 'string' && threadIdRaw.trim() !== '' ? threadIdRaw.trim() : null;
+      const sessDb = getHookEventsDb();
+      const sessionId = sessDb ? sessionIdForThread(sessDb, folder, threadId) : null;
+      const found = findRunningContainer(folder, sessionId) ?? (sessionId ? null : findRunningContainer(folder));
       if (!found) {
         res.writeHead(404, { 'Content-Type': 'application/json' });
         res.end('{"error":"no running container"}');
@@ -6237,7 +6832,7 @@ export async function handleRequest(
         }),
       );
     };
-    exec(`docker ps --filter name=nanoclaw-${folderHyphenated}- --format '{{.Names}}'`, (_err, stdout) => {
+    exec(`docker ps --filter name=${getContainerNameFilter()}${folderHyphenated}- --format '{{.Names}}'`, (_err, stdout) => {
       const containers = (stdout || '').trim().split('\n').filter(Boolean);
       if (containers.length === 0) {
         doCleanup().catch((err) => {
@@ -6558,7 +7153,7 @@ export async function handleRequest(
             // Running containers
             try {
               const raw = execSync(
-                'docker ps --filter name=nanoclaw- --format "{{.Names}}|{{.Status}}|{{.Networks}}"',
+                `docker ps --filter name=${getContainerNameFilter()} --format "{{.Names}}|{{.Status}}|{{.Networks}}"`,
                 { stdio: 'pipe', encoding: 'utf-8', timeout: 5000 },
               ).trim();
               const containers = raw
@@ -6906,11 +7501,30 @@ export async function handleRequest(
     const body = await readBody(req, res);
     if (body === null) return;
     try {
-      const { group, content } = JSON.parse(body);
+      const { group, content, thread_id } = JSON.parse(body);
       if (!group || !content) {
         res.writeHead(400, { 'Content-Type': 'application/json' });
         res.end('{"error":"group and content required"}');
         return;
+      }
+      // Pass-through validation: ingress does the authoritative check,
+      // but we fail fast here so the public dashboard endpoint rejects
+      // garbage before the host bridge round-trip. Rules mirror ingress:
+      //   string or null/undefined; trim; empty → null; cap at 200 chars.
+      let threadIdOut: string | null = null;
+      if (thread_id !== undefined && thread_id !== null) {
+        if (typeof thread_id !== 'string') {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end('{"error":"thread_id must be a string"}');
+          return;
+        }
+        const trimmed = thread_id.trim();
+        if (trimmed.length > 200) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end('{"error":"thread_id too long (max 200 chars)"}');
+          return;
+        }
+        threadIdOut = trimmed.length > 0 ? trimmed : null;
       }
 
       const wdb = getWriteDb();
@@ -6937,7 +7551,7 @@ export async function handleRequest(
         const upstream = await fetch(`${getDashboardIngressBaseUrl()}/api/dashboard/inbound`, {
           method: 'POST',
           headers,
-          body: JSON.stringify({ group, content }),
+          body: JSON.stringify({ group, content, thread_id: threadIdOut }),
           signal: AbortSignal.timeout(5000),
         });
         const upstreamText = await upstream.text();
