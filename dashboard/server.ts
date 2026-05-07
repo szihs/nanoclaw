@@ -1842,22 +1842,107 @@ function resolveLegoMcpTools(coworkerType: string): string[] {
  * unthreaded callers keep working — this is a compatibility shim while
  * UI callers migrate to passing `sessionId` / `threadId`.
  */
-function findRunningContainer(folder: string, sessionId?: string | null): string | null {
-  const prefix = process.env.CONTAINER_PREFIX || 'nanoclaw';
+/**
+ * Pure matcher for container names — exported so unit tests can hit the
+ * folder/session matching rules without booting the whole dashboard
+ * server. `names` is injected as an iterable so the test can just hand in
+ * a list of candidates.
+ *
+ * Name format (from src/container-runner.ts:433):
+ *     <prefix>-<folder>-<session-tail>-<ts>
+ *  where ts is `Date.now()` (13 digits) and session-tail is
+ *  `<sessionId-without-sess-prefix>`, which itself contains a `-`.
+ *
+ * Rules this enforces that the old prefix-only check did not:
+ *  1. Suffix after `<prefix>-<folder>-` MUST end with `-<13-digit-ts>`.
+ *     Rejects stray names that happen to share the folder prefix but
+ *     aren't NanoClaw containers (old ad-hoc containers, exec helpers).
+ *  2. When `sessionId` is supplied, match exactly on
+ *     `<prefix>-<folder>-<tail>-...-<ts>`. The tail-delimiter rules
+ *     out `foo-bar`'s containers masquerading as folder `foo` session
+ *     `bar-...`.
+ *  3. When `knownFolders` is supplied, prefer the LONGEST known folder
+ *     that prefixes the name — so a lookup for `foo` against
+ *     `<prefix>-foo-bar-...` returns null when `foo-bar` is also a
+ *     registered folder. Callers that don't have the known-folders set
+ *     skip this step (permissive behaviour, used by non-shell code paths
+ *     that just need "is anything running for this folder").
+ */
+export function matchContainerName(
+  names: Iterable<string>,
+  folder: string,
+  sessionId: string | null,
+  prefix: string,
+  knownFolders?: Iterable<string>,
+): string | null {
   const containerFolder = folder.replace(/_/g, '-');
-  const folderPrefix = `${prefix}-${containerFolder}`;
+  const folderPrefix = `${prefix}-${containerFolder}-`;
+
+  // knownFolders disambiguation: if any OTHER registered folder starts with
+  // our folder plus a dash, refuse to match names where the suffix begins
+  // with that longer folder's tail. The longest-prefix-wins rule is
+  // equivalent to saying "don't match when a more specific folder owns
+  // this container name."
+  const rivalFolderPrefixes: string[] = [];
+  if (knownFolders) {
+    for (const kf of knownFolders) {
+      const kfNorm = kf.replace(/_/g, '-');
+      if (kfNorm === containerFolder) continue;
+      if (kfNorm.length > containerFolder.length && kfNorm.startsWith(`${containerFolder}-`)) {
+        rivalFolderPrefixes.push(`${prefix}-${kfNorm}-`);
+      }
+    }
+  }
+
+  const ownedByRival = (name: string): boolean =>
+    rivalFolderPrefixes.some((rp) => name.startsWith(rp));
+
   if (sessionId) {
     const tail = sessionId.startsWith('sess-') ? sessionId.slice(5) : sessionId;
-    const exactPrefix = `${folderPrefix}-${tail}-`;
-    for (const name of runningContainers) {
-      if (name.startsWith(exactPrefix)) return name;
+    const exactPrefix = `${folderPrefix}${tail}-`;
+    for (const name of names) {
+      if (ownedByRival(name)) continue;
+      if (name.startsWith(exactPrefix) && /-\d{13}$/.test(name)) return name;
     }
     return null;
   }
-  for (const name of runningContainers) {
-    if (name.startsWith(folderPrefix)) return name;
+  for (const name of names) {
+    if (!name.startsWith(folderPrefix)) continue;
+    if (ownedByRival(name)) continue;
+    // Suffix must end with a 13-digit timestamp to look like a NanoClaw
+    // container (rejects ad-hoc containers that happen to share the
+    // folder prefix).
+    if (!/-\d{13}$/.test(name)) continue;
+    return name;
   }
   return null;
+}
+
+function findRunningContainer(
+  folder: string,
+  sessionId?: string | null,
+  knownFolders?: Iterable<string>,
+): string | null {
+  const prefix = process.env.CONTAINER_PREFIX || 'nanoclaw';
+  return matchContainerName(runningContainers, folder, sessionId ?? null, prefix, knownFolders);
+}
+
+/**
+ * Registered folders from agent_groups. Handed to matchContainerName so
+ * it can use longest-prefix-wins to reject false matches where folder
+ * `foo` would otherwise hit a container for `foo-bar`. Returns an empty
+ * set when the DB isn't available — callers degrade to permissive
+ * matching, which is acceptable (collisions are rare and the reviewer's
+ * concern is genuine-but-edge-case).
+ */
+function listKnownFolders(db: import('better-sqlite3').Database | null): Set<string> {
+  if (!db) return new Set<string>();
+  try {
+    const rows = db.prepare('SELECT folder FROM agent_groups').all() as { folder: string }[];
+    return new Set(rows.map((r) => r.folder));
+  } catch {
+    return new Set<string>();
+  }
 }
 
 /**
@@ -5258,9 +5343,32 @@ export async function handleRequest(
     }
     const threadIdRaw = url.searchParams.get('thread_id');
     const threadId = threadIdRaw && threadIdRaw.trim() !== '' ? threadIdRaw.trim() : null;
+    const hasExplicitThread = threadId !== null;
     const sessDb = getHookEventsDb();
     const sessionId = sessDb ? sessionIdForThread(sessDb, folder, threadId) : null;
-    const found = findRunningContainer(folder, sessionId) ?? (sessionId ? null : findRunningContainer(folder));
+    const knownFolders = listKnownFolders(sessDb);
+    // Strict fallback: when the caller named a thread, a missing session
+    // (or missing container for that session) must return a clean
+    // not-found. Folder-level fallback would silently land the shell in
+    // root or another thread's container — the reason this whole code
+    // path exists is to avoid that.
+    const found = hasExplicitThread
+      ? sessionId
+        ? findRunningContainer(folder, sessionId, knownFolders)
+        : null
+      : findRunningContainer(folder, sessionId, knownFolders) ?? findRunningContainer(folder, null, knownFolders);
+    if (!found && hasExplicitThread) {
+      res.writeHead(404, { 'Content-Type': 'application/json' });
+      res.end(
+        JSON.stringify({
+          error: 'session has no running container',
+          action: 'send_message_to_wake',
+          session_id: sessionId,
+          thread_id: threadId,
+        }),
+      );
+      return;
+    }
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(
       JSON.stringify({
@@ -5296,17 +5404,32 @@ export async function handleRequest(
         res.end('{"error":"command required"}');
         return;
       }
-      // Session-aware exec: optional `thread_id` in the POST body picks the
-      // session whose container to exec into. Default (null / missing) =
-      // root session. Fall back to folder-only match for pre-threading
-      // installs or new sessions not yet in the central DB.
+      // Session-aware exec: optional `thread_id` in the POST body picks
+      // the session whose container to exec into. Default (null / missing)
+      // = root session. When a thread is explicitly named but its session
+      // isn't resolvable (or its container is stopped), fail closed with
+      // a 404 + wake hint — folder-level fallback would land the exec in
+      // root or another thread's container, which defeats the purpose.
       const threadId = typeof threadIdRaw === 'string' && threadIdRaw.trim() !== '' ? threadIdRaw.trim() : null;
+      const hasExplicitThread = threadId !== null;
       const sessDb = getHookEventsDb();
       const sessionId = sessDb ? sessionIdForThread(sessDb, folder, threadId) : null;
-      const found = findRunningContainer(folder, sessionId) ?? (sessionId ? null : findRunningContainer(folder));
+      const knownFolders = listKnownFolders(sessDb);
+      const found = hasExplicitThread
+        ? sessionId
+          ? findRunningContainer(folder, sessionId, knownFolders)
+          : null
+        : findRunningContainer(folder, sessionId, knownFolders) ?? findRunningContainer(folder, null, knownFolders);
       if (!found) {
         res.writeHead(404, { 'Content-Type': 'application/json' });
-        res.end('{"error":"no running container"}');
+        res.end(
+          JSON.stringify({
+            error: hasExplicitThread ? 'session has no running container' : 'no running container',
+            action: hasExplicitThread ? 'send_message_to_wake' : undefined,
+            session_id: sessionId,
+            thread_id: threadId,
+          }),
+        );
         return;
       }
       // Execute command (timeout 10s, max 64KB output)

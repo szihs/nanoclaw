@@ -9,6 +9,7 @@ import {
   compareMessagesAscending,
   ensureDashboardChatWiring,
   forceOpenDbForTests,
+  matchContainerName,
   resetTransientDashboardStateForTests,
   resolveCoworkerTypeMetadata,
   startServer,
@@ -2316,5 +2317,69 @@ describe('/api/a2a-session — read-only inspector (Option C)', () => {
     seedA2aScenario();
     const res = await fetch(`${baseUrl}/api/a2a-session?sender_thread=thread-pr-A`);
     expect(res.status).toBe(400);
+  });
+});
+
+// ============================================================
+// matchContainerName — pure unit tests. The full shape invariant is:
+//   <prefix>-<folder>-<session-tail>-<13-digit-ts>
+// and we need to reject shared-prefix collisions (folder `foo` matching
+// a container for `foo-bar`) + non-NanoClaw names that happen to share
+// the folder prefix.
+// ============================================================
+describe('matchContainerName', () => {
+  const PREFIX = 'nc-dev';
+
+  it('with sessionId → exact match on <prefix>-<folder>-<tail>-<ts>', () => {
+    const tail = '1778143510824-x485si';
+    const names = [
+      `${PREFIX}-orchestrator-${tail}-1762512225123`,
+      `${PREFIX}-orchestrator-other-tail-1762512225999`,
+    ];
+    expect(matchContainerName(names, 'orchestrator', 'sess-' + tail, PREFIX)).toBe(names[0]);
+  });
+
+  it('with sessionId → rejects when the trailing 13-digit timestamp is missing', () => {
+    const tail = '1778143510824-x485si';
+    const names = [`${PREFIX}-orchestrator-${tail}-manual`];
+    expect(matchContainerName(names, 'orchestrator', 'sess-' + tail, PREFIX)).toBeNull();
+  });
+
+  it('without sessionId → matches any NanoClaw-shaped container for the folder', () => {
+    const names = [`${PREFIX}-orchestrator-1778143510824-x485si-1762512225123`];
+    expect(matchContainerName(names, 'orchestrator', null, PREFIX)).toBe(names[0]);
+  });
+
+  it('without sessionId → rejects names that share the folder prefix but are not NanoClaw containers', () => {
+    const names = [`${PREFIX}-orchestrator-adhoc-debug-shell`];
+    expect(matchContainerName(names, 'orchestrator', null, PREFIX)).toBeNull();
+  });
+
+  it('folder `foo` does NOT match a container for `foo-bar` when knownFolders is supplied', () => {
+    const names = [`${PREFIX}-foo-bar-1778143510824-x485si-1762512225123`];
+    const knownFolders = new Set(['foo', 'foo-bar']);
+    expect(matchContainerName(names, 'foo', null, PREFIX, knownFolders)).toBeNull();
+    expect(matchContainerName(names, 'foo-bar', null, PREFIX, knownFolders)).toBe(names[0]);
+  });
+
+  it('folder `foo` DOES match a container for `foo` when a rival `foo-bar` also exists', () => {
+    const tail = '1778143510824-x485si';
+    const names = [
+      `${PREFIX}-foo-${tail}-1762512225123`,
+      `${PREFIX}-foo-bar-${tail}-1762512225999`,
+    ];
+    const knownFolders = new Set(['foo', 'foo-bar']);
+    expect(matchContainerName(names, 'foo', null, PREFIX, knownFolders)).toBe(names[0]);
+  });
+
+  it('underscores in folder are normalised to dashes before matching', () => {
+    const names = [`${PREFIX}-my-cw-1778143510824-x485si-1762512225123`];
+    expect(matchContainerName(names, 'my_cw', null, PREFIX)).toBe(names[0]);
+    expect(matchContainerName(names, 'my-cw', null, PREFIX)).toBe(names[0]);
+  });
+
+  it('returns null when no candidate matches', () => {
+    expect(matchContainerName([], 'orchestrator', null, PREFIX)).toBeNull();
+    expect(matchContainerName([`${PREFIX}-other-folder-abc-1762512225123`], 'orchestrator', null, PREFIX)).toBeNull();
   });
 });
