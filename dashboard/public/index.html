@@ -736,7 +736,7 @@
        bg, avatar-monogram + name-bold + muted-time header, then body. Side
        accent stripe replaces the coloured bubble so user/assistant/coworker
        remain distinguishable without the chatbot aesthetic. */
-    .cw-msg { margin: 0; padding: 6px 12px 6px 44px; position: relative; font-size: 0.8125rem; line-height: 1.45; border-left: 2px solid transparent; }
+    .cw-msg { margin: 0; padding: 6px 12px 6px 44px; position: relative; font-size: 0.8125rem; line-height: 1.45; border-left: 3px solid transparent; }
     .cw-msg:hover { background: rgba(255,255,255,0.02); }
     .cw-msg:hover .cw-msg-actions { opacity: 1; }
     .cw-msg-avatar { position: absolute; left: 12px; top: 8px; width: 24px; height: 24px; border-radius: 4px; background: var(--bg-hover); color: var(--text); display: flex; align-items: center; justify-content: center; font-size: 0.6875rem; font-weight: bold; }
@@ -744,11 +744,18 @@
     .cw-msg-author { font-weight: 600; color: var(--text); }
     .cw-msg-time { font-size: 0.6875rem; color: var(--text-muted); }
     .cw-msg-bubble { padding: 0; background: none; border-radius: 0; font-size: 0.8125rem; line-height: 1.5; word-break: break-word; color: var(--text); }
+    /* Author-colour palette: blue = you, green = agent reply, pink = from another coworker (a2a @). */
+    .cw-msg.user { border-left-color: #3b82f6; }
     .cw-msg.user .cw-msg-avatar { background: #1d4ed8; color: #fff; }
-    .cw-msg.assistant .cw-msg-avatar { background: #374151; }
-    .cw-msg.coworker { border-left-color: var(--green); }
-    .cw-msg.coworker .cw-msg-avatar { background: rgba(16,185,129,0.2); color: var(--green); }
-    .cw-msg.user.to-coworker { border-left-color: var(--green); }
+    .cw-msg.user .cw-msg-author { color: #60a5fa; }
+    .cw-msg.assistant { border-left-color: var(--green); }
+    .cw-msg.assistant .cw-msg-avatar { background: rgba(16,185,129,0.2); color: var(--green); }
+    .cw-msg.assistant .cw-msg-author { color: var(--green); }
+    .cw-msg.coworker { border-left-color: #ec4899; }
+    .cw-msg.coworker .cw-msg-avatar { background: rgba(236,72,153,0.2); color: #ec4899; }
+    .cw-msg.coworker .cw-msg-author { color: #f472b6; }
+    /* "You → <coworker>" keeps the user's blue rail so direction stays readable. */
+    .cw-msg.user.to-coworker { border-left-color: #3b82f6; }
     .cw-msg.user .cw-msg-bubble { white-space: pre-wrap; }
     .cw-msg-actions { position: absolute; right: 12px; top: 4px; opacity: 0; transition: opacity 0.1s; display: flex; gap: 4px; background: var(--bg-card); border: 1px solid var(--border); border-radius: 4px; padding: 2px; }
     .cw-msg-action-btn { background: transparent; color: var(--text-muted); border: none; font-size: 0.6875rem; cursor: pointer; padding: 2px 6px; border-radius: 3px; font-family: var(--font); }
