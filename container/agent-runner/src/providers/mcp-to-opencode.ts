@@ -1,3 +1,4 @@
+import { resolveEnvInherit } from './codex-app-server.js';
 import type { McpServerConfig } from './types.js';
 
 /** OpenCode `mcp` entry shape (local stdio server). */
@@ -46,10 +47,16 @@ export function mcpServersToOpenCodeConfig(
       };
     } else {
       // stdio / local
+      // Resolve envInherit names against process.env before handing to
+      // opencode — opencode has no name-indirection and passes its config
+      // as-is via the OPENCODE_CONFIG_CONTENT env var to the opencode
+      // subprocess. Resolved values live only in the returned map; callers
+      // must not log or persist them to disk.
+      const mergedEnv = resolveEnvInherit(cfg, process.env, name);
       out[name] = {
         type: 'local',
         command: [cfg.command, ...cfg.args],
-        ...(Object.keys(cfg.env).length > 0 ? { environment: cfg.env } : {}),
+        ...(Object.keys(mergedEnv).length > 0 ? { environment: mergedEnv } : {}),
         enabled: true,
       };
     }

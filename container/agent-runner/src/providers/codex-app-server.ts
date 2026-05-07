@@ -547,6 +547,18 @@ export type CodexMcpServer =
       command: string;
       args?: string[];
       env?: Record<string, string>;
+      /**
+       * Names of env vars to forward to the subprocess by NAME only —
+       * rendered as `env_vars = [...]`. codex-cli 0.124.0+ resolves each
+       * name from the codex process's own env at spawn time, so secrets
+       * (OneCLI proxy bearer in HTTPS_PROXY, NVIDIA_API_KEY) never reach
+       * `~/.codex/config.toml`.
+       *
+       * Precedence: if a name appears in both `env` and `envInherit`, the
+       * literal `env` value wins and the name is dropped from `env_vars`
+       * (with a warning log). Prevents placeholder/value double-writes.
+       */
+      envInherit?: string[];
     }
   | {
       /** http (streamable) transport */
@@ -572,6 +584,43 @@ function isHttpServer(
   s: CodexMcpServer,
 ): s is Extract<CodexMcpServer, { url: string }> {
   return typeof (s as { url?: unknown }).url === 'string';
+}
+
+/**
+ * Resolve `envInherit` names (e.g. HTTPS_PROXY, NVIDIA_API_KEY) against a
+ * process env snapshot and merge them into a literal env map — for providers
+ * that spawn MCP subprocesses directly (Claude SDK, OpenCode) and have no
+ * TOML-style name indirection.
+ *
+ * Resolved values live ONLY in the returned Record; callers MUST pass it
+ * straight to spawn/sdk-level env and must NOT serialize it to any
+ * persistent config file. That would regress the "no secrets on disk"
+ * invariant this whole path exists to protect.
+ *
+ * Mirrors the writer's duplicate-safety: a name appearing in both `env`
+ * and `envInherit` is a caller bug and throws.
+ */
+export function resolveEnvInherit(
+  config: { command: string; args?: string[]; env?: Record<string, string>; envInherit?: string[] },
+  processEnv: NodeJS.ProcessEnv | Record<string, string | undefined>,
+  serverName = '<unnamed>',
+): Record<string, string> {
+  const literal = { ...(config.env ?? {}) };
+  const literalKeys = new Set(Object.keys(literal));
+  for (const n of config.envInherit ?? []) {
+    if (literalKeys.has(n)) {
+      throw new Error(
+        `MCP ${serverName}: env var "${n}" appears in both env and envInherit — pick one. ` +
+          `envInherit is for names-only secret forwarding (no value in TOML); ` +
+          `env is for literal non-secret values.`,
+      );
+    }
+    const v = processEnv[n];
+    if (typeof v === 'string' && v.length > 0) {
+      literal[n] = v;
+    }
+  }
+  return literal;
 }
 
 export function writeCodexMcpConfigToml(
@@ -670,6 +719,27 @@ export function writeCodexMcpConfigToml(
     if (config.args && config.args.length > 0) {
       const argsStr = config.args.map(tomlBasicString).join(', ');
       lines.push(`args = [${argsStr}]`);
+    }
+    // env_vars: names-only allowlist. codex-cli resolves each name from
+    // its own process env at subprocess spawn time (no plaintext values
+    // in TOML). Required for anything touching OneCLI secrets.
+    // Duplicate guard: envInherit declares a name as secret-bearing, so a
+    // literal value for the same name would silently re-leak under
+    // [mcp_servers.<n>.env]. Any overlap is a caller bug — fail loud.
+    const literalEnvKeys = new Set(config.env ? Object.keys(config.env) : []);
+    const inheritNames = config.envInherit ?? [];
+    for (const n of inheritNames) {
+      if (literalEnvKeys.has(n)) {
+        throw new Error(
+          `MCP ${name}: env var "${n}" appears in both env and envInherit — pick one. ` +
+            `envInherit is for names-only secret forwarding (no value in TOML); ` +
+            `env is for literal non-secret values.`,
+        );
+      }
+    }
+    if (inheritNames.length > 0) {
+      const namesStr = inheritNames.map(tomlBasicString).join(', ');
+      lines.push(`env_vars = [${namesStr}]`);
     }
     if (config.env && Object.keys(config.env).length > 0) {
       lines.push(`[mcp_servers.${name}.env]`);

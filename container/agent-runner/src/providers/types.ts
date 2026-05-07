@@ -64,6 +64,17 @@ export type McpServerConfig =
       command: string;
       args: string[];
       env: Record<string, string>;
+      /**
+       * Env-var names to forward by NAME (not value) to the subprocess.
+       * Codex's TOML writer emits `env_vars = [...]`; codex-cli resolves
+       * each name from its own process env at spawn time — so secrets
+       * (OneCLI proxy bearer in HTTPS_PROXY, API keys) never land in
+       * `~/.codex/config.toml`. Providers without TOML-style name
+       * indirection (Claude SDK, OpenCode) resolve names to values from
+       * `process.env` before handing the child's env map to the SDK;
+       * those providers keep secrets in-process only, never on disk.
+       */
+      envInherit?: string[];
     }
   | {
       /** http (streamable) transport */

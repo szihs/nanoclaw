@@ -160,4 +160,166 @@ describe('writeCodexMcpConfigToml', () => {
       expect(mode).toBe(0o600);
     });
   });
+
+  // ── envInherit / env_vars allowlist (OneCLI secret containment) ──────────
+  // These tests enforce the invariant that no secret VALUE is ever serialized
+  // to ~/.codex/config.toml. Names-only indirection via `env_vars = [...]` is
+  // the only permitted way to thread a secret through to a subprocess.
+
+  it('emits env_vars = [...] for envInherit names, no literal values', () => {
+    withTmpHome(() => {
+      writeCodexMcpConfigToml({
+        codex: {
+          command: 'codex',
+          args: ['mcp-server'],
+          env: { HOME: '/home/node', PATH: '/usr/bin' },
+          envInherit: ['HTTPS_PROXY', 'NVIDIA_API_KEY'],
+        },
+      });
+      const toml = fs.readFileSync(path.join(process.env.HOME!, '.codex', 'config.toml'), 'utf-8');
+      // Positive controls — prove the writer was exercised.
+      expect(toml).toContain('[mcp_servers.codex]');
+      expect(toml).toContain('command = "codex"');
+      expect(toml).toContain('env_vars = ["HTTPS_PROXY", "NVIDIA_API_KEY"]');
+      expect(toml).toContain('HOME = "/home/node"');
+      // Negative — names but not values for envInherit keys.
+      expect(toml).not.toMatch(/^HTTPS_PROXY\s*=/m);
+      expect(toml).not.toMatch(/^NVIDIA_API_KEY\s*=/m);
+    });
+  });
+
+  it('throws if a name appears in both env and envInherit (caller bug guard)', () => {
+    withTmpHome(() => {
+      expect(() =>
+        writeCodexMcpConfigToml({
+          codex: {
+            command: 'codex',
+            env: { HTTPS_PROXY: 'http://u:SENTINEL_LITERAL_TOKEN_A@h:1' },
+            envInherit: ['HTTPS_PROXY'],
+          },
+        }),
+      ).toThrow(/HTTPS_PROXY.*both env and envInherit/);
+      // File must remain untouched — no partial write that could leak.
+      const cfg = path.join(process.env.HOME!, '.codex', 'config.toml');
+      const exists = fs.existsSync(cfg);
+      if (exists) {
+        const toml = fs.readFileSync(cfg, 'utf-8');
+        expect(toml).not.toContain('SENTINEL_LITERAL_TOKEN_A');
+      }
+    });
+  });
+
+  it('sentinel-scan: real-shaped call never serializes secret values to TOML', () => {
+    withTmpHome(() => {
+      const URL_SENTINEL = 'SENTINEL_TOKEN_XYZ_DO_NOT_LEAK';
+      const PROXY_SENTINEL = 'SENTINEL_PROXY_TOKEN_ABC';
+      // URL-encoded variant of the URL sentinel — guards against percent-encoding escape.
+      const URL_SENTINEL_ENCODED = encodeURIComponent(URL_SENTINEL);
+
+      writeCodexMcpConfigToml({
+        codex: {
+          command: 'codex',
+          args: ['mcp-server'],
+          env: { HOME: '/home/node', PATH: '/usr/bin' },
+          envInherit: ['HTTPS_PROXY', 'NVIDIA_API_KEY', 'SSL_CERT_FILE'],
+        },
+        proxymcp: {
+          type: 'http',
+          url: 'https://proxy.example/mcp/svc',
+          headers: { Authorization: `Bearer ${PROXY_SENTINEL}` },
+          bearerTokenEnvVar: 'MCP_PROXY_TOKEN',
+        },
+      });
+      const toml = fs.readFileSync(path.join(process.env.HOME!, '.codex', 'config.toml'), 'utf-8');
+
+      // Positive controls — prove both writers (stdio + http) ran.
+      expect(toml).toContain('[mcp_servers.codex]');
+      expect(toml).toContain('env_vars = ["HTTPS_PROXY", "NVIDIA_API_KEY", "SSL_CERT_FILE"]');
+      expect(toml).toContain('[mcp_servers.proxymcp]');
+      expect(toml).toContain('url = "https://proxy.example/mcp/svc"');
+      expect(toml).toContain('bearer_token_env_var = "MCP_PROXY_TOKEN"');
+
+      // Negative — sentinel secret values must NEVER appear anywhere.
+      // Note: the writer itself does not see URL_SENTINEL (it's not passed
+      // in this test), but the assertion is intentional — if a future
+      // regression routes HTTPS_PROXY's plaintext value into TOML, it
+      // would trip this guard.
+      expect(toml).not.toContain(URL_SENTINEL);
+      expect(toml).not.toContain(URL_SENTINEL_ENCODED);
+      expect(toml).not.toContain(PROXY_SENTINEL);
+
+      // Parsed-TOML secondary scan: walk every line and verify no value
+      // string contains either sentinel (catches escape/encoding tricks).
+      for (const line of toml.split('\n')) {
+        expect(line).not.toContain(URL_SENTINEL);
+        expect(line).not.toContain(URL_SENTINEL_ENCODED);
+        expect(line).not.toContain(PROXY_SENTINEL);
+      }
+    });
+  });
+
+  it('strips plaintext Authorization from http_headers when bearerTokenEnvVar is set', () => {
+    withTmpHome(() => {
+      const PROXY_SENTINEL = 'SENTINEL_PROXY_TOKEN_DEF';
+      writeCodexMcpConfigToml({
+        gh: {
+          type: 'http',
+          url: 'https://mcp.example/gh',
+          headers: {
+            Authorization: `Bearer ${PROXY_SENTINEL}`,
+            'X-Trace': 'keep-me',
+          },
+          bearerTokenEnvVar: 'MCP_PROXY_TOKEN',
+        },
+      });
+      const toml = fs.readFileSync(path.join(process.env.HOME!, '.codex', 'config.toml'), 'utf-8');
+      expect(toml).toContain('bearer_token_env_var = "MCP_PROXY_TOKEN"');
+      // Non-secret header passes through.
+      expect(toml).toContain('X-Trace = "keep-me"');
+      // Authorization must NOT be serialized with its plaintext value.
+      expect(toml).not.toContain(PROXY_SENTINEL);
+      expect(toml).not.toMatch(/^Authorization\s*=/m);
+    });
+  });
+
+  it('stale-config migration: prior plaintext mcp_servers block is overwritten', () => {
+    withTmpHome(() => {
+      const cfg = path.join(process.env.HOME!, '.codex', 'config.toml');
+      fs.mkdirSync(path.dirname(cfg), { recursive: true });
+      // Simulate a pre-fix config with a plaintext secret under the old
+      // [mcp_servers.codex.env] shape.
+      const STALE_SENTINEL = 'SENTINEL_STALE_TOKEN_GHI';
+      fs.writeFileSync(
+        cfg,
+        [
+          '[projects."/workspace/agent"]',
+          'trust_level = "trusted"',
+          '',
+          '[mcp_servers.codex]',
+          'command = "codex"',
+          '[mcp_servers.codex.env]',
+          `HTTPS_PROXY = "http://u:${STALE_SENTINEL}@h:1"`,
+          '',
+        ].join('\n'),
+      );
+
+      writeCodexMcpConfigToml({
+        codex: {
+          command: 'codex',
+          args: ['mcp-server'],
+          env: { HOME: '/home/node', PATH: '/usr/bin' },
+          envInherit: ['HTTPS_PROXY'],
+        },
+      });
+
+      const toml = fs.readFileSync(cfg, 'utf-8');
+      // Stale secret must be gone.
+      expect(toml).not.toContain(STALE_SENTINEL);
+      // New shape in place.
+      expect(toml).toContain('env_vars = ["HTTPS_PROXY"]');
+      expect(toml).toContain('HOME = "/home/node"');
+      // Old [mcp_servers.codex.env] block with HTTPS_PROXY literal must be gone.
+      expect(toml).not.toMatch(/HTTPS_PROXY\s*=\s*"http:\/\//);
+    });
+  });
 });
