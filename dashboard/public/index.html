@@ -888,9 +888,8 @@
       <div class="field"><label>Last Activity</label><div class="value" id="detail-activity">-</div></div>
       <div class="field"><label>Live Tool</label><div class="value" id="detail-tool">-</div></div>
       <div class="field"><label>Active Children</label><div class="value" id="detail-subagents">-</div></div>
-      <div class="field"><label>Session</label><div class="value" id="detail-session" style="font-size:0.6875rem">-</div></div>
+      <div class="field"><label>Sessions</label><div class="value" id="detail-session" style="font-size:0.6875rem">-</div></div>
       <div class="field"><label>Tasks</label><div class="value" id="detail-tasks-list" style="font-size:0.6875rem;max-height:100px;overflow-y:auto">-</div></div>
-      <div class="field" id="detail-context-field" style="display:none"><label>Context</label><div class="value" id="detail-context">-</div></div>
       <div class="field">
         <div class="memory-header">
           <label>Memory (CLAUDE.md)</label>
@@ -959,7 +958,7 @@
         <span class="cw-status-badge" id="cw-chat-status"></span>
         <div class="cw-view-toggle" id="cw-view-toggle" style="display:none;margin-left:auto">
           <button class="cw-toggle-btn active" data-view="chat">Chat</button>
-          <button class="cw-toggle-btn" data-view="work">Artifacts</button>
+          <button class="cw-toggle-btn" data-view="work" title="Shared files for this coworker; not scoped to a single thread/session">Shared Artifacts</button>
         </div>
       </div>
       <div class="cw-chat-messages" id="cw-chat-messages">
@@ -1057,11 +1056,13 @@
         <div class="value" id="cw-detail-subagents">-</div>
       </div>
       <div class="cw-detail-section">
-        <label>Recent Events</label>
+        <label>Activity</label>
+        <div style="font-size:0.625rem;color:var(--text-dim);margin-bottom:4px">Recent activity for this session, then this coworker across sessions.</div>
         <div id="cw-detail-tools" style="font-size:0.6875rem;max-height:200px;overflow-y:auto">-</div>
       </div>
       <div class="cw-detail-section">
-        <label>Artifacts (files)</label>
+        <label>Shared Artifacts</label>
+        <div style="font-size:0.625rem;color:var(--text-dim);margin-bottom:4px">Files shared by this coworker across sessions.</div>
         <div class="value" id="cw-detail-files" style="font-size:0.6875rem;max-height:120px;overflow-y:auto">-</div>
       </div>
       <div class="cw-detail-section">

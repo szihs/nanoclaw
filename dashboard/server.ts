@@ -59,6 +59,228 @@ function isInsideDir(baseDir: string, target: string): boolean {
   return rel !== '' && !rel.startsWith('..') && !isAbsolute(rel);
 }
 
+// ──────────────────────────────────────────────────────────────────────
+// Session display-title heuristic.
+//
+// The slug (`main · dusky-meadow-drifts`) is only a stable identifier.
+// What an operator actually scans is: "what is this session about?"
+// These helpers produce a short task-shaped string from the first user
+// prompt, with light extraction of the signals operators care about:
+// PR/issue references, file paths, and imperative verbs.
+// ──────────────────────────────────────────────────────────────────────
+
+/**
+ * Strip code fences, URLs, envelope wrappers, control chars, decorative
+ * punctuation; collapse ws.
+ *
+ * UserPromptSubmit messages are pre-wrapped by the host/router in
+ * XML-like envelopes like:
+ *   <context timezone=Asia/Kolkata>
+ *   <message id=6 from=orchestrator send=...>
+ *   <actual-body>
+ *   </message>
+ *   </context>
+ *
+ * Without stripping those, the titler's first-8-words rule surfaces
+ * `context timezone Asia/Kolkata message id 6 from ...` as the session
+ * title — operator-hostile. We remove the whole envelope first, then
+ * operate on the surviving body.
+ */
+export function sanitizeSessionTitle(raw: string | null | undefined): string | null {
+  if (!raw) return null;
+  let cleaned = raw
+    // Drop fenced code and URLs — rarely useful in a 3–8 word title.
+    .replace(/```[\s\S]*?```/g, ' ')
+    .replace(/https?:\/\/\S+/g, ' ')
+    // Drop HTML/XML-ish tags entirely, whether self-closing, open, or
+    // close. Covers `<context ...>`, `<message id=N from=X>`, `</message>`,
+    // etc. Multi-line safe because we allow '.' to match across \n via
+    // the [\s\S] alternative.
+    .replace(/<[\w/][^>]*>/g, ' ')
+    // Drop any leftover attr-shaped tokens like `timezone=Asia/Kolkata`
+    // or `from=orchestrator`. A bare `word=value` at word boundaries is
+    // almost never the thing an operator wants in a title.
+    .replace(/\b[a-zA-Z_][\w-]*=[^\s<>]+/g, ' ');
+
+  cleaned = cleaned
+    .replace(/[\r\n\t]+/g, ' ')
+    .replace(/["'`*_#>\[\]{}]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!cleaned) return null;
+  return cleaned;
+}
+
+/**
+ * Extract task-detail signals from a prompt:
+ *  - PR references: "PR #123", "pull request 45", "PR-A"
+ *  - Issue references: "issue #45", "bug #12"
+ *  - File paths / extensions: `src/foo.ts`, `migrations/*.sql`
+ *  - Leading imperative verb: Review | Fix | Investigate | Implement | Update | Debug | Refactor | Add | Remove
+ *
+ * Returns an ordered list of tokens that are good candidates to surface
+ * in a 3–8 word title, in descending priority.
+ */
+function extractTitleSignals(raw: string): { verb: string | null; refs: string[]; files: string[] } {
+  const refs: string[] = [];
+  const files: string[] = [];
+
+  // Preserve original casing of the first word — used for verb extraction.
+  const firstWordMatch = raw.match(/^\s*(please|can you|could you|would you|help me|i need you to)\s+(\w+)/i);
+  let verb: string | null = null;
+  if (firstWordMatch) {
+    verb = firstWordMatch[2];
+  } else {
+    const leadWord = raw.match(/^\s*(\w+)/);
+    if (leadWord) verb = leadWord[1];
+  }
+  // Only keep a verb if it looks imperative. Don't hijack the title with
+  // a filler word ("i", "the", "this", etc.).
+  if (verb) {
+    const v = verb.toLowerCase();
+    const imperatives = new Set([
+      'review', 'fix', 'investigate', 'implement', 'update', 'debug', 'refactor',
+      'add', 'remove', 'delete', 'rename', 'migrate', 'merge', 'split', 'rebase',
+      'check', 'verify', 'build', 'test', 'document', 'write', 'rewrite', 'port',
+      'extract', 'inline', 'optimize', 'profile', 'trace', 'audit', 'explore',
+      'land', 'ship', 'wire', 'replace', 'restore', 'revert', 'tidy', 'clean',
+    ]);
+    verb = imperatives.has(v) ? verb.charAt(0).toUpperCase() + verb.slice(1).toLowerCase() : null;
+  }
+
+  // PR / issue references. Accept `PR #123`, `PR-123`, `#PR-A`, `issue #45`, `pull request 99`.
+  const prRefRe = /(?:\bPR\s?#?\s?([A-Za-z]?\d+[A-Za-z0-9-]*)|\bpull\s+request\s+#?\s?(\d+[A-Za-z0-9-]*)|#PR-([A-Za-z0-9-]+)|\bPR-([A-Za-z0-9-]+))/gi;
+  let m: RegExpExecArray | null;
+  while ((m = prRefRe.exec(raw)) !== null) {
+    const id = m[1] ?? m[2] ?? m[3] ?? m[4];
+    if (id) refs.push(`PR #${id}`);
+  }
+  const issueRe = /\b(?:issue|bug)\s+#?\s?(\d+[A-Za-z0-9-]*)/gi;
+  while ((m = issueRe.exec(raw)) !== null) refs.push(`issue #${m[1]}`);
+
+  // File paths. Accept `src/foo.ts`, `dashboard/server.ts`, `a/b.md`, etc.
+  // Must contain a `/` and a known extension OR must be a clear relative path.
+  const fileRe = /\b([\w.-]+\/[\w./-]+\.[a-zA-Z]{1,5})\b/g;
+  while ((m = fileRe.exec(raw)) !== null) files.push(m[1]);
+
+  return { verb, refs: Array.from(new Set(refs)), files: Array.from(new Set(files)) };
+}
+
+/**
+ * Build a short, task-describing title from the first user prompt.
+ *
+ * Strategy:
+ *   1. Sanitize the raw prompt.
+ *   2. Extract (verb, refs, files).
+ *   3. If we have a verb + refs/files → "<Verb> <ref/file>" (preferred
+ *      "task-detail" shape, e.g. "Review PR #178" or "Fix src/a2a.ts").
+ *   4. If we only have refs or files → join one or two of them.
+ *   5. Otherwise → first ~8 words of the sanitized prompt.
+ *   6. Cap at 72 chars with an ellipsis.
+ *
+ * Callers can upgrade via `titleFromPromptWithAgent()` which wraps this
+ * and kicks off an async LLM refinement — returns immediately with the
+ * heuristic title while the LLM pass UPSERTs a better one in the
+ * background.
+ */
+export function titleFromPrompt(prompt: string | null | undefined): string | null {
+  const cleaned = sanitizeSessionTitle(prompt);
+  if (!cleaned) return null;
+
+  const { verb, refs, files } = extractTitleSignals(cleaned);
+  const signals = [...refs, ...files.slice(0, 2)];
+
+  let title: string;
+  if (verb && signals.length > 0) {
+    title = `${verb} ${signals.slice(0, 2).join(' + ')}`;
+  } else if (signals.length > 0) {
+    title = signals.slice(0, 2).join(' + ');
+  } else {
+    // Strip common pleasantries from the front, then first ~8 words.
+    const stripped = cleaned
+      .replace(/^(please|can you|could you|would you|help me|i need you to)\s+/i, '')
+      .replace(/[?.!,;:]+$/g, '')
+      .trim();
+    const words = stripped.split(/\s+/).filter(Boolean).slice(0, 8);
+    title = words.join(' ');
+  }
+
+  if (!title) return null;
+  return title.length > 72 ? title.slice(0, 69).trimEnd() + '...' : title;
+}
+
+/**
+ * Fire-and-forget LLM-backed title upgrade. Only runs when
+ * DASHBOARD_TITLE_AGENT=anthropic and ANTHROPIC_API_KEY is set — otherwise
+ * the heuristic title stays in place. Uses claude-haiku-4-5, 30 tokens,
+ * single turn. Failures are swallowed (log only) — the heuristic title
+ * the host already wrote is the fallback.
+ *
+ * Runs AFTER the heuristic UPDATE completes, so the user sees a title
+ * immediately and it optionally refines within ~1s.
+ */
+async function refineTitleWithAgent(
+  heDb: Database.Database,
+  sessionId: string,
+  rawPrompt: string,
+): Promise<void> {
+  if (process.env.DASHBOARD_TITLE_AGENT !== 'anthropic') return;
+  const key = process.env.ANTHROPIC_API_KEY;
+  if (!key) return;
+
+  const cleaned = sanitizeSessionTitle(rawPrompt);
+  if (!cleaned) return;
+  // Keep the prompt we feed the model bounded — operators can paste long
+  // logs into a session prompt and we don't want to pay for that.
+  const snippet = cleaned.length > 800 ? cleaned.slice(0, 800) + '...' : cleaned;
+
+  try {
+    const res = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-api-key': key,
+        'anthropic-version': '2023-06-01',
+      },
+      body: JSON.stringify({
+        model: 'claude-haiku-4-5',
+        max_tokens: 30,
+        messages: [
+          {
+            role: 'user',
+            content:
+              'Write a 3-6 word imperative task title that describes what this session is about. ' +
+              'Examples: "Review PR #178", "Fix A2A routing bug", "Investigate dashboard timeout". ' +
+              'Respond with just the title, no quotes, no trailing punctuation.\n\n' +
+              'Session prompt:\n' +
+              snippet,
+          },
+        ],
+      }),
+    });
+    if (!res.ok) return;
+    const data = (await res.json()) as { content?: Array<{ type: string; text?: string }> };
+    const text = data.content?.find((c) => c.type === 'text')?.text;
+    if (!text) return;
+    const trimmed = text.trim().replace(/^["'`]|["'`]$/g, '').replace(/[?.!;:]+$/g, '');
+    if (!trimmed || trimmed.length > 72) return;
+
+    heDb
+      .prepare(
+        `UPDATE sessions
+            SET display_title = ?, title_source = 'heuristic', title_updated_at = ?
+          WHERE id = ?
+            AND COALESCE(title_source, '') != 'manual'`,
+      )
+      .run(trimmed, new Date().toISOString(), sessionId);
+  } catch {
+    // Network/API/DB error — silent. The heuristic title already in place
+    // is the acceptable fallback.
+  }
+}
+
+
+
 function getProjectRoot(): string {
   return resolve(process.env.NANOCLAW_DASHBOARD_PROJECT_ROOT || resolve(import.meta.dirname, '..'));
 }
@@ -843,6 +1065,7 @@ function isDashboardAuthenticated(req: import('http').IncomingMessage, secret = 
 
 interface CoworkerState {
   folder: string;
+  agentGroupId: string | null;
   name: string;
   type: string;
   description: string;
@@ -905,6 +1128,7 @@ interface DashboardState {
 
 interface HookEvent {
   group: string;
+  agent_group_id?: string;
   event: string;
   tool?: string;
   message?: string;
@@ -946,7 +1170,12 @@ function bootstrapHookEvents(): void {
   try {
     const rows = db
       .prepare(
-        'SELECT group_folder, event, tool, tool_use_id, message, tool_input, tool_response, session_id, agent_id, agent_type, transcript_path, cwd, extra, timestamp FROM hook_events ORDER BY timestamp DESC LIMIT ?',
+        `SELECT he.group_folder, ag.id AS agent_group_id, he.event, he.tool, he.tool_use_id, he.message,
+                he.tool_input, he.tool_response, he.session_id, he.agent_id, he.agent_type,
+                he.transcript_path, he.cwd, he.extra, he.timestamp
+           FROM hook_events he
+           LEFT JOIN agent_groups ag ON ag.folder = he.group_folder
+          ORDER BY he.timestamp DESC LIMIT ?`,
       )
       .all(MAX_HOOK_EVENTS) as any[];
     for (const row of rows.reverse()) {
@@ -961,6 +1190,7 @@ function bootstrapHookEvents(): void {
         : undefined;
       hookEvents.push({
         group: row.group_folder,
+        agent_group_id: row.agent_group_id || undefined,
         event: row.event,
         tool: row.tool || undefined,
         tool_use_id: row.tool_use_id || undefined,
@@ -1878,11 +2108,6 @@ export function matchContainerName(
   const containerFolder = folder.replace(/_/g, '-');
   const folderPrefix = `${prefix}-${containerFolder}-`;
 
-  // knownFolders disambiguation: if any OTHER registered folder starts with
-  // our folder plus a dash, refuse to match names where the suffix begins
-  // with that longer folder's tail. The longest-prefix-wins rule is
-  // equivalent to saying "don't match when a more specific folder owns
-  // this container name."
   const rivalFolderPrefixes: string[] = [];
   if (knownFolders) {
     for (const kf of knownFolders) {
@@ -1909,9 +2134,6 @@ export function matchContainerName(
   for (const name of names) {
     if (!name.startsWith(folderPrefix)) continue;
     if (ownedByRival(name)) continue;
-    // Suffix must end with a 13-digit timestamp to look like a NanoClaw
-    // container (rejects ad-hoc containers that happen to share the
-    // folder prefix).
     if (!/-\d{13}$/.test(name)) continue;
     return name;
   }
@@ -1932,8 +2154,7 @@ function findRunningContainer(
  * it can use longest-prefix-wins to reject false matches where folder
  * `foo` would otherwise hit a container for `foo-bar`. Returns an empty
  * set when the DB isn't available — callers degrade to permissive
- * matching, which is acceptable (collisions are rare and the reviewer's
- * concern is genuine-but-edge-case).
+ * matching, which is acceptable (collisions are rare).
  */
 function listKnownFolders(db: import('better-sqlite3').Database | null): Set<string> {
   if (!db) return new Set<string>();
@@ -2202,15 +2423,17 @@ function getState(): DashboardState {
 
       // Resolve type, name, and MCP tools from DB
       let dbAllowedMcp: string[] | null = null;
+      let dbAgentGroupId: string | null = null;
       let isMainGroup = false;
-      if (type === 'unknown' && db) {
+      if (db) {
         try {
           const row = db
             .prepare(
-              'SELECT name, folder, coworker_type, allowed_mcp_tools, is_admin FROM agent_groups WHERE folder = ?',
+              'SELECT id, name, folder, coworker_type, allowed_mcp_tools, is_admin FROM agent_groups WHERE folder = ?',
             )
             .get(folder) as any;
           if (row) {
+            dbAgentGroupId = row.id || null;
             name = row.name || folder;
             isMainGroup = !!row.is_admin;
             dbAllowedMcp = row.allowed_mcp_tools ? JSON.parse(row.allowed_mcp_tools) : null;
@@ -2295,6 +2518,7 @@ function getState(): DashboardState {
       const mfInfo = manifestSummaryCache.get(folder);
       coworkers.push({
         folder,
+        agentGroupId: dbAgentGroupId,
         name,
         type,
         description,
@@ -3320,6 +3544,7 @@ export async function handleRequest(
       // bash-script format. We accept both for backwards compatibility.
       const event: HookEvent = {
         group: raw.group || (req.headers['x-group-folder'] as string) || '',
+        agent_group_id: undefined,
         event: raw.event || raw.hook_event_name || '',
         tool: raw.tool || raw.tool_name || undefined,
         message: raw.message || raw.notification || raw.prompt || undefined,
@@ -3347,7 +3572,6 @@ export async function handleRequest(
         cwd: raw.cwd || undefined,
         timestamp: Date.now(),
       } as HookEvent;
-
       // Pack additional fields into extra
       const extra: Record<string, any> = {};
       if (typeof raw.extra === 'object' && raw.extra !== null) {
@@ -3398,6 +3622,12 @@ export async function handleRequest(
       // Persist to database
       const heDb = getHookEventsDb();
       if (heDb) {
+        if (event.group) {
+          try {
+            const ag = heDb.prepare('SELECT id FROM agent_groups WHERE folder = ? LIMIT 1').get(event.group) as any;
+            event.agent_group_id = ag?.id || undefined;
+          } catch { /* agent_groups table absent in degraded fixtures */ }
+        }
         try {
           heDb
             .prepare(
@@ -3452,6 +3682,30 @@ export async function handleRequest(
                 heDb
                   .prepare('UPDATE sdk_session_routes SET last_seen_at = ? WHERE sdk_session_id = ?')
                   .run(event.timestamp, event.session_id);
+
+                // Derive a display title on the first UserPromptSubmit for
+                // this nano session. Runs once per session: the WHERE clause
+                // requires display_title IS NULL and title_source != 'manual'
+                // so subsequent prompts don't churn the title, and an
+                // operator-set title is always safe.
+                if (event.event === 'UserPromptSubmit' && event.message) {
+                  const newTitle = titleFromPrompt(event.message);
+                  if (newTitle) {
+                    try {
+                      heDb
+                        .prepare(
+                          `UPDATE sessions
+                              SET display_title = ?, title_source = 'heuristic', title_updated_at = ?
+                            WHERE id = ?
+                              AND (display_title IS NULL OR display_title = '')
+                              AND COALESCE(title_source, '') != 'manual'`,
+                        )
+                        .run(newTitle, new Date().toISOString(), row.session_id);
+                    } catch {
+                      /* pre-migration-021 installs won't have the columns yet */
+                    }
+                  }
+                }
               }
               // Silent skip when unknown_session or folder_mismatch —
               // log if we add structured audit later. The query-time
@@ -3766,17 +4020,22 @@ export async function handleRequest(
       // per folder ordered ascending by created_at so the query-time
       // fallback can bracket unrouted SDK UUIDs correctly.
       const folderSet = new Set<string>(flatRows.map((r) => r.group_folder).filter(Boolean));
-      type NanoSess = { id: string; agent_group_id: string; folder: string; thread_id: string | null; status: string; container_status: string; last_active: string | null; created_at: string };
+      type NanoSess = { id: string; agent_group_id: string; folder: string; thread_id: string | null; display_title: string | null; title_source: string | null; status: string; container_status: string; last_active: string | null; created_at: string };
       const nanoSessionsByFolder = new Map<string, NanoSess[]>();
       if (folderSet.size > 0) {
         const folders = Array.from(folderSet);
         const placeholders = folders.map(() => '?').join(',');
         let nanoRows: any[] = [];
         try {
+          const sessionCols = new Set((heDb.prepare('PRAGMA table_info(sessions)').all() as Array<{ name: string }>).map((c) => c.name));
+          const titleSelect = sessionCols.has('display_title')
+            ? 's.display_title AS display_title, s.title_source AS title_source,'
+            : 'NULL AS display_title, NULL AS title_source,';
           nanoRows = heDb
             .prepare(
               `SELECT s.id AS id, s.agent_group_id AS agent_group_id, ag.folder AS folder,
                       s.thread_id AS thread_id,
+                      ${titleSelect}
                       s.status AS status, s.container_status AS container_status,
                       s.last_active AS last_active, s.created_at AS created_at
                  FROM sessions s
@@ -3857,6 +4116,9 @@ export async function handleRequest(
       type Parent = {
         nanoclaw_session_id: string | null;
         thread_id: string | null;
+        display_title: string | null;
+        title_source: string | null;
+        session_key: string | null;
         group_folder: string;
         agent_group_id: string | null;
         container_status: string | null;
@@ -3879,6 +4141,9 @@ export async function handleRequest(
       const makeParent = (nano: NanoSess | null, folder: string): Parent => ({
         nanoclaw_session_id: nano ? nano.id : null,
         thread_id: nano ? nano.thread_id : null,
+        display_title: nano ? nano.display_title : null,
+        title_source: nano ? nano.title_source : null,
+        session_key: nano ? nano.id : null,
         group_folder: folder,
         agent_group_id: nano ? nano.agent_group_id : null,
         container_status: nano ? nano.container_status : null,
@@ -4017,6 +4282,32 @@ export async function handleRequest(
             p.activity_status = 'active';
           }
         } catch { /* hook_events may be unavailable in degraded fixtures */ }
+
+        // Read-only fallback for UI display. The authoritative title is
+        // derived + written once in the hook-event intake path (see
+        // `POST /api/hook-event` — on first UserPromptSubmit for a nano
+        // session, the handler UPDATEs sessions.display_title). If an
+        // old session exists without a title yet, surface a one-line
+        // heuristic derived from its first prompt — without writing, so
+        // this GET handler stays read-only and won't race with the
+        // intake writer.
+        if (!p.display_title) {
+          const promptEvent = p.recent_events.find((e) => e.event === 'UserPromptSubmit');
+          let promptTitle: string | null = null;
+          if (promptEvent) {
+            try {
+              const promptRow = heDb
+                .prepare('SELECT message FROM hook_events WHERE session_id = ? AND event = ? ORDER BY timestamp ASC LIMIT 1')
+                .get(promptEvent.session_id, 'UserPromptSubmit') as { message: string | null } | undefined;
+              promptTitle = titleFromPrompt(promptRow?.message);
+            } catch { /* ignore */ }
+          }
+          p.display_title = promptTitle || (p.thread_id ? 'Thread session' : 'Main session');
+          p.title_source = promptTitle ? 'heuristic' : 'auto';
+          // Deliberately no UPDATE here — title writes live in the hook
+          // intake path so this GET stays side-effect-free. The heuristic
+          // value above is only for this response payload.
+        }
       }
 
       parents.sort((a, b) => {
@@ -4341,6 +4632,12 @@ export async function handleRequest(
     // clutters the channel view. Hidden by default for the single-coworker
     // view; pass ?includeSystem=1 to opt in (timeline/debug still shows all).
     const includeSystem = url.searchParams.get('includeSystem') === '1';
+    // `before` is an ISO timestamp used by Admin → Messages for infinite
+    // scroll. The per-session SQLite reads fetch newest-first; we
+    // oversample and post-filter so the honest hasMore flag reflects
+    // whether earlier rows exist beyond the returned page.
+    const beforeParam = url.searchParams.get('before');
+    const OVERSAMPLE = 3;
     const SYSTEM_ID_PREFIXES = ['claudemd-refresh-', 'a2a-'];
     const isSystemId = (id: unknown) =>
       typeof id === 'string' && SYSTEM_ID_PREFIXES.some((p) => id.startsWith(p));
@@ -4351,7 +4648,7 @@ export async function handleRequest(
     // and surface in the channel view with a distinct bubble style.
     const coworkerNameById = new Map<string, string>();
     let messages: any[] = [];
-    const hasMore = false;
+    let hasMore = false;
     // Per-agent-group thread summaries: { [parentMessageId]: { replyCount, lastReplyTs } }.
     // Only populated in main view; the client uses it to render
     // "↳ N replies" stubs under parent messages.
@@ -4368,7 +4665,11 @@ export async function handleRequest(
         const agRows = group
           ? [db.prepare('SELECT id, folder FROM agent_groups WHERE folder = ?').get(group) as any].filter(Boolean)
           : (db.prepare('SELECT id, folder FROM agent_groups').all() as any[]);
-        const perGroupLimit = group ? limit : Math.ceil(limit / Math.max(agRows.length, 1));
+        // Oversample when the caller paginates via `before`. Admin →
+        // Messages in particular depends on getting non-trivial coverage
+        // below the cutoff so hasMore accurately reflects the DB state.
+        const baseLimit = group ? limit : Math.ceil(limit / Math.max(agRows.length, 1));
+        const perGroupLimit = beforeParam ? baseLimit * OVERSAMPLE : baseLimit;
         for (const agRow of agRows) {
           // Scope all dashboard /api/messages queries to this coworker's
           // dashboard messaging_group. Without this, messages from other
@@ -4599,8 +4900,20 @@ export async function handleRequest(
           }
         }
         messages = applyMessageOperations(messages);
-        // Sort descending (newest first)
+        // Apply the `before` cutoff (ISO timestamp) for pagination. Post-
+        // filter after the per-session oversample above — a few per-DB
+        // queries don't expose a cheap "older than X" pagination hook, so
+        // we do it in memory.
+        if (beforeParam) {
+          messages = messages.filter((m) => typeof m.timestamp === 'string' && m.timestamp < beforeParam);
+        }
+        // Sort descending (newest first).
         messages.sort(compareMessagesDescending);
+        // Honest hasMore: true when the filter left more rows than the
+        // requested page. Without a `before` cutoff we can't distinguish
+        // "more exist before this page" from "no pagination requested",
+        // so default to false in the non-paginated case.
+        hasMore = beforeParam ? messages.length > limit : false;
         messages = messages.slice(0, limit);
       } catch {
         /* ignore */
@@ -5330,9 +5643,10 @@ export async function handleRequest(
   // Accepts optional `?thread_id=<id>` to scope to a specific session when
   // the coworker has multiple concurrent sessions (root + Slack-style
   // threads). Empty / missing `thread_id` resolves to the coworker's root
-  // session. Falls back to folder-only match if no matching session row
-  // exists (pre-threading installs or a newly-spawned session that hasn't
-  // yet appeared in the central DB).
+  // session. Missing / empty thread_id keeps the legacy folder-only fallback
+  // for pre-threading installs. A non-empty thread_id fails closed when it
+  // cannot resolve an exact session/container, so Shell never lands in the
+  // root or another thread by accident.
   if (req.method === 'GET' && /^\/api\/coworkers\/[^/]+\/container$/.test(url.pathname)) {
     if (!requireAuth(req, res)) return;
     const folder = safeDecode(url.pathname.replace('/api/coworkers/', '').replace('/container', ''));
@@ -5346,29 +5660,7 @@ export async function handleRequest(
     const hasExplicitThread = threadId !== null;
     const sessDb = getHookEventsDb();
     const sessionId = sessDb ? sessionIdForThread(sessDb, folder, threadId) : null;
-    const knownFolders = listKnownFolders(sessDb);
-    // Strict fallback: when the caller named a thread, a missing session
-    // (or missing container for that session) must return a clean
-    // not-found. Folder-level fallback would silently land the shell in
-    // root or another thread's container — the reason this whole code
-    // path exists is to avoid that.
-    const found = hasExplicitThread
-      ? sessionId
-        ? findRunningContainer(folder, sessionId, knownFolders)
-        : null
-      : findRunningContainer(folder, sessionId, knownFolders) ?? findRunningContainer(folder, null, knownFolders);
-    if (!found && hasExplicitThread) {
-      res.writeHead(404, { 'Content-Type': 'application/json' });
-      res.end(
-        JSON.stringify({
-          error: 'session has no running container',
-          action: 'send_message_to_wake',
-          session_id: sessionId,
-          thread_id: threadId,
-        }),
-      );
-      return;
-    }
+    const found = findRunningContainer(folder, sessionId) ?? (sessionId || hasExplicitThread ? null : findRunningContainer(folder));
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(
       JSON.stringify({
@@ -5398,38 +5690,31 @@ export async function handleRequest(
     const body = await readBody(req, res);
     if (body === null) return;
     try {
-      const { command, thread_id: threadIdRaw } = JSON.parse(body) as { command?: unknown; thread_id?: unknown };
+      const parsedBody = JSON.parse(body) as { command?: unknown; thread_id?: unknown };
+      const { command, thread_id: threadIdRaw } = parsedBody;
       if (!command || typeof command !== 'string') {
         res.writeHead(400, { 'Content-Type': 'application/json' });
         res.end('{"error":"command required"}');
         return;
       }
-      // Session-aware exec: optional `thread_id` in the POST body picks
-      // the session whose container to exec into. Default (null / missing)
-      // = root session. When a thread is explicitly named but its session
-      // isn't resolvable (or its container is stopped), fail closed with
-      // a 404 + wake hint — folder-level fallback would land the exec in
-      // root or another thread's container, which defeats the purpose.
+      // Session-aware exec: optional `thread_id` in the POST body picks the
+      // session whose container to exec into. Default (null / missing) =
+      // root session. A non-empty thread_id fails closed if it cannot resolve
+      // an exact running container; do not fall back to the folder-level match
+      // because that can exec into root or a different thread.
       const threadId = typeof threadIdRaw === 'string' && threadIdRaw.trim() !== '' ? threadIdRaw.trim() : null;
       const hasExplicitThread = threadId !== null;
       const sessDb = getHookEventsDb();
       const sessionId = sessDb ? sessionIdForThread(sessDb, folder, threadId) : null;
-      const knownFolders = listKnownFolders(sessDb);
-      const found = hasExplicitThread
-        ? sessionId
-          ? findRunningContainer(folder, sessionId, knownFolders)
-          : null
-        : findRunningContainer(folder, sessionId, knownFolders) ?? findRunningContainer(folder, null, knownFolders);
+      const found = findRunningContainer(folder, sessionId) ?? (sessionId || hasExplicitThread ? null : findRunningContainer(folder));
       if (!found) {
         res.writeHead(404, { 'Content-Type': 'application/json' });
-        res.end(
-          JSON.stringify({
-            error: hasExplicitThread ? 'session has no running container' : 'no running container',
-            action: hasExplicitThread ? 'send_message_to_wake' : undefined,
-            session_id: sessionId,
-            thread_id: threadId,
-          }),
-        );
+        res.end(JSON.stringify({
+          error: sessionId || hasExplicitThread ? 'session has no running container' : 'no running container',
+          action: sessionId || hasExplicitThread ? 'send_message_to_wake' : undefined,
+          session_id: sessionId,
+          thread_id: threadId,
+        }));
         return;
       }
       // Execute command (timeout 10s, max 64KB output)
@@ -8005,7 +8290,11 @@ export async function handleRequest(
   const forceDesktop = url.searchParams.get('desktop') === '1';
   const forceMobile = url.searchParams.get('mobile') === '1';
   const serveMobile = !forceDesktop && (forceMobile || isMobileUA);
-  let filePath = decodedPath === '/' ? (serveMobile ? '/mobile.html' : '/index.html') : decodedPath;
+  const isCoworkerSpaRoute = decodedPath === '/coworkers'
+    || decodedPath.startsWith('/coworkers/')
+    || decodedPath === '/cw'
+    || decodedPath.startsWith('/cw/');
+  let filePath = decodedPath === '/' || isCoworkerSpaRoute ? (serveMobile ? '/mobile.html' : '/index.html') : decodedPath;
   filePath = resolve(getPublicDir(), '.' + filePath);
   if (!isInsideDir(getPublicDir(), filePath)) {
     res.writeHead(403);
