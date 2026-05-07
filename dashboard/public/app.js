@@ -327,17 +327,15 @@ function renderDetailHooks(cw) {
 
   // Show last 5 tool calls with durations.
   //
-  // Container already labelled "Recent Events" (index.html:1032), and
-  // the session block below renders its own per-session "Recent:"
-  // events — so don't inject a second "Recent Events" label here, and
-  // drop the "Active Session" wrap since the outer "Recent Events"
-  // label is visually serving that role for this panel.
+  // Recent Events is a folder-level rollup only. The per-session breakdown
+  // (sess-… / "thread · <slug>" / container status / sub-sessions) lives in
+  // its own "Session" panel (#detail-session, populated at :1410 + :458),
+  // so don't inline the session block here — previously that produced a
+  // visible duplicate of each thread/main entry in the detail panel.
   const recentTools = groupEvents.filter((e) => e.event === 'PostToolUse' || e.event === 'PostToolUseFailure').slice(-5);
-  let html = renderActiveSessionBlock(cw, { wrapField: false });
+  let html = '';
 
   if (recentTools.length === 0 && groupEvents.length === 0) return html;
-
-  html += '<div style="height:4px"></div>';  // spacer between session block and folder-level tool calls
   // Newest-first: take the last 5 chronologically, then reverse so the top entry is most recent.
   const display = groupEvents.filter((e) => e.event !== 'PreToolUse').slice(-5).reverse();
   html += display.map((e) => {
