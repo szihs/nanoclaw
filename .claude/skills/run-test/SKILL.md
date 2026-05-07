@@ -317,6 +317,27 @@ agent-browser wait --load networkidle
 | BX06 | Memory browser: view/edit `.instructions.md` for a coworker |
 | BX07 | SSE reconnect after network blip → no duplicate events |
 | BX08 | Long-running turn: SSE preserves message order under load |
+| BX09 | Seamless peer refresh: create a new coworker via dashboard `POST /api/coworkers` while the admin agent has an active container session — the row appears in the admin session's `inbound.db::destinations` **without a container restart**. See below for the shell check. |
+
+**BX09 — seamless peer refresh:**
+
+```bash
+ADMIN_AG=$(sqlite3 data/v2.db "SELECT id FROM agent_groups WHERE is_admin=1 LIMIT 1;")
+ADMIN_SESSION=$(sqlite3 data/v2.db "SELECT id FROM sessions WHERE agent_group_id='$ADMIN_AG' AND status='active' ORDER BY created_at DESC LIMIT 1;")
+SESSION_DB="data/v2-sessions/$ADMIN_AG/$ADMIN_SESSION/inbound.db"
+
+before=$(sqlite3 "$SESSION_DB" "SELECT COUNT(*) FROM destinations;")
+# Create a new coworker via the dashboard API (use your auth token if set).
+curl -fsSL -X POST "http://localhost:$DASHBOARD_PORT/api/coworkers" \
+  -H 'content-type: application/json' \
+  -d '{"name":"BX09Temp","folder":"bx09-temp","routing":"internal"}'
+after=$(sqlite3 "$SESSION_DB" "SELECT COUNT(*) FROM destinations;")
+test "$after" -gt "$before" || { echo "BX09 FAIL: destinations not refreshed"; exit 1; }
+# Cleanup
+curl -fsSL -X DELETE "http://localhost:$DASHBOARD_PORT/api/coworkers/bx09-temp"
+```
+
+This proves the `refreshDestinationsForAgentGroup` projection fires from the dashboard POST path. Pre-fix, `after == before` until the admin container restarts.
 
 Save screenshot to `/tmp/nanoclaw-test-$(date +%Y%m%d_%H%M%S).png`.
 

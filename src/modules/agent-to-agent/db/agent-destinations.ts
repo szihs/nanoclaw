@@ -31,6 +31,15 @@
  * Affected call sites today (keep this list honest if you add more):
  *   - src/delivery.ts::handleSystemAction case 'create_agent'
  *   - src/db/messaging-groups.ts::createMessagingGroupAgent
+ *   - dashboard/server.ts POST /api/coworkers (admin↔child wiring)
+ *   - dashboard/server.ts POST /api/coworkers/import (v2 manifest restore)
+ *   - dashboard/server.ts POST /api/coworkers/import/export (v3 full bundle)
+ *
+ * In contexts that have no caller session in scope (e.g. dashboard HTTP
+ * handlers), use the convenience wrapper
+ * `refreshDestinationsForAgentGroup(agentGroupId)` from
+ * `write-destinations.ts` — it enumerates every active session of the
+ * agent group and projects into each.
  */
 import type { AgentDestination } from '../../../types.js';
 import { getDb } from '../../../db/connection.js';

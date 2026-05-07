@@ -12,6 +12,7 @@ import fs from 'fs';
 import { getAgentGroup } from '../../db/agent-groups.js';
 import { getMessagingGroup } from '../../db/messaging-groups.js';
 import { replaceDestinations, type DestinationRow } from '../../db/session-db.js';
+import { getSessionsByAgentGroup } from '../../db/sessions.js';
 import { log } from '../../log.js';
 import { inboundDbPath, openInboundDb } from '../../session-manager.js';
 import { getDestinations } from './db/agent-destinations.js';
@@ -56,4 +57,17 @@ export function writeDestinations(agentGroupId: string, sessionId: string): void
     db.close();
   }
   log.debug('Destination map written', { sessionId, count: resolved.length });
+}
+
+/**
+ * Refresh the `inbound.db::destinations` projection for every active session
+ * of `agentGroupId`. Use this after mutating `agent_destinations` from a
+ * context that has no caller session in scope (e.g. dashboard HTTP handlers).
+ * See the invariant in `db/agent-destinations.ts`.
+ */
+export function refreshDestinationsForAgentGroup(agentGroupId: string): void {
+  const sessions = getSessionsByAgentGroup(agentGroupId).filter((s) => s.status === 'active');
+  for (const s of sessions) {
+    writeDestinations(agentGroupId, s.id);
+  }
 }
