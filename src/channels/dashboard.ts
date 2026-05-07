@@ -14,7 +14,7 @@ registerChannelAdapter('dashboard', {
   factory: () => ({
     name: 'dashboard',
     channelType: 'dashboard',
-    supportsThreads: false,
+    supportsThreads: true,
 
     async setup(_config: ChannelSetup): Promise<void> {
       log.info('Dashboard channel adapter ready');
