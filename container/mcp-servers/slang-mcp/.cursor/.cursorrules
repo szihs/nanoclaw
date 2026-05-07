@@ -1,0 +1,68 @@
+Always assume the github has the following:
+- "owner": "shader-slang",
+- "repo": "slang",
+
+# Priority Levels:
+P0 - Critical/Blocking: 
+- Compiler crashes
+- Build failures
+- Critical regressions in shader compilation
+- Security vulnerabilities
+
+P1 - High Priority:
+- Performance regressions
+- Major API compatibility issues
+- SPIR-V/DXIL generation failures
+- Cross-platform compilation failures
+
+P2 - Medium Priority:
+- Feature requests for core functionality
+- Documentation gaps
+- Minor API improvements
+- Test coverage improvements
+
+P3 - Low Priority:
+- Nice-to-have features
+- Code cleanup/refactoring
+- Non-critical optimizations
+
+# File Structure Focus Areas:
+/source/         # Core compiler implementation
+/include/        # Public API headers
+/tests/          # Test cases
+/prelude/        # Built-in definitions
+/tools/          # Supporting tools
+
+# Common Issue Areas:
+1. Shader Compilation: /source/slang/compiler/
+2. Code Generation: /source/slang/codegen/
+3. Type System: /source/slang/type-system/
+4. API Layer: /include/slang.h
+
+1. Initial Triage:
+   - Check issue labels
+   - Review reproduction steps
+   - Identify affected components
+   
+2. Code Investigation:
+   - Locate relevant source files
+   - Check test coverage
+   - Review recent changes (git blame)
+   
+3. Priority Assignment:
+   - Impact assessment
+   - User base affected
+   - Implementation complexity
+
+# For Compiler Crashes:
+- Check /source/slang/compiler/ for parsing issues
+- Review /source/slang/diagnostics/ for error handling
+
+# For API Issues:
+- Start with /include/slang.h
+- Check /source/slang/core/ for implementation
+
+# For Backend Issues:
+- SPIR-V: /source/slang/codegen/spirv/
+- DXIL: /source/slang/codegen/dxil/
+- HLSL: /source/slang/codegen/hlsl/

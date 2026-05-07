@@ -1,0 +1,18 @@
+[project]
+name = "slang-pr-knowledge"
+version = "1.0.0"
+description = "MCP server indexing merged PRs from shader-slang/slang and shader-slang/slangpy"
+requires-python = ">=3.10"
+dependencies = [
+    "mcp>=1.0.0",
+]
+
+[project.scripts]
+slang-pr-knowledge-server = "server:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["."]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
