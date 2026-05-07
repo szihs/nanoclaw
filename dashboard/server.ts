@@ -3283,14 +3283,24 @@ export async function handleRequest(
               event.timestamp,
             );
           // Stamp sdk_session_routes when the container told us its nano
-          // session id. INSERT OR IGNORE so duplicates are cheap; always
-          // touch last_seen_at so Timeline sort stays fresh.
+          // session id. We validate the claim before writing — the header
+          // is attacker-addressable, so a bad/stale/custom hook must not
+          // be able to corrupt another session's attribution. The
+          // validated INSERT joins sessions → agent_groups and only
+          // commits when the claimed session exists AND its agent
+          // group's folder matches the event's X-Group-Folder.
           if (hookNanoSessId && event.session_id && event.group) {
             try {
-              const ag = heDb
-                .prepare("SELECT id FROM agent_groups WHERE folder = ?")
-                .get(event.group) as { id: string } | undefined;
-              if (ag) {
+              const row = heDb
+                .prepare(
+                  `SELECT s.id AS session_id, s.agent_group_id AS agent_group_id, ag.folder AS folder
+                     FROM sessions s
+                     JOIN agent_groups ag ON ag.id = s.agent_group_id
+                    WHERE s.id = ?
+                    LIMIT 1`,
+                )
+                .get(hookNanoSessId) as { session_id: string; agent_group_id: string; folder: string } | undefined;
+              if (row && row.folder === event.group) {
                 heDb
                   .prepare(
                     `INSERT OR IGNORE INTO sdk_session_routes
@@ -3298,11 +3308,14 @@ export async function handleRequest(
                         first_seen_at, last_seen_at, source)
                      VALUES (?, ?, ?, ?, ?, ?, 'live')`,
                   )
-                  .run(event.session_id, hookNanoSessId, ag.id, event.group, event.timestamp, event.timestamp);
+                  .run(event.session_id, row.session_id, row.agent_group_id, row.folder, event.timestamp, event.timestamp);
                 heDb
                   .prepare('UPDATE sdk_session_routes SET last_seen_at = ? WHERE sdk_session_id = ?')
                   .run(event.timestamp, event.session_id);
               }
+              // Silent skip when unknown_session or folder_mismatch —
+              // log if we add structured audit later. The query-time
+              // fallback will still bucket the event via heuristic.
             } catch {
               /* routes table may not exist pre-migration — non-fatal */
             }
@@ -3848,41 +3861,61 @@ export async function handleRequest(
         res.end('{"error":"nanoclaw session not found"}');
         return;
       }
-      // Prefer exact attribution via sdk_session_routes — returns only
-      // events from SDK UUIDs routed to this nanoclaw session, so thread
-      // events don't bleed into the root session and vice versa.
+      // Exact attribution via sdk_session_routes PLUS a time-bracketed
+      // fallback for unrouted rows, unioned in a single query. This way
+      // a partial backfill (new live events routed, some historical
+      // rows still lacking routes) doesn't silently hide the unrouted
+      // ones — they fall through to the bracket filter instead.
       //
-      // Fall back to the legacy `timestamp >= created_at` filter when the
-      // routes table is empty (pre-migration) OR the folder has exactly
-      // one active nanoclaw session (old-shared install — the query
-      // naturally scopes to that session's lifetime). Multi-session
-      // folders without routes will still over-include in the legacy
-      // path; operators should run the backfill script to populate
-      // source='backfill' routes and silence this.
+      // Bracket bounds:
+      //   lower = this session's created_at
+      //   upper = the next session's created_at for the same
+      //           agent_group_id (or +inf when this is the latest)
+      // Upper bound matters: without it, a thread session's "fallback
+      // window" would run forever and swallow root events that ran AFTER
+      // the thread was created.
       const createdAtMs = nano.created_at ? new Date(nano.created_at).getTime() : 0;
-      let rows: any[] = [];
-      let hasRoutes = false;
+      let upperBoundMs = Number.MAX_SAFE_INTEGER;
       try {
-        const routeCountRow = heDb
-          .prepare('SELECT COUNT(*) AS c FROM sdk_session_routes WHERE nanoclaw_session_id = ?')
-          .get(nanoclawSessionId) as { c: number };
-        hasRoutes = routeCountRow.c > 0;
-      } catch { /* migration 018 not applied — treat as no routes */ }
-      if (hasRoutes) {
+        const nextRow = heDb
+          .prepare(
+            `SELECT created_at FROM sessions
+              WHERE agent_group_id = (SELECT agent_group_id FROM sessions WHERE id = ?)
+                AND created_at > (SELECT created_at FROM sessions WHERE id = ?)
+              ORDER BY created_at ASC LIMIT 1`,
+          )
+          .get(nanoclawSessionId, nanoclawSessionId) as { created_at: string } | undefined;
+        if (nextRow?.created_at) upperBoundMs = new Date(nextRow.created_at).getTime();
+      } catch { /* sessions may be missing in degraded fixtures */ }
+
+      let rows: any[] = [];
+      try {
         rows = heDb
           .prepare(
             `SELECT he.* FROM hook_events he
-               JOIN sdk_session_routes r ON r.sdk_session_id = he.session_id
-              WHERE r.nanoclaw_session_id = ?
+               LEFT JOIN sdk_session_routes r ON r.sdk_session_id = he.session_id
+              WHERE he.group_folder = ?
+                AND (
+                      r.nanoclaw_session_id = ?
+                   OR (
+                      r.sdk_session_id IS NULL
+                      AND he.timestamp >= ?
+                      AND he.timestamp <  ?
+                   )
+                )
               ORDER BY he.timestamp ASC`,
           )
-          .all(nanoclawSessionId);
-      } else {
+          .all(nano.folder, nanoclawSessionId, createdAtMs, upperBoundMs);
+      } catch {
+        // Routes table absent (pre-migration 018) — fall back to pure
+        // time-bracket so old installs keep working.
         rows = heDb
           .prepare(
-            `SELECT * FROM hook_events WHERE group_folder = ? AND timestamp >= ? ORDER BY timestamp ASC`,
+            `SELECT * FROM hook_events
+              WHERE group_folder = ? AND timestamp >= ? AND timestamp < ?
+              ORDER BY timestamp ASC`,
           )
-          .all(nano.folder, createdAtMs);
+          .all(nano.folder, createdAtMs, upperBoundMs);
       }
 
       // Same pipeline as /api/hook-events/session-flow but without per-session_id filtering.
