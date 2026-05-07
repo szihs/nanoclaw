@@ -420,7 +420,7 @@ async function spawnContainer(session: Session): Promise<void> {
   const allowedTools = resolveAllowedMcpTools(agentGroup);
   const proxyToken = registerContainerToken(agentGroup.folder, allowedTools);
 
-  const args = await buildContainerArgs(mounts, containerName, agentGroup, provider, contribution, agentIdentifier, {
+  const args = await buildContainerArgs(mounts, containerName, agentGroup, session, provider, contribution, agentIdentifier, {
     proxyToken,
     allowedTools,
   });
@@ -669,7 +669,11 @@ function buildMounts(
       hooks: [
         {
           type: 'command',
-          command: `curl -sf --proxy '' -X POST ${hookUrl} -H 'Content-Type: application/json' -H 'X-Group-Folder: ${agentGroup.folder}' -d "$(cat)" > /dev/null 2>&1 || true`,
+          // X-NanoClaw-Session-Id / X-NanoClaw-Session-Thread-Id let the
+          // dashboard stamp sdk_session_routes at intake without guessing.
+          // The env vars are set per-container by spawnContainer, so each
+          // concurrent session (root + threads) carries its own identity.
+          command: `curl -sf --proxy '' -X POST ${hookUrl} -H 'Content-Type: application/json' -H 'X-Group-Folder: ${agentGroup.folder}' -H "X-NanoClaw-Session-Id: $NANOCLAW_SESSION_ID" -H "X-NanoClaw-Session-Thread-Id: $NANOCLAW_SESSION_THREAD_ID" -d "$(cat)" > /dev/null 2>&1 || true`,
           timeout: 5,
         },
       ],
@@ -881,6 +885,7 @@ async function buildContainerArgs(
   mounts: VolumeMount[],
   containerName: string,
   agentGroup: AgentGroup,
+  session: Session,
   provider: string,
   providerContribution: ProviderContainerContribution,
   agentIdentifier?: string,
@@ -983,6 +988,12 @@ async function buildContainerArgs(
   }
   args.push('-e', `NANOCLAW_AGENT_GROUP_ID=${agentGroup.id}`);
   args.push('-e', `NANOCLAW_AGENT_GROUP_NAME=${agentGroup.name}`);
+  // Per-session identity — the dashboard uses these to attribute hook
+  // events to the NanoClaw session that emitted them (via the
+  // sdk_session_routes mapping table). Empty thread_id is fine; the
+  // dashboard treats the empty string as "root session".
+  args.push('-e', `NANOCLAW_SESSION_ID=${session.id}`);
+  args.push('-e', `NANOCLAW_SESSION_THREAD_ID=${session.thread_id ?? ''}`);
   // Cap on how many pending messages reach one prompt. Accumulated context
   // (trigger=0 rows) rides along with wake-eligible rows up to this cap.
   args.push('-e', `NANOCLAW_MAX_MESSAGES_PER_PROMPT=${MAX_MESSAGES_PER_PROMPT}`);
