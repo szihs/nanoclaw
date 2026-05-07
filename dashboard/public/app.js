@@ -211,26 +211,71 @@ function switchToTab(tabId) {
 // callers can choose whether to wrap it (Coworkers detail uses the wrapper; Pixel Office
 // inspector is injecting into an existing slot). Pass `wrapField: true` to include the
 // field wrapper. Returns '' if there's no nanoclaw session AND no SDK fallback.
+/**
+ * Pick a CSS variable for an activity_status value emitted by
+ * /api/hook-events/sessions. Matches the coworker-list sidebar dots.
+ */
+function statusDotColor(status) {
+  switch (status) {
+    case 'working': return 'var(--green)';
+    case 'thinking': return 'var(--yellow)';
+    case 'error': return 'var(--red)';
+    case 'active': return '#3B82F6'; // blue
+    case 'idle':
+    default: return 'var(--text-muted)';
+  }
+}
+
+/** Short one-line event summary for the per-session Recent Events block. */
+function formatSessionEventLine(e) {
+  const t = e.tool ? ` · ${esc(e.tool)}` : '';
+  return `${esc(e.event || '')}${t}`;
+}
+
 function renderActiveSessionBlock(cw, { wrapField = true } = {}) {
   const groupEvents = (state.hookEvents || []).filter((e) => e.group === cw.folder);
-  const nanoSess = cachedSessions.find((s) => s.group_folder === cw.folder && s.nanoclaw_session_id);
+  // Cached sessions now carries ONE parent per active NanoClaw session
+  // (root + each thread). Render them all, not just the first, so
+  // operators can see per-session status + recent activity.
+  const nanoSessions = (cachedSessions || []).filter(
+    (s) => s.group_folder === cw.folder && s.nanoclaw_session_id,
+  );
   let inner = '';
-  if (nanoSess) {
-    const lastMs = nanoSess.last_active
-      ? new Date(nanoSess.last_active).getTime()
-      : (nanoSess.sdk_subsessions[0]?.last_ts ?? 0);
-    const ago = lastMs ? timeAgo(lastMs) : '';
-    const cs = nanoSess.container_status || 'unknown';
-    const subCount = (nanoSess.sdk_subsessions || []).length;
-    inner = `<div class="value" style="display:flex;flex-direction:column;gap:3px">
+  if (nanoSessions.length > 0) {
+    const sessionHtml = nanoSessions.map((nanoSess) => {
+      const lastMs = nanoSess.last_active
+        ? new Date(nanoSess.last_active).getTime()
+        : (nanoSess.sdk_subsessions[0]?.last_ts ?? 0);
+      const ago = lastMs ? timeAgo(lastMs) : '';
+      const cs = nanoSess.container_status || 'unknown';
+      const subCount = (nanoSess.sdk_subsessions || []).length;
+      const humanSess = typeof window.sessionLabel === 'function'
+        ? window.sessionLabel(nanoSess.nanoclaw_session_id, nanoSess.thread_id)
+        : nanoSess.nanoclaw_session_id;
+      const status = nanoSess.activity_status || (cs === 'running' ? 'active' : 'idle');
+      const dot = `<span style="display:inline-block;width:6px;height:6px;border-radius:50%;background:${statusDotColor(status)}" title="${esc(status)}"></span>`;
+      const recent = (nanoSess.recent_events || []).slice(0, 3);
+      const recentHtml = recent.length === 0 ? '' : `
+        <div style="font-size:9px;color:var(--text-dim);margin-left:10px;margin-top:2px">Recent:</div>
+        <div style="display:flex;flex-direction:column;gap:1px;margin-left:16px">
+          ${recent.map((e) => `
+            <div style="font-size:9px;color:var(--text-muted);display:flex;gap:6px">
+              <span style="font-family:monospace">${esc(formatTimeFull(e.timestamp))}</span>
+              <span>${formatSessionEventLine(e)}</span>
+            </div>
+          `).join('')}
+        </div>`;
+      return `<div style="display:flex;flex-direction:column;gap:3px;padding:3px 0;border-top:1px solid var(--border)">
         <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">
-          <span style="font-size:10px;color:var(--text);font-family:monospace">${esc(nanoSess.nanoclaw_session_id)}</span>
+          ${dot}
+          <span style="font-size:10px;color:var(--text)" title="${escAttr(nanoSess.nanoclaw_session_id)}">${esc(humanSess)}</span>
           <span style="font-size:9px;color:var(--text-muted)">[container: ${esc(cs)}${ago ? ' · last ' + esc(ago) : ''}]</span>
           <button class="admin-action-btn" style="font-size:8px;padding:1px 6px"
             data-view-nanoclaw-session="${escAttr(nanoSess.nanoclaw_session_id)}"
             data-view-nanoclaw-agid="${escAttr(nanoSess.agent_group_id || '')}"
             data-view-session-group="${escAttr(cw.folder)}">View</button>
         </div>
+        ${recentHtml}
         ${(() => {
           if (subCount === 0) return '';
           const subs = nanoSess.sdk_subsessions || [];
@@ -240,20 +285,22 @@ function renderActiveSessionBlock(cw, { wrapField = true } = {}) {
           const header = nonGhost.length > 0
             ? `▸ ${subCount} SDK sub-session${subCount === 1 ? '' : 's'} (showing ${visible.length} recent${hiddenGhosts > 0 ? `, ${hiddenGhosts} ghost hidden` : ''})`
             : `▸ ${subCount} SDK sub-session${subCount === 1 ? '' : 's'} (all ghost)`;
-          return `<div style="font-size:9px;color:var(--text-dim)">${esc(header)}</div>
-        <div style="display:flex;flex-direction:column;gap:2px;margin-left:10px">
-          ${visible.map((s) => `
-            <button class="hook-entry hook-entry-link" style="display:flex;gap:8px;align-items:center;font-size:9px;padding:1px 4px;text-align:left"
-              data-view-session="${escAttr(s.session_id)}" data-view-session-group="${escAttr(cw.folder)}">
-              <span style="font-family:monospace;color:var(--text-dim)">${esc(s.session_id.slice(0, 11))}</span>
-              <span style="min-width:58px;color:var(--text-muted)">${esc(s.shape || 'session')}</span>
-              <span style="color:var(--text-muted)">${formatTimeFull(s.last_ts)}</span>
-              <span style="color:var(--text-muted)">${Number(s.event_count).toLocaleString()} ev</span>
-            </button>
-          `).join('')}
-        </div>`;
+          return `<div style="font-size:9px;color:var(--text-dim);margin-left:10px;margin-top:2px">${esc(header)}</div>
+            <div style="display:flex;flex-direction:column;gap:2px;margin-left:16px">
+              ${visible.map((s) => `
+                <button class="hook-entry hook-entry-link" style="display:flex;gap:8px;align-items:center;font-size:9px;padding:1px 4px;text-align:left"
+                  data-view-session="${escAttr(s.session_id)}" data-view-session-group="${escAttr(cw.folder)}">
+                  <span style="font-family:monospace;color:var(--text-dim)">${esc(s.session_id.slice(0, 11))}</span>
+                  <span style="min-width:58px;color:var(--text-muted)">${esc(s.shape || 'session')}</span>
+                  <span style="color:var(--text-muted)">${formatTimeFull(s.last_ts)}</span>
+                  <span style="color:var(--text-muted)">${Number(s.event_count).toLocaleString()} ev</span>
+                </button>
+              `).join('')}
+            </div>`;
         })()}
       </div>`;
+    }).join('');
+    inner = `<div class="value" style="display:flex;flex-direction:column;gap:0">${sessionHtml}</div>`;
   } else {
     // Fallback: fall back to the last-seen SDK session if cachedSessions hasn't loaded yet.
     const sessionEvent = groupEvents.filter((e) => e.session_id).slice(-1)[0];
@@ -278,13 +325,19 @@ function renderDetailHooks(cw) {
     if (e.event === 'PreToolUse' && e.tool_use_id) preTimes.set(e.tool_use_id, e.timestamp);
   }
 
-  // Show last 5 tool calls with durations
+  // Show last 5 tool calls with durations.
+  //
+  // Container already labelled "Recent Events" (index.html:1032), and
+  // the session block below renders its own per-session "Recent:"
+  // events — so don't inject a second "Recent Events" label here, and
+  // drop the "Active Session" wrap since the outer "Recent Events"
+  // label is visually serving that role for this panel.
   const recentTools = groupEvents.filter((e) => e.event === 'PostToolUse' || e.event === 'PostToolUseFailure').slice(-5);
-  let html = renderActiveSessionBlock(cw);
+  let html = renderActiveSessionBlock(cw, { wrapField: false });
 
   if (recentTools.length === 0 && groupEvents.length === 0) return html;
 
-  html += '<label style="color:var(--text-dim);font-size:9px;text-transform:uppercase">Recent Events</label>';
+  html += '<div style="height:4px"></div>';  // spacer between session block and folder-level tool calls
   // Newest-first: take the last 5 chronologically, then reverse so the top entry is most recent.
   const display = groupEvents.filter((e) => e.event !== 'PreToolUse').slice(-5).reverse();
   html += display.map((e) => {
@@ -371,6 +424,21 @@ function applyState(nextState) {
   updateTimeline();
   // Live-update coworkers tab sidebar
   if (typeof scheduleCwRefresh === 'function') scheduleCwRefresh();
+  // WS-driven chat refresh: when the selected coworker's lastMessageTs
+  // advances, pull the main feed (and any open thread) immediately. The 3s
+  // poll remains as a fallback. State shape tolerates either .coworkers
+  // or .registeredGroups carrying the timestamp.
+  if (cwState && cwState.selected) {
+    const cw = (nextState.coworkers || []).find((c) => c.folder === cwState.selected);
+    const ts = cw?.lastMessageTs || cw?.lastActivity || null;
+    if (ts && ts !== cwState.lastMainMessageTs) {
+      cwState.lastMainMessageTs = ts;
+      if (typeof fetchCwMessages === 'function') fetchCwMessages();
+      if (cwState.thread && typeof fetchCwThread === 'function') {
+        fetchCwThread(cwState.thread.parentId);
+      }
+    }
+  }
   // Live-update detail panel if open
   if (selectedCoworker) {
     const updated = state.coworkers.find((c) => c.folder === selectedCoworker.folder);
@@ -2014,12 +2082,21 @@ function updateSessionSelector() {
     // When "All coworkers" is selected, prefix the option with the folder so rows are
     // distinguishable; when a specific coworker is selected, the prefix is redundant.
     const prefix = selectedCoworker ? '' : `${p.group_folder} · `;
+    // Session label — "main · <slug>" / "thread · <slug>" via the shared
+    // sessionLabel() helper. Raw sess-xxx id surfaces as the option's
+    // title= attribute so operators can still copy it for log grepping.
+    const humanLabel = p.nanoclaw_session_id
+      ? (typeof window.sessionLabel === 'function'
+          ? window.sessionLabel(p.nanoclaw_session_id, p.thread_id)
+          : `${p.thread_id ? 'thread' : 'main'} · ${p.nanoclaw_session_id}`)
+      : '';
     const parentLabel = p.nanoclaw_session_id
-      ? `${prefix}${parentTs} (${parentAgo}) · ${p.event_count_total} ev · ${p.nanoclaw_session_id}`
+      ? `${prefix}${humanLabel} · ${parentTs} (${parentAgo}) · ${p.event_count_total} ev`
       : `${prefix}(no active nanoclaw session)`;
+    const parentTitle = p.nanoclaw_session_id ? p.nanoclaw_session_id : '';
     const parentVal = p.nanoclaw_session_id ? `nano:${p.agent_group_id}:${p.nanoclaw_session_id}` : '';
     if (parentVal) {
-      html += `<option value="${escAttr(parentVal)}" data-group="${escAttr(p.group_folder)}" data-kind="nanoclaw">${esc(parentLabel)}</option>`;
+      html += `<option value="${escAttr(parentVal)}" data-group="${escAttr(p.group_folder)}" data-kind="nanoclaw" title="${escAttr(parentTitle)}">${esc(parentLabel)}</option>`;
     }
     for (const s of (p.sdk_subsessions || [])) {
       // ALWAYS use last_ts (not first_ts — that was the old bug: ghost sessions showed their
@@ -3207,16 +3284,32 @@ document.getElementById('chat-input')?.addEventListener('keydown', (e) => {
   }
 });
 
+/**
+ * URL query suffix carrying the currently-viewed NanoClaw session's
+ * thread_id. Shell-exec endpoints consume this to pick the right
+ * container when a coworker has multiple concurrent sessions (root +
+ * Slack-style threads). Empty string when no thread panel is open —
+ * resolves to the root session server-side.
+ */
+function currentShellThreadQuery() {
+  const tid = cwState.thread?.parentId;
+  return tid ? `?thread_id=${encodeURIComponent(tid)}` : '';
+}
+
 // ===================================================================
 // COWORKERS TAB
 // ===================================================================
 
 const cwState = {
-  selected: null,       // currently selected coworker folder
-  messages: [],         // chat messages for selected coworker
-  polling: null,        // chat polling interval
-  types: null,          // coworker-types.json cache
+  selected: null,             // currently selected coworker folder
+  messages: [],               // main-view messages (thread_id IS NULL). Alias for .main.messages; kept as a top-level field so existing readers don't break.
+  threadSummaries: {},        // { [parentMessageId]: { replyCount, lastReplyTs } } — main view only
+  polling: null,              // main-view polling interval
+  thread: null,               // { parentId, parentSnapshot, messages: [], polling } when a thread panel is open; null otherwise
+  a2aInspector: null,         // { recipientAgGroupId, senderThreadId, recipientName, session, messages } — Option C read-only peek
+  types: null,                // coworker-types.json cache
   approvalCountByFolder: {},  // { folder: count } for sidebar dot
+  lastMainMessageTs: null,    // tracks last-seen state.lastMessageTs for WS-driven refresh dedupe
 };
 
 function getCwCoworkers() {
@@ -3310,7 +3403,13 @@ function renderCwSidebar() {
 function selectCoworker(folder) {
   cwState.selected = folder;
   cwState.messages = [];
+  cwState.threadSummaries = {};
+  cwState.lastMainMessageTs = null;
   if (cwState.polling) { clearInterval(cwState.polling); cwState.polling = null; }
+  // Any open thread belongs to the previous coworker — close it.
+  closeThread({ silent: true });
+  // Push URL state for shareable / reload-safe navigation.
+  syncCwUrl();
   renderCwSidebar();
   if (folder) {
     document.getElementById('cw-chat-input-area').style.display = 'flex';
@@ -3349,7 +3448,7 @@ function selectCoworker(folder) {
     updateCwDetail();
     updateCwHeader();
     // Update shell button state (don't auto-spawn — message send handles that via the message loop)
-    fetch(`/api/coworkers/${encodeURIComponent(folder)}/container`).then(r => r.json()).then(d => {
+    fetch(`/api/coworkers/${encodeURIComponent(folder)}/container${currentShellThreadQuery()}`).then(r => r.json()).then(d => {
       const shellBtn = document.querySelector('[data-view=shell]');
       if (shellBtn) {
         shellBtn.style.opacity = d.running ? '1' : '0.4';
@@ -3386,6 +3485,7 @@ async function fetchCwMessages() {
     if (!res.ok) return;
     const data = await res.json();
     cwState.messages = (data.messages || []).reverse();
+    cwState.threadSummaries = data.threadSummaries || {};
     try {
       const ar = await fetch(`/api/approvals?group=${encodeURIComponent(cwState.selected)}`);
       cwState.pendingApprovals = ar.ok ? await ar.json() : [];
@@ -3471,8 +3571,17 @@ function renderCwMessages() {
     const metaSuffix = renderMessageMetaSuffix(m);
     const isSystem = m.kind === 'task' || m.kind === 'system';
     const kindLabel = m.kind && m.kind !== 'chat' ? ` <span style="font-size:7px;color:#999;font-style:italic">${esc(m.kind)}</span>` : '';
+    // Option C a2a inspector affordance: for "from @reviewer" bubbles the
+    // sender's platform_id IS reviewer's agent_group_id, so the button
+    // passes enough for the inspector to resolve reviewer's session
+    // keyed on (reviewer_ag, a2a_mg, sender_thread). sender_thread is
+    // taken from the current view (thread.parentId if a thread is open,
+    // empty for root view).
+    const a2aInspectorBtn = isFromCoworker && m.senderCoworkerName && m.platform_id
+      ? ` <button class="cw-a2a-open-btn" title="Open ${esc(m.senderCoworkerName)}'s session for this thread (read-only)" data-recipient-ag="${escAttr(m.platform_id)}" data-recipient-name="${escAttr(m.senderCoworkerName)}" style="background:transparent;border:none;color:#d97706;cursor:pointer;font-size:8px;padding:0;margin-left:4px">&#x2197; open ${esc(m.senderCoworkerName)}'s session</button>`
+      : '';
     const coworkerLabel = isFromCoworker && m.senderCoworkerName
-      ? ` <span style="font-size:7px;color:#10b981;font-style:italic">from @${esc(m.senderCoworkerName)}</span>`
+      ? ` <span style="font-size:7px;color:#10b981;font-style:italic">from @${esc(m.senderCoworkerName)}</span>${a2aInspectorBtn}`
       : isToCoworker && m.recipientCoworkerName
       ? ` <span style="font-size:7px;color:#10b981;font-style:italic">→ @${esc(m.recipientCoworkerName)}</span>`
       : '';
@@ -3508,9 +3617,43 @@ function renderCwMessages() {
     // so render as markdown rather than escaped plain text.
     const renderAsMd = isOutgoing || isFromCoworker;
     const bubbleBody = `${text ? (renderAsMd ? md(text) : esc(text)) : ''}${attachmentsHtml}`;
-    return `<div class="cw-msg ${cls}"${systemStyle}>
+
+    // Slack-style row: monogram avatar + header (name · time) + body.
+    // NOTE on "direction": the dashboard API tags rows with
+    //   direction='outgoing' ← came from messages_out.db (agent's reply)
+    //   direction='incoming' ← came from messages_in.db (sent TO the agent)
+    // So isOutgoing=true is the AGENT speaking; !isOutgoing is the user
+    // (or another coworker via a2a). Author/monogram follow from that.
+    const authorName = isOutgoing
+      ? (isToCoworker && m.recipientCoworkerName
+          ? `${esc(cwState.selected || 'agent')} → @${esc(m.recipientCoworkerName)}`
+          : esc(cwState.selected || 'agent'))
+      : isFromCoworker && m.senderCoworkerName
+        ? `@${esc(m.senderCoworkerName)}`
+        : 'You';
+    const monogramSource = isOutgoing
+      ? (cwState.selected || 'A')
+      : (isFromCoworker && m.senderCoworkerName ? m.senderCoworkerName : 'You');
+    const monogram = esc((monogramSource || 'A').trim().charAt(0).toUpperCase() || 'A');
+
+    // Reply-count stub: only for main-view rows that are thread starters.
+    const summary = cwState.threadSummaries && m.id ? cwState.threadSummaries[m.id] : null;
+    const threadStubHtml = summary
+      ? `<div class="cw-thread-stub" data-parent-id="${esc(m.id)}" title="Open thread"><span class="cw-thread-stub-count">${summary.replyCount} repl${summary.replyCount === 1 ? 'y' : 'ies'}</span>${summary.lastReplyTs ? ` <span class="cw-thread-stub-time">· ${formatTime(summary.lastReplyTs)}</span>` : ''}</div>`
+      : '';
+    // Hover action toolbar — only offer "Reply in thread" when we have a
+    // persisted message id (not optimistic) and it's not an approval/
+    // credential/question card (those have their own buttons).
+    const canReply = !!m.id && !m.optimistic;
+    const actionsHtml = canReply
+      ? `<div class="cw-msg-actions"><button class="cw-msg-action-btn cw-reply-btn" data-parent-id="${esc(m.id)}" title="Reply in thread">↳ Reply</button></div>`
+      : '';
+    return `<div class="cw-msg ${cls}" data-msg-id="${esc(m.id || '')}"${systemStyle}>
+      <div class="cw-msg-avatar">${monogram}</div>
+      ${actionsHtml}
+      <div class="cw-msg-header"><span class="cw-msg-author">${authorName}</span><span class="cw-msg-time">${time}${kindLabel}${coworkerLabel}${metaSuffix}</span></div>
       <div class="cw-msg-bubble">${bubbleBody || '<span style="color:#9ca3af">(empty message)</span>'}</div>
-      <div class="cw-msg-time">${time}${kindLabel}${coworkerLabel}${metaSuffix}</div>
+      ${threadStubHtml}
     </div>`;
   }).join('');
   if (!approvalHtml && !credentialHtml && !messageHtml) {
@@ -3530,6 +3673,24 @@ function renderCwMessages() {
   if (!el._approvalDelegateAttached) {
     el._approvalDelegateAttached = true;
     el.addEventListener('click', async (e) => {
+      // ── Reply-in-thread hover button or reply-count stub ──
+      const replyBtn = e.target.closest('.cw-reply-btn, .cw-thread-stub');
+      if (replyBtn) {
+        const parentId = replyBtn.dataset.parentId;
+        if (parentId) openThread(parentId);
+        return;
+      }
+      // ── a2a read-only inspector (Option C) ──
+      const a2aBtn = e.target.closest('.cw-a2a-open-btn');
+      if (a2aBtn) {
+        const recipientAg = a2aBtn.dataset.recipientAg;
+        const recipientName = a2aBtn.dataset.recipientName || 'coworker';
+        if (recipientAg) {
+          const senderThreadId = cwState.thread?.parentId || '';
+          openA2aInspector({ recipientAgGroupId: recipientAg, senderThreadId, recipientName });
+        }
+        return;
+      }
       // ── Approval buttons ──
       const approvalBtn = e.target.closest('.approval-btn');
       if (approvalBtn) {
@@ -3689,7 +3850,7 @@ function renderCwMessages() {
  */
 async function ensureContainerRunning(folder) {
   try {
-    const res = await fetch(`/api/coworkers/${encodeURIComponent(folder)}/container`);
+    const res = await fetch(`/api/coworkers/${encodeURIComponent(folder)}/container${currentShellThreadQuery()}`);
     const data = await res.json();
     if (data.running) return true;
 
@@ -3700,7 +3861,7 @@ async function ensureContainerRunning(folder) {
     // Poll until container appears (max 15s)
     for (let i = 0; i < 15; i++) {
       await new Promise(r => setTimeout(r, 1000));
-      const check = await fetch(`/api/coworkers/${encodeURIComponent(folder)}/container`);
+      const check = await fetch(`/api/coworkers/${encodeURIComponent(folder)}/container${currentShellThreadQuery()}`);
       const status = await check.json();
       if (status.running) return true;
     }
@@ -3708,39 +3869,356 @@ async function ensureContainerRunning(folder) {
   } catch { return false; }
 }
 
+/**
+ * Shared send helper. `threadId` is the Slack-style thread id (= parent
+ * message id). null/undefined routes to the root session.
+ */
+async function sendMessage({ group, content, threadId = null, optimisticBucket }) {
+  // direction='incoming': user messages land in messages_in.db when
+  // persisted, so the optimistic row needs to match that for both the
+  // author renderer (shows "You" on !isOutgoing) and the dedupe matcher
+  // below to identify its server twin when it arrives.
+  const optimistic = {
+    id: null, optimistic: true, content, direction: 'incoming',
+    sender: 'web@dashboard', sender_name: 'Dashboard',
+    is_from_me: 0, is_bot_message: 0, timestamp: new Date().toISOString(),
+    thread_id: threadId,
+  };
+  optimisticBucket.push(optimistic);
+  if (threadId) renderCwThread(); else renderCwMessages();
+  try {
+    const body = { group, content };
+    if (threadId) body.thread_id = threadId;
+    const res = await fetch('/api/chat/send', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) {
+      const idx = optimisticBucket.indexOf(optimistic);
+      if (idx >= 0) optimisticBucket.splice(idx, 1);
+      if (threadId) renderCwThread(); else renderCwMessages();
+      let err = 'Failed to send message';
+      try { err = (await res.json()).error || err; } catch { /* ignore */ }
+      alert(err);
+      return false;
+    }
+    if (threadId) fetchCwThread(threadId); else fetchCwMessages();
+    return true;
+  } catch (e) {
+    const idx = optimisticBucket.indexOf(optimistic);
+    if (idx >= 0) optimisticBucket.splice(idx, 1);
+    if (threadId) renderCwThread(); else renderCwMessages();
+    alert('Failed to send message: ' + e.message);
+    return false;
+  }
+}
+
 async function sendCwMessage() {
   const input = document.getElementById('cw-chat-input');
   const content = input.value.trim();
   if (!cwState.selected || !content) return;
   input.value = '';
-  const optimisticMessage = {
-    content, sender: 'web@dashboard', sender_name: 'Dashboard',
-    is_from_me: 0, is_bot_message: 0, timestamp: new Date().toISOString(),
-  };
-  cwState.messages.push(optimisticMessage);
-  renderCwMessages();
+  await sendMessage({ group: cwState.selected, content, optimisticBucket: cwState.messages });
+}
+
+async function sendCwThreadMessage() {
+  const input = document.getElementById('cw-thread-input-text');
+  if (!input) return;
+  const content = input.value.trim();
+  if (!cwState.selected || !cwState.thread || !content) return;
+  input.value = '';
+  await sendMessage({
+    group: cwState.selected,
+    content,
+    threadId: cwState.thread.parentId,
+    optimisticBucket: cwState.thread.messages,
+  });
+}
+
+function openThread(parentId) {
+  if (!cwState.selected || !parentId) return;
+  // Snapshot the parent message from the current main view for the header.
+  const parentSnapshot = (cwState.messages || []).find((m) => m.id === parentId) || null;
+  if (cwState.thread?.polling) clearInterval(cwState.thread.polling);
+  cwState.thread = { parentId, parentSnapshot, messages: [], polling: null };
+  const panel = document.getElementById('cw-thread-panel');
+  if (panel) panel.style.display = 'flex';
+  // The dashboard's detail panel and thread panel fight for the same slot —
+  // hide detail while the thread is open to avoid a squeezed layout.
+  const detail = document.getElementById('cw-detail');
+  if (detail && detail.style.display !== 'none') {
+    detail.dataset.wasVisible = '1';
+    detail.style.display = 'none';
+  }
+  renderCwThread(); // render placeholder immediately
+  fetchCwThread(parentId);
+  cwState.thread.polling = setInterval(() => {
+    if (cwState.thread) fetchCwThread(cwState.thread.parentId);
+  }, 3000);
+  syncCwUrl();
+}
+
+function closeThread({ silent = false } = {}) {
+  if (cwState.thread?.polling) clearInterval(cwState.thread.polling);
+  cwState.thread = null;
+  const panel = document.getElementById('cw-thread-panel');
+  if (panel) panel.style.display = 'none';
+  const detail = document.getElementById('cw-detail');
+  if (detail && detail.dataset.wasVisible === '1') {
+    detail.style.display = 'block';
+    delete detail.dataset.wasVisible;
+  }
+  if (!silent) syncCwUrl();
+}
+
+/**
+ * Option C read-only inspector for a2a delegations. Opens on demand
+ * from "from @reviewer" bubbles and fetches the recipient's own
+ * inbound/outbound for the keyed per-thread session. Shares the
+ * right-side slot with the thread panel and detail panel; whichever
+ * is open is stashed so closing the inspector restores it.
+ */
+function openA2aInspector({ recipientAgGroupId, senderThreadId, recipientName }) {
+  const panel = document.getElementById('cw-a2a-inspector-panel');
+  if (!panel) return;
+  cwState.a2aInspector = { recipientAgGroupId, senderThreadId, recipientName, session: null, messages: [] };
+  // Share the slot with the thread panel and detail panel. Hide
+  // whichever is open so the inspector can take the slot without a
+  // squeezed 3-way layout; remember to restore them on close.
+  const threadPanel = document.getElementById('cw-thread-panel');
+  if (threadPanel && threadPanel.style.display !== 'none') {
+    threadPanel.dataset.wasVisible = '1';
+    threadPanel.style.display = 'none';
+  }
+  const detail = document.getElementById('cw-detail');
+  if (detail && detail.style.display !== 'none') {
+    detail.dataset.wasVisibleA2a = '1';
+    detail.style.display = 'none';
+  }
+  panel.style.display = 'flex';
+  const title = document.getElementById('cw-a2a-inspector-title');
+  if (title) title.textContent = `@${recipientName} session`;
+  const label = document.getElementById('cw-a2a-inspector-label');
+  if (label) label.textContent = senderThreadId ? `thread ${String(senderThreadId).slice(0, 12)}` : 'root session';
+  const msgsEl = document.getElementById('cw-a2a-inspector-messages');
+  if (msgsEl) msgsEl.innerHTML = '<div class="cw-a2a-inspector-empty">Loading…</div>';
+  fetchA2aInspector();
+}
+
+function closeA2aInspector() {
+  cwState.a2aInspector = null;
+  const panel = document.getElementById('cw-a2a-inspector-panel');
+  if (panel) panel.style.display = 'none';
+  const threadPanel = document.getElementById('cw-thread-panel');
+  if (threadPanel && threadPanel.dataset.wasVisible === '1') {
+    threadPanel.style.display = 'flex';
+    delete threadPanel.dataset.wasVisible;
+  }
+  const detail = document.getElementById('cw-detail');
+  if (detail && detail.dataset.wasVisibleA2a === '1') {
+    detail.style.display = 'block';
+    delete detail.dataset.wasVisibleA2a;
+  }
+}
+
+async function fetchA2aInspector() {
+  const st = cwState.a2aInspector;
+  if (!st) return;
+  const qs = new URLSearchParams();
+  qs.set('recipient_agent_group_id', st.recipientAgGroupId);
+  if (st.senderThreadId) qs.set('sender_thread', st.senderThreadId);
   try {
-    const res = await fetch('/api/chat/send', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ group: cwState.selected, content }),
-    });
-    if (!res.ok) {
-      cwState.messages = cwState.messages.filter((m) => m !== optimisticMessage);
-      renderCwMessages();
-      let err = 'Failed to send message';
-      try {
-        const data = await res.json();
-        err = data.error || err;
-      } catch { /* ignore */ }
-      alert(err);
+    const res = await fetch(`/api/a2a-session?${qs.toString()}`);
+    const msgsEl = document.getElementById('cw-a2a-inspector-messages');
+    if (!msgsEl) return;
+    if (res.status === 404) {
+      msgsEl.innerHTML = '<div class="cw-a2a-inspector-empty">No recipient session exists yet for this thread. The delegation may not have landed, or the reviewer hasn\'t processed it yet.</div>';
       return;
     }
-    fetchCwMessages();
-  } catch (e) {
-    cwState.messages = cwState.messages.filter((m) => m !== optimisticMessage);
-    renderCwMessages();
-    alert('Failed to send message: ' + e.message);
+    if (!res.ok) {
+      msgsEl.innerHTML = `<div class="cw-a2a-inspector-empty">Error loading session (${res.status}).</div>`;
+      return;
+    }
+    const data = await res.json();
+    st.session = data.session;
+    st.messages = data.messages || [];
+    renderA2aInspector();
+  } catch (err) {
+    const msgsEl = document.getElementById('cw-a2a-inspector-messages');
+    if (msgsEl) msgsEl.innerHTML = `<div class="cw-a2a-inspector-empty">Error loading session: ${esc(String(err.message || err))}</div>`;
+  }
+}
+
+function renderA2aInspector() {
+  const st = cwState.a2aInspector;
+  if (!st) return;
+  const msgsEl = document.getElementById('cw-a2a-inspector-messages');
+  if (!msgsEl) return;
+  const label = document.getElementById('cw-a2a-inspector-label');
+  if (label && st.session) {
+    const slug = typeof window.sessionLabel === 'function'
+      ? window.sessionLabel(st.session.id, st.session.thread_id)
+      : String(st.session.id).slice(0, 12);
+    label.textContent = slug;
+    label.title = `session=${st.session.id}\nthread_id=${st.session.thread_id ?? '(root)'}`;
+  }
+  // Oldest-first in the read-only pane (more natural to read top-down).
+  const ordered = (st.messages || []).slice().reverse();
+  if (ordered.length === 0) {
+    msgsEl.innerHTML = '<div class="cw-a2a-inspector-empty">Session exists but has no messages yet.</div>';
+    return;
+  }
+  msgsEl.innerHTML = ordered.map((m) => {
+    // direction here is from the RECIPIENT's point of view:
+    //   incoming = the @sender posted it into the recipient's session
+    //   outgoing = the recipient (reviewer) replied
+    const isOutgoing = m.direction === 'outgoing';
+    const cls = isOutgoing ? 'assistant' : 'coworker';
+    const time = m.timestamp ? formatTime(m.timestamp) : '';
+    // content from session DBs is usually a JSON envelope — reuse the
+    // same display-content normalization the main chat view does so
+    // the text renders instead of a JSON blob.
+    let text = '';
+    try {
+      const parsed = JSON.parse(m.content || '');
+      text = parsed?.text || parsed?.content || m.content || '';
+    } catch { text = m.content || ''; }
+    const authorName = isOutgoing
+      ? esc(st.recipientName || 'recipient')
+      : `@${esc(cwState.selected || 'sender')}`;
+    const monogramSource = isOutgoing ? (st.recipientName || 'R') : (cwState.selected || 'S');
+    const monogram = esc((monogramSource || 'A').trim().charAt(0).toUpperCase() || 'A');
+    return `<div class="cw-msg ${cls}"><div class="cw-msg-avatar">${monogram}</div>
+      <div class="cw-msg-header"><span class="cw-msg-author">${authorName}</span><span class="cw-msg-time">${time}</span></div>
+      <div class="cw-msg-bubble">${text ? md(text) : '<span style="color:#9ca3af">(empty)</span>'}</div></div>`;
+  }).join('');
+  msgsEl.scrollTop = msgsEl.scrollHeight;
+}
+
+async function fetchCwThread(parentId) {
+  if (!cwState.selected || !cwState.thread || cwState.thread.parentId !== parentId) return;
+  try {
+    const res = await fetch(`/api/messages?group=${encodeURIComponent(cwState.selected)}&thread_id=${encodeURIComponent(parentId)}&limit=200`);
+    if (!res.ok) return;
+    const data = await res.json();
+    const incoming = (data.messages || []).reverse();
+    // Preserve locally-pushed optimistic messages UNTIL their persisted
+    // twin arrives. Heuristic: drop an optimistic row once the server
+    // returns any outgoing thread row with identical content within 30 s
+    // of the optimistic timestamp. Also drop optimistic rows older than
+    // 60 s so a failed round-trip doesn't stick forever.
+    const OPTIMISTIC_MAX_AGE_MS = 60_000;
+    const MATCH_WINDOW_MS = 30_000;
+    const now = Date.now();
+    const matched = (opt) => {
+      const optTs = Date.parse(opt.timestamp);
+      if (!Number.isFinite(optTs)) return false;
+      if (now - optTs > OPTIMISTIC_MAX_AGE_MS) return true; // expire
+      // Server-returned rows go through normalizeMessageForDisplay which
+      // may set displayContent to an unwrapped string while raw content
+      // stays JSON; the optimistic row is plain text. Compare via the
+      // same displayContent || content fallback the renderer uses.
+      const optText = opt.displayContent || opt.content || '';
+      return incoming.some((m) => {
+        if (m.direction !== 'incoming') return false;
+        const mText = m.displayContent || m.content || '';
+        if (mText !== optText) return false;
+        const mTs = Date.parse(m.timestamp);
+        return Number.isFinite(mTs) && Math.abs(mTs - optTs) <= MATCH_WINDOW_MS;
+      });
+    };
+    const pending = cwState.thread.messages.filter((m) => m.optimistic && !matched(m));
+    cwState.thread.messages = incoming.concat(pending);
+    renderCwThread();
+  } catch { /* ignore */ }
+}
+
+function renderCwThread() {
+  if (!cwState.thread) return;
+  const t = cwState.thread;
+  const parentEl = document.getElementById('cw-thread-parent');
+  const parentLabel = document.getElementById('cw-thread-parent-label');
+  const msgsEl = document.getElementById('cw-thread-messages');
+  // Derive the thread's NanoClaw session id from any message row (server
+  // tags each row with session_id). Slug by session id, not parentId, so
+  // this label matches the same session's label in the Timeline dropdown
+  // and the detail panel. Fall back to parentId slug if the thread is
+  // newly opened with no persisted messages yet.
+  if (parentLabel) {
+    const sessionIdForSlug = (t.messages || []).find((m) => m.session_id)?.session_id || t.parentId;
+    parentLabel.textContent = typeof window.sessionLabel === 'function'
+      ? window.sessionLabel(sessionIdForSlug, t.parentId)  // second arg non-null → "thread · <slug>"
+      : String(t.parentId).slice(0, 12);
+    parentLabel.title = `session=${sessionIdForSlug}\nthread_id=${t.parentId}`;
+  }
+  if (parentEl) {
+    if (t.parentSnapshot) {
+      const p = t.parentSnapshot;
+      const pText = p.displayContent || p.content || '';
+      const pIsOutgoing = p.direction === 'outgoing';
+      // 'outgoing' = messages_out = agent reply → coworker folder as author.
+      // !outgoing = user or a2a sender → "You" or "@coworker".
+      const pAuthor = pIsOutgoing
+        ? esc(cwState.selected || 'agent')
+        : (p.senderCoworkerName ? `@${esc(p.senderCoworkerName)}` : 'You');
+      parentEl.innerHTML = `<div class="parent-author">${pAuthor} <span style="color:var(--text-muted);font-weight:400">· ${p.timestamp ? formatTime(p.timestamp) : ''}</span></div>
+        <div class="parent-body">${md(pText)}</div>`;
+    } else {
+      parentEl.innerHTML = '<div class="parent-body" style="color:var(--text-muted)">(parent message)</div>';
+    }
+  }
+  if (!msgsEl) return;
+  const wasAtBottom = msgsEl.scrollHeight - msgsEl.scrollTop - msgsEl.clientHeight < 60;
+  const html = (t.messages || []).map((m) => {
+    const isOutgoing = m.direction === 'outgoing';
+    const isFromCoworker = !isOutgoing && m.senderKind === 'coworker';
+    const cls = isFromCoworker ? 'coworker' : isOutgoing ? 'assistant' : 'user';
+    const time = m.timestamp ? formatTime(m.timestamp) : '';
+    const text = m.displayContent || m.content || '';
+    const renderAsMd = isOutgoing || isFromCoworker;
+    const body = text ? (renderAsMd ? md(text) : esc(text)) : '<span style="color:#9ca3af">(empty message)</span>';
+    // direction='outgoing' = agent reply; !outgoing = user or a2a sender.
+    const authorName = isOutgoing
+      ? esc(cwState.selected || 'agent')
+      : (m.senderCoworkerName ? `@${esc(m.senderCoworkerName)}` : 'You');
+    const monogramSource = isOutgoing
+      ? (cwState.selected || 'A')
+      : (m.senderCoworkerName || 'You');
+    const monogram = esc((monogramSource || 'A').trim().charAt(0).toUpperCase() || 'A');
+    return `<div class="cw-msg ${cls}"><div class="cw-msg-avatar">${monogram}</div>
+      <div class="cw-msg-header"><span class="cw-msg-author">${authorName}</span><span class="cw-msg-time">${time}</span></div>
+      <div class="cw-msg-bubble">${body}</div></div>`;
+  }).join('');
+  msgsEl.innerHTML = html || '<div class="cw-empty" style="padding:12px">No replies yet.</div>';
+  if (wasAtBottom) msgsEl.scrollTop = msgsEl.scrollHeight;
+}
+
+/**
+ * Sync URL hash with current coworker/thread selection — shareable /
+ * reload-safe. Schema: #/cw/<folder> or #/cw/<folder>/t/<parentId>.
+ */
+function syncCwUrl() {
+  try {
+    let hash = '';
+    if (cwState.selected) {
+      hash = `#/cw/${encodeURIComponent(cwState.selected)}`;
+      if (cwState.thread) hash += `/t/${encodeURIComponent(cwState.thread.parentId)}`;
+    }
+    if (location.hash !== hash) history.replaceState(null, '', hash || location.pathname);
+  } catch { /* ignore */ }
+}
+
+function applyCwUrl() {
+  const m = /^#\/cw\/([^/]+)(?:\/t\/(.+))?$/.exec(location.hash || '');
+  if (!m) return;
+  const folder = decodeURIComponent(m[1]);
+  const parentId = m[2] ? decodeURIComponent(m[2]) : null;
+  if (cwState.selected !== folder) selectCoworker(folder);
+  if (parentId && (!cwState.thread || cwState.thread.parentId !== parentId)) {
+    // Defer briefly so the main fetch has a chance to resolve first — gives
+    // openThread a non-null parent snapshot for the thread header.
+    setTimeout(() => openThread(parentId), 600);
   }
 }
 
@@ -4010,6 +4488,21 @@ document.getElementById('cw-chat-input')?.addEventListener('keydown', (e) => {
   if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendCwMessage(); }
 });
 
+// Thread panel composer + close button
+document.getElementById('cw-thread-send')?.addEventListener('click', sendCwThreadMessage);
+document.getElementById('cw-thread-input-text')?.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendCwThreadMessage(); }
+});
+document.getElementById('cw-thread-close')?.addEventListener('click', () => closeThread());
+document.getElementById('cw-a2a-inspector-close')?.addEventListener('click', () => closeA2aInspector());
+
+// Hash-routing: restore state on load, reconcile on history navigation.
+window.addEventListener('hashchange', () => applyCwUrl());
+// Apply initial URL after the coworker list has been populated. The first
+// applyState() call fills state.registeredGroups; this listener fires after
+// that the first time via a short deferral.
+setTimeout(() => applyCwUrl(), 500);
+
 // Memory editor is read-only (CLAUDE.md re-composed at container startup from coworkerType)
 
 // Chat/Artifacts toggle in Coworkers tab
@@ -4142,7 +4635,7 @@ async function renderCwWork(subpath, isDir) {
     shellOutput.dataset.folder = folder;
     shellOutput.textContent = '';
     try {
-      const res = await fetch(`/api/coworkers/${encodeURIComponent(folder)}/container`);
+      const res = await fetch(`/api/coworkers/${encodeURIComponent(folder)}/container${currentShellThreadQuery()}`);
       const data = await res.json();
       if (data.running) {
         shellStatus.innerHTML = `<span style="color:#34d399">Live</span> <span style="color:var(--text-dim)">${esc(data.container)}</span>`;
@@ -4162,7 +4655,7 @@ async function renderCwShell() {
   if (!cwState.selected) { statusEl.innerHTML = '<span style="color:var(--text-muted)">Select a coworker first.</span>'; return; }
   statusEl.innerHTML = 'Checking container...';
   try {
-    const res = await fetch(`/api/coworkers/${encodeURIComponent(cwState.selected)}/container`);
+    const res = await fetch(`/api/coworkers/${encodeURIComponent(cwState.selected)}/container${currentShellThreadQuery()}`);
     const data = await res.json();
     if (data.running) {
       statusEl.innerHTML = `<span style="color:#34d399">Connected</span> <span style="color:var(--text-muted)">${esc(data.container)}</span>`;
@@ -4177,7 +4670,7 @@ async function renderCwShell() {
       inputEl.disabled = true;
       const ok = await ensureContainerRunning(cwState.selected);
       if (ok) {
-        const r2 = await fetch(`/api/coworkers/${encodeURIComponent(cwState.selected)}/container`);
+        const r2 = await fetch(`/api/coworkers/${encodeURIComponent(cwState.selected)}/container${currentShellThreadQuery()}`);
         const d2 = await r2.json();
         statusEl.innerHTML = `<span style="color:#34d399">Connected</span> <span style="color:var(--text-muted)">${esc(d2.container)}</span>`;
         outputEl.textContent = `Connected to ${d2.container}\nType commands below. Try: ls /workspace/agent/\n\n`;
@@ -4201,7 +4694,9 @@ async function execShellCommand(cmd, outputId, inputId) {
     const res = await fetch(`/api/coworkers/${encodeURIComponent(cwState.selected)}/exec`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ command: cmd }),
+      // thread_id picks the per-thread container when a thread panel is
+      // open; null / omitted → root session.
+      body: JSON.stringify({ command: cmd, thread_id: cwState.thread?.parentId || null }),
     });
     const data = await res.json();
     if (data.error) {
