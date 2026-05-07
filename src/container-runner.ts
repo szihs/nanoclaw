@@ -348,6 +348,15 @@ export function getActiveContainerCount(): number {
   return activeContainers.size;
 }
 
+/**
+ * Tail of a session id used in container names (strips the `sess-` prefix).
+ * Exported so the dashboard can reconstruct the `<prefix>-<folder>-<tail>`
+ * shape when matching `docker ps` output to a specific NanoClaw session.
+ */
+export function containerSessionTail(sessionId: string): string {
+  return sessionId.startsWith('sess-') ? sessionId.slice(5) : sessionId;
+}
+
 export function isContainerRunning(sessionId: string): boolean {
   return activeContainers.has(sessionId);
 }
@@ -411,7 +420,17 @@ async function spawnContainer(session: Session): Promise<void> {
   const { provider, contribution } = resolveProviderContribution(session, agentGroup);
 
   const mounts = buildMounts(agentGroup, session, contribution);
-  const containerName = `${CONTAINER_PREFIX}-${agentGroup.folder}-${Date.now()}`;
+  // Container name embeds the NanoClaw session id tail so the dashboard can
+  // route shell-exec requests to the right container when a coworker has
+  // multiple live sessions (root + Slack-style threads). Before this, every
+  // container for a folder collapsed into one `<prefix>-<folder>-<ts>`
+  // namespace and `findRunningContainer(folder)` returned whichever was
+  // first in the Set — shell landed in an arbitrary session.
+  //
+  // Format: `<prefix>-<folder>-<session-tail>-<ts>`. Timestamp is kept so
+  // rapid respawns of the same session still get unique names (docker --rm
+  // reclaims, but there's a race window when stopping).
+  const containerName = `${CONTAINER_PREFIX}-${agentGroup.folder}-${containerSessionTail(session.id)}-${Date.now()}`;
   // OneCLI agent identifier is always the agent group id — stable across
   // sessions and reversible via getAgentGroup() for approval routing.
   const agentIdentifier = agentGroup.id;
@@ -420,10 +439,19 @@ async function spawnContainer(session: Session): Promise<void> {
   const allowedTools = resolveAllowedMcpTools(agentGroup);
   const proxyToken = registerContainerToken(agentGroup.folder, allowedTools);
 
-  const args = await buildContainerArgs(mounts, containerName, agentGroup, provider, contribution, agentIdentifier, {
-    proxyToken,
-    allowedTools,
-  });
+  const args = await buildContainerArgs(
+    mounts,
+    containerName,
+    agentGroup,
+    session,
+    provider,
+    contribution,
+    agentIdentifier,
+    {
+      proxyToken,
+      allowedTools,
+    },
+  );
 
   log.info('Spawning container', {
     sessionId: session.id,
@@ -669,7 +697,11 @@ function buildMounts(
       hooks: [
         {
           type: 'command',
-          command: `curl -sf --proxy '' -X POST ${hookUrl} -H 'Content-Type: application/json' -H 'X-Group-Folder: ${agentGroup.folder}' -d "$(cat)" > /dev/null 2>&1 || true`,
+          // X-NanoClaw-Session-Id / X-NanoClaw-Session-Thread-Id let the
+          // dashboard stamp sdk_session_routes at intake without guessing.
+          // The env vars are set per-container by spawnContainer, so each
+          // concurrent session (root + threads) carries its own identity.
+          command: `curl -sf --proxy '' -X POST ${hookUrl} -H 'Content-Type: application/json' -H 'X-Group-Folder: ${agentGroup.folder}' -H "X-NanoClaw-Session-Id: $NANOCLAW_SESSION_ID" -H "X-NanoClaw-Session-Thread-Id: $NANOCLAW_SESSION_THREAD_ID" -d "$(cat)" > /dev/null 2>&1 || true`,
           timeout: 5,
         },
       ],
@@ -881,6 +913,7 @@ async function buildContainerArgs(
   mounts: VolumeMount[],
   containerName: string,
   agentGroup: AgentGroup,
+  session: Session,
   provider: string,
   providerContribution: ProviderContainerContribution,
   agentIdentifier?: string,
@@ -983,6 +1016,12 @@ async function buildContainerArgs(
   }
   args.push('-e', `NANOCLAW_AGENT_GROUP_ID=${agentGroup.id}`);
   args.push('-e', `NANOCLAW_AGENT_GROUP_NAME=${agentGroup.name}`);
+  // Per-session identity — the dashboard uses these to attribute hook
+  // events to the NanoClaw session that emitted them (via the
+  // sdk_session_routes mapping table). Empty thread_id is fine; the
+  // dashboard treats the empty string as "root session".
+  args.push('-e', `NANOCLAW_SESSION_ID=${session.id}`);
+  args.push('-e', `NANOCLAW_SESSION_THREAD_ID=${session.thread_id ?? ''}`);
   // Cap on how many pending messages reach one prompt. Accumulated context
   // (trigger=0 rows) rides along with wake-eligible rows up to this cap.
   args.push('-e', `NANOCLAW_MAX_MESSAGES_PER_PROMPT=${MAX_MESSAGES_PER_PROMPT}`);
