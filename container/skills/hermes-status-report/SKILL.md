@@ -100,7 +100,7 @@ than dropping the briefing silently. Never guess a destination name.
 ### 1.1 Pinned baseline → the *Pinned baseline* card
 
 ```bash
-python3 -c 'import json;m=json.load(open("/workspace/extra/hermes-release/RELEASE_MANIFEST.json"));print(m["tag"],m["commit"][:7],m.get("previous_tag",""))'
+for f in /workspace/shared/hermes/RELEASE_MANIFEST.json /workspace/extra/hermes-release/RELEASE_MANIFEST.json; do [ -f "$f" ] && python3 -c 'import json,sys;m=json.load(open(sys.argv[1]));print(m["tag"],m["commit"][:7],m.get("previous_tag",""))' "$f" && break; done   # shared copy first: the Orchestrator has no /workspace/extra mount
 ```
 
 *Fallback:* manifest missing/unreadable → use `v2026.8.31` and add the card note
@@ -128,7 +128,7 @@ The ledger is the status source; the requirements matrix is the denominator.
 
 Requirement ids come in **four** families — `FR-` functional, `SR-` security/safety, `PR-`
 port/parity, `NF-` non-functional (`container/workflows/hermes-spec-requirement/WORKFLOW.md`).
-Match all four everywhere; an `(FR|SR)`-only pattern silently drops every port/parity row,
+Ids are `<FAMILY>-F<NN>` (RT-F01, ISO-F10, …); a family-specific pattern silently drops rows,
 which understates the denominator *and* hides merged work.
 
 ```bash
@@ -139,7 +139,7 @@ LEDGER=/workspace/agent/reports/ledger.md                                   # th
 GAP=/workspace/shared/hermes-requirements.md
 [ -f "$GAP" ] || GAP=/workspace/shared/hermes/gap-matrix.md
 ls -l "$LEDGER" "$GAP" 2>&1 | head -5
-grep -cE '^\| *(FR|SR|PR|NF)-[0-9]+' "$GAP" 2>/dev/null
+grep -cE '^\| *[A-Z]+-F[0-9]+' "$GAP" 2>/dev/null   # ids are <FAMILY>-F<NN>
 ```
 
 Then bucket the ledger's **last column** (`status`, the one the merge gate edits in place)

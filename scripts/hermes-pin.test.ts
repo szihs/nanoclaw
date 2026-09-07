@@ -193,6 +193,9 @@ describe('hermes-pin.sh', () => {
 
     const m = manifest(fx.live);
     expect(m.tag).toBe('v1.0.0');
+    // mirrored copy next to PIN.md so groups without the release-tree mount can read the pin
+    const shared = JSON.parse(fs.readFileSync(path.join(path.dirname(fx.pinMd), 'RELEASE_MANIFEST.json'), 'utf8'));
+    expect(shared.tag).toBe('v1.0.0');
     expect(m.commit).toBe('deadbeef');
     expect(m.previous_tag).toBeNull();
     expect(m.previous_dir).toBeNull();
