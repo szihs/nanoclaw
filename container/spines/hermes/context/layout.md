@@ -1,6 +1,7 @@
 ### Hermes repository layout
 
-Two copies of the same tree: the **release** at `/workspace/extra/hermes-release` (read-only, tag v2026.8.31 — cite from here) and the **fork** at `/workspace/agent/hermes-agent` (rw — build here, one worktree per target at `/workspace/agent/wt-<target-slug>`). Paths below are relative to either root.
+Two copies of the same tree: the **release** at `/workspace/extra/hermes-release` (read-only, at the pinned tag recorded in `/workspace/extra/hermes-release/RELEASE_MANIFEST.json`, fallback: the spine's `vars.release_tag` in `coworker-types.yaml` — cite from here) and the **fork** at `/workspace/agent/hermes-agent` (rw — build here, one worktree per target at `/workspace/agent/wt-<target-slug>`). Paths below are relative to either root.
+When a report, ADR, or review names the release, cite the `tag` and `commit` fields from `RELEASE_MANIFEST.json` (written by the operator's `scripts/hermes-pin.sh`), not a remembered version string.
 
 - `run_agent.py` — `AIAgent`: synchronous core conversation loop, tool dispatch, budget/interrupt, session persistence (~12k LOC). Core — plugins never edit it.
 - `model_tools.py` — tool orchestration; importing it is the ONLY implicit trigger of `discover_plugins()` (`AGENTS.md:794-798`). `toolsets.py` — `TOOLSETS` + `_HERMES_CORE_TOOLS`; a tool reaches the model only if a toolset names it.
