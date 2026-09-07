@@ -708,6 +708,13 @@ PY
 }
 
 # ----------------------------------------------------------------------------- docs
+sync_shared_manifest() { # copy the live manifest next to PIN.md so every group (incl. the Orchestrator, which does not mount the release tree) can read it at /workspace/shared/hermes/RELEASE_MANIFEST.json
+  local dst="$(dirname "$PIN_MD")/$MANIFEST_NAME"
+  [ -f "$LIVE/$MANIFEST_NAME" ] || return 0
+  mkdir -p "$(dirname "$dst")" 2>/dev/null || { warn "cannot create $(dirname "$dst"); skipping shared manifest"; return 0; }
+  cp -f "$LIVE/$MANIFEST_NAME" "$dst" 2>/dev/null || { warn "cannot write $dst"; return 0; }
+  log "shared manifest: $dst"
+}
 update_shared_docs() { # update_shared_docs LINE
   if ! mkdir -p "$(dirname "$PIN_MD")" 2>/dev/null; then
     warn "cannot create $(dirname "$PIN_MD"); skipping PIN.md update"
@@ -717,11 +724,12 @@ update_shared_docs() { # update_shared_docs LINE
     {
       echo "# Hermes release pin log"
       echo
-      echo "Written by scripts/hermes-pin.sh. Source of truth: /workspace/extra/hermes-release/$MANIFEST_NAME."
+      echo "Written by scripts/hermes-pin.sh. Source of truth: /workspace/extra/hermes-release/$MANIFEST_NAME (mirrored here as $MANIFEST_NAME for groups without that mount)."
       echo
     } > "$PIN_MD" 2>/dev/null || { warn "cannot write $PIN_MD"; return 0; }
   fi
   printf -- '- %s\n' "$1" >> "$PIN_MD" 2>/dev/null || { warn "cannot append to $PIN_MD"; return 0; }
+  sync_shared_manifest
   log "docs: appended to $PIN_MD"
 }
 
@@ -848,6 +856,7 @@ pin() {
   if [ "$FORCE" -eq 0 ] && [ -n "$cur_tag" ] && [ "$cur_tag" = "$TAG" ] \
      && { [ "$COMMIT" = "unknown" ] || [ -z "$cur_commit" ] || [ "$cur_commit" = "$COMMIT" ]; }; then
     log "already pinned: $LIVE is $TAG ($cur_commit) — tree unchanged (use --force to re-download)"
+    sync_shared_manifest
     [ "$SYNC_FORK" -eq 0 ] || sync_fork
     [ "$DO_GC" -eq 0 ] || gc
     return 0
