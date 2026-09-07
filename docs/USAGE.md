@@ -388,6 +388,7 @@ Skills loaded inside agent containers at runtime:
 | `base-nanoclaw` | Core NanoClaw container primitives |
 | `buddy` | Pair-programming assistant |
 | `codex-critique` | Critique stage gates (PLAN_REVIEW, CODE_REVIEW, etc.) |
+| `explain-diff-html` | Self-contained HTML explanation (background, intuition, code walkthrough, quiz) of every PR a coworker opens; asked for by the PR-created hook |
 | `self-customize` | Agent self-modification tools |
 | `agent-browser` | In-container web browsing |
 | `slack-formatting` | Slack message formatting |

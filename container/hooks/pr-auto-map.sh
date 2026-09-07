@@ -42,12 +42,15 @@ PR_NUM=$(echo "$PR_URL" | grep -oP '/pull/\K\d+')
 
 [ -z "$REPO" ] || [ -z "$PR_NUM" ] && exit 0
 
-# Output instruction for the agent to call report_pr_created
-# The hookSpecificOutput.additionalContext is injected into the agent's next turn
+# Output instruction for the agent: (1) claim the PR for webhook routing,
+# (2) produce the HTML explanation that accompanies every PR we open
+# (container/skills/explain-diff-html — in base-common, so every project
+# spine has it). The hookSpecificOutput.additionalContext is injected into
+# the agent's next turn.
 jq -nc --arg repo "$REPO" --arg pr "$PR_NUM" '{
   hookSpecificOutput: {
     hookEventName: "PostToolUse",
-    additionalContext: ("PR created: " + $repo + "#" + $pr + ". IMPORTANT: Call report_pr_created(repo=\"" + $repo + "\", pr_number=" + $pr + ") now so webhook events for this PR route to your session.")
+    additionalContext: ("PR created: " + $repo + "#" + $pr + ". IMPORTANT: Call report_pr_created(repo=\"" + $repo + "\", pr_number=" + $pr + ") now so webhook events for this PR route to your session. Then run /explain-diff-html for " + $repo + "#" + $pr + ": write the self-contained HTML under /workspace/agent/reports/pr-explanations/, deliver it with send_file to the thread that asked for this PR, and list its path in the review request or report that follows. Do not post it to GitHub.")
   }
 }'
 
