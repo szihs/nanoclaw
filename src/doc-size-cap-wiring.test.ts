@@ -88,19 +88,25 @@ describe('the cap sits on the render seam', () => {
 
   // One place, not per-write-site: this is the only function both spawn paths and
   // both staleness paths pass through.
-  it('is checked inside renderComposedDocument', () => {
-    expect(seam).toContain('assertWithinDocSizeCap(content, agentGroup.folder)');
+  //
+  // The cap moved from a standalone `assertWithinDocSizeCap(content, …)` after
+  // assembly to a `maxBytes` handed to the assembler. Same seam, same
+  // before-publication position, different mechanism — and the move is what makes
+  // eviction possible at all: a check that only sees the finished string can
+  // refuse, but it cannot drop the largest droppable section and retry.
+  it('passes the cap to the assembler inside renderComposedDocument', () => {
+    expect(seam).toContain('maxBytes: PROJECT_DOC_MAX_BYTES');
   });
 
-  it('is the only call site', () => {
-    expect(SOURCE.match(/assertWithinDocSizeCap\(/g)).toHaveLength(1);
+  it('is the only place the cap is applied', () => {
+    expect(SOURCE.match(/maxBytes: PROJECT_DOC_MAX_BYTES/g)).toHaveLength(1);
   });
 
-  // Before publication, so the caller's catch can fall back. After the write it
-  // would already have replaced the group's good document.
-  it('runs before the content is returned for writing', () => {
-    const checkAt = seam.indexOf('assertWithinDocSizeCap');
-    const returnAt = seam.indexOf('return { content');
+  // Before publication, so the caller's catch can fall back. Applying it after the
+  // write would already have replaced the group's good document.
+  it('applies the cap before the content is returned for writing', () => {
+    const checkAt = seam.indexOf('maxBytes: PROJECT_DOC_MAX_BYTES');
+    const returnAt = seam.indexOf('return {');
 
     // Both must exist: `indexOf` returns -1 when the call is absent, and -1 is
     // less than any real offset, so a bare comparison passes vacuously on exactly
@@ -112,8 +118,13 @@ describe('the cap sits on the render seam', () => {
 
   // The seam is what makes spawn and the sweep agree. If the cap were applied at
   // one write site only, the sweep would hash a document spawn would reject.
+  // Both staleness paths still reach it, but only one takes `.hash` inline now:
+  // `recomposeAndUpdateHash` destructures it, because it also returns the hash to
+  // its caller for the restart decision. Matching the call rather than the
+  // destructuring shape keeps the invariant (both go through the seam) without
+  // pinning one call's syntax.
   it('is reached by the staleness paths through the same seam', () => {
-    expect(SOURCE.match(/await renderComposedDocument\(ag\)\)\.hash/g)).toHaveLength(2);
+    expect(SOURCE.match(/renderComposedDocument\(ag\)/g)).toHaveLength(2);
   });
 });
 

@@ -70,9 +70,6 @@ describe('skill-directives parser, on the converted add-slack', () => {
       'src/channels/slack-lib.test.ts',
       'src/channels/slack-a2a-guard.ts',
       'src/channels/slack-a2a-guard.test.ts',
-      // Upstream (858421af) added these two to add-slack's copy list without
-      // updating this expectation, so the test is red on pristine upstream/main
-      // as well. The SKILL.md is the source of truth; this list follows it.
       'src/channels/slack-raw-text.ts',
       'src/channels/slack-raw-text.test.ts',
       'src/channels/slack-registration.test.ts',

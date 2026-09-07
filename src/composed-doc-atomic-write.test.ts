@@ -170,18 +170,21 @@ describe('temp-path hardening', () => {
 describe('both compose paths publish atomically', () => {
   const source = fs.readFileSync(new URL('./container-runner.ts', import.meta.url), 'utf-8');
 
-  // Two write sites: the untyped/legacy path and the typed path. Fixing only one
-  // leaves most real groups torn-writable.
   it('never writes the composed document with a bare writeFileSync', () => {
     const bareComposedWrites = source.match(/fs\.writeFileSync\(claudeMdPath/g) ?? [];
 
     expect(bareComposedWrites).toHaveLength(0);
   });
 
-  it('routes both compose paths through writeComposedDocument', () => {
+  // ONE write site, down from two. The typed and untyped arms were collapsed into a
+  // single publication path — so "fixing only one leaves most real groups
+  // torn-writable" is no longer a way to be wrong, because there is only one.
+  // The count is still asserted: a second write site reappearing means the arms
+  // were forked again, which is the regression this file was written for.
+  it('routes the one compose path through writeComposedDocument', () => {
     const atomicWrites = source.match(/writeComposedDocument\(claudeMdPath/g) ?? [];
 
-    expect(atomicWrites).toHaveLength(2);
+    expect(atomicWrites).toHaveLength(1);
   });
 });
 

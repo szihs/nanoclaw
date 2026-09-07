@@ -208,24 +208,42 @@ async function sweep(): Promise<void> {
     // No /clear: that wipes conversation context and causes amnesia.
     const stale = await detectStaleContainers();
     for (const { sessionId, agentGroupId, folder } of stale) {
-      log.warn('CLAUDE.md stale — killing container for respawn', { sessionId, folder });
-      await recomposeAndUpdateHash(sessionId);
-      killContainer(sessionId, 'claude-md-stale');
-      const staleSession = await getSession(sessionId);
-      await writeSessionMessage(agentGroupId, sessionId, {
-        id: `claudemd-refresh-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-        kind: 'chat',
-        timestamp: new Date().toISOString(),
-        platformId: agentGroupId,
-        channelType: 'agent',
-        threadId: staleSession?.thread_id ?? null,
-        content: JSON.stringify({
-          text: 'Your instructions were updated. Container restarted to apply them. If you have work in progress, resume it — otherwise no response needed.',
-          sender: 'system',
-          senderId: 'system',
-        }),
-        processAfter: new Date(Date.now() + 5000).toISOString(),
-      });
+      // Per session, INSIDE the loop. The outer try wraps the whole tick, so a
+      // throw here used to skip every remaining stale session — one broken group
+      // silently disabling instruction refresh for the whole fleet.
+      try {
+        const outcome = await recomposeAndUpdateHash(sessionId);
+
+        // Gated, where all three steps used to run unconditionally: a persistent
+        // failure killed the container every 60s and announced an update that had
+        // not happened. `recomposeAndUpdateHash` logs its own failure, so there is
+        // nothing to add here.
+        if (outcome.kind !== 'restart-ready') continue;
+
+        log.warn('CLAUDE.md stale — restarting container so spawn republishes document and markers', {
+          sessionId,
+          folder,
+          hash: outcome.hash.slice(0, 12),
+        });
+        killContainer(sessionId, 'claude-md-stale');
+        const staleSession = await getSession(sessionId);
+        await writeSessionMessage(agentGroupId, sessionId, {
+          id: `claudemd-refresh-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+          kind: 'chat',
+          timestamp: new Date().toISOString(),
+          platformId: agentGroupId,
+          channelType: 'agent',
+          threadId: staleSession?.thread_id ?? null,
+          content: JSON.stringify({
+            text: 'Your instructions were updated. Container restarted to apply them. If you have work in progress, resume it — otherwise no response needed.',
+            sender: 'system',
+            senderId: 'system',
+          }),
+          processAfter: new Date(Date.now() + 5000).toISOString(),
+        });
+      } catch (err) {
+        log.error('CLAUDE.md refresh failed for session — continuing sweep', { sessionId, folder, err });
+      }
     }
   } catch (err) {
     log.error('Host sweep error', { err });

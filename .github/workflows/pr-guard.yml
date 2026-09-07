@@ -83,10 +83,23 @@ jobs:
           # Excluded as a whole tree rather than per-subdirectory: the offenders
           # are spread across dist/, frontend/ and the repo root of the vendored
           # project, so enumerating them just invites the next one to slip in.
+          # `*.patch` anywhere, for the reason the claude-trace exclusion gives but
+          # generalized: a patch file IS a verbatim diff. Its trailing whitespace is
+          # content — `git apply` matches context lines byte-for-byte, so "fixing"
+          # the style corrupts the patch. Enforcing our style on one is asking for a
+          # file that cannot be both clean and correct.
+          #
+          # A glob, not another path: the claude-trace entry above was added when a
+          # vendored .patch broke leaf sync PRs, and the very next .patch to land
+          # (scripts/onecli-cost-capture/gateway-response-header-capture.patch) broke
+          # all five of them again the same way — the nv-main pre-merge introduces it
+          # relative to the leaf's base, so the diagnostics are attributed to a PR
+          # that only carried the file across. Enumerating invites a third round.
           echo "--- code paths (enforced) ---"
           git diff --check "$RANGE" -- . \
             ':(exclude)knowledge_base' \
-            ':(exclude)container/claude-trace' > /tmp/code.txt 2>&1
+            ':(exclude)container/claude-trace' \
+            ':(exclude,glob)**/*.patch' > /tmp/code.txt 2>&1
           CODE_RC=$?
           cat /tmp/code.txt
 

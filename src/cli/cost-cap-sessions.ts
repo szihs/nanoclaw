@@ -23,7 +23,10 @@ export const COST_PERIODS = ['1d', '7d', '30d', 'all'] as const;
 export type CostPeriod = (typeof COST_PERIODS)[number];
 
 /** One session row from the dashboard `/api/sessions` payload — only the fields
- *  this surface reads. `cost` is the authoritative total (claudeUsd + codexUsd). */
+ *  this surface reads. `cost` is the authoritative total (claudeUsd + codexUsd).
+ *  The `cost*` fields are the LIVE cost-cap state the dashboard joins onto EVERY
+ *  session (ungated on cost) via `buildSessionCostFields` — see the `stopped`
+ *  view below; `costStatus` is the exact `costStatus` the dashboard renders. */
 export interface SessionCostRow {
   session_id: string;
   agent_group_id: string;
@@ -34,6 +37,18 @@ export interface SessionCostRow {
   cost: number;
   claudeUsd?: number;
   codexUsd?: number;
+  /** Live cost-cap status — 'ok' | 'warn' | 'escalated' | 'stopped' (the dashboard's `costStatus`). */
+  costStatus?: string;
+  /** Runner's windowed enforcement spend (USD). */
+  costSpent?: number;
+  /** True lifetime spend (USD), period-independent — the pill's "spent" number. */
+  costLifetime?: number;
+  /** Live per-session soft cap (USD). */
+  costCap?: number;
+  /** Live Tier-2 hard ceiling (USD). */
+  costCeiling?: number;
+  /** Immortal (orchestrator/admin) session — never actually stopped. */
+  costImmortal?: boolean;
 }
 
 /** Per-group cost aggregate — the default `sessions` output. */
@@ -201,4 +216,108 @@ export async function fetchSessionCosts(period: CostPeriod): Promise<FetchSessio
     sessions: payload.sessions as SessionCostRow[],
     costUnavailable: typeof payload.costUnavailable === 'string' ? payload.costUnavailable : null,
   };
+}
+
+// ── LIVE "currently-stopped" view (ncl cost-cap stopped / MCP list_stopped_sessions) ──
+
+/** One CURRENTLY-stopped session, shaped for JSON/human output. */
+export interface StoppedSessionView {
+  session_id: string;
+  agent_group_id: string;
+  group_folder: string | null;
+  group_name: string | null;
+  /** Always 'stopped' — this list is the live-stopped set, by construction. */
+  status: 'stopped';
+  /** Lifetime spend (falls back to the windowed enforcement counter). */
+  spent_usd?: number;
+  cap_usd?: number;
+  ceiling_usd?: number;
+  immortal?: boolean;
+  /** The period-priced cost column, for context. */
+  cost_usd?: number;
+  container_status: string | null;
+}
+
+/** What `listStoppedSessions` returns. */
+export interface StoppedSessionsResult {
+  count: number;
+  group: string | null;
+  /** The dashboard's `costUnavailable` reason, threaded through (see `FetchSessionCostsResult`). */
+  costUnavailable: string | null;
+  stopped: StoppedSessionView[];
+}
+
+const finiteNum = (v: unknown): number | undefined => (typeof v === 'number' && Number.isFinite(v) ? v : undefined);
+
+/**
+ * PURE: reduce the dashboard `/api/sessions` rows to the LIVE currently-stopped
+ * set — every row whose `costStatus === 'stopped'` — deduped per session (one
+ * row in, one row out) and shaped. This mirrors, byte-for-byte, the dashboard's
+ * own stopped predicate (`s.costStatus === 'stopped'`, ungated on session
+ * status) so ncl / the MCP and the dashboard report the identical set. Split
+ * out so it is unit-testable without a live dashboard. Ranked by spend desc,
+ * then session id, for a stable most-expensive-first listing. `opts.group`
+ * filters to one coworker workspace folder.
+ */
+export function filterStoppedSessions(sessions: SessionCostRow[], opts: { group?: string } = {}): StoppedSessionView[] {
+  return sessions
+    .filter((s) => s.costStatus === 'stopped' && (!opts.group || s.group_folder === opts.group))
+    .map((s) => {
+      const spent = finiteNum(s.costLifetime) ?? finiteNum(s.costSpent);
+      const cap = finiteNum(s.costCap);
+      const ceiling = finiteNum(s.costCeiling);
+      const cost = finiteNum(s.cost);
+      return {
+        session_id: s.session_id,
+        agent_group_id: s.agent_group_id,
+        group_folder: s.group_folder || null,
+        group_name: s.group_name || s.group_folder || null,
+        status: 'stopped' as const,
+        ...(spent !== undefined ? { spent_usd: round2(spent) } : {}),
+        ...(cap !== undefined ? { cap_usd: round2(cap) } : {}),
+        ...(ceiling !== undefined ? { ceiling_usd: round2(ceiling) } : {}),
+        ...(typeof s.costImmortal === 'boolean' ? { immortal: s.costImmortal } : {}),
+        ...(cost !== undefined ? { cost_usd: round2(cost) } : {}),
+        container_status: s.container_status ?? null,
+      };
+    })
+    .sort((a, b) => (b.spent_usd ?? 0) - (a.spent_usd ?? 0) || a.session_id.localeCompare(b.session_id));
+}
+
+/**
+ * The LIVE "currently-stopped" set behind `ncl cost-cap stopped` and the
+ * coworker MCP's `list_stopped_sessions` — the sessions that are hard-blocked on
+ * a cost decision RIGHT NOW.
+ *
+ * Consistency by construction: it reads the DASHBOARD's own `GET /api/sessions`
+ * (the same source, universe, and `costStatus` the dashboard's stopped count and
+ * filter use) and applies the same `costStatus === 'stopped'` predicate — so the
+ * dashboard, this verb, and the MCP report the identical set, with no host-side
+ * per-session SQLite scan (the dashboard already mirrors each session's live
+ * cost-cap state into an in-memory map, refreshed in the background). This is the
+ * live counterpart to the append-only `cost_escalation_episodes` HISTORY ledger
+ * (`ncl cost-cap escalations`): an old/unresolved episode is NOT the same as a
+ * session blocked this instant.
+ *
+ * `costStatus` is period-independent (the dashboard joins it onto every session
+ * ungated on spend), so the period passed to `/api/sessions` only affects the
+ * contextual `cost_usd` column — we request `'all'` so that column is a lifetime
+ * total. Fails LOUDLY (via `fetchSessionCosts`) when the dashboard is
+ * unreachable, never a false-empty. `opts.group` filters to one coworker
+ * workspace folder, validated against the payload so a typo cannot masquerade as
+ * "nothing is stopped".
+ */
+export async function listStoppedSessions(opts: { group?: string } = {}): Promise<StoppedSessionsResult> {
+  const { sessions, costUnavailable } = await fetchSessionCosts('all');
+  const group = opts.group;
+  if (group && !sessions.some((s) => s.group_folder === group)) {
+    // A folder that matches NO session in the whole fleet is far more likely a
+    // typo than a real group that happens to have zero sessions — and for a
+    // safety query ("is anything blocked?") a confident empty result is the
+    // dangerous failure. Fail loudly instead. (A genuinely session-less group
+    // has nothing that could be stopped anyway.)
+    throw new Error(`no sessions found for group folder '${group}' — check the folder name with \`ncl groups list\``);
+  }
+  const stopped = filterStoppedSessions(sessions, { group });
+  return { count: stopped.length, group: group ?? null, costUnavailable, stopped };
 }

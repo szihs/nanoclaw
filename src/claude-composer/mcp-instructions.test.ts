@@ -16,8 +16,9 @@
  */
 import { describe, expect, it } from 'vitest';
 
-import { composeCoworkerSpine } from '../claude-composer.js';
-import { PROJECT_DOC_MAX_BYTES, assertWithinDocSizeCap } from './doc-size-cap.js';
+import { asNonEmpty, composeCoworkerSpine, composedDocHeader, renderCoworkerSections } from '../claude-composer.js';
+import { PROJECT_DOC_MAX_BYTES } from './doc-size-cap.js';
+import { renderProjectDoc } from './project-doc.js';
 
 const ROOT = process.cwd();
 
@@ -152,22 +153,44 @@ describe('both render paths', () => {
 });
 
 describe('interaction with the size cap', () => {
+  const oversized = { big: 'x'.repeat(PROJECT_DOC_MAX_BYTES) };
+
+  function capped(mcpInstructions: Record<string, string>) {
+    return renderProjectDoc(composedDocHeader(), {
+      fileName: 'CLAUDE.md',
+      maxBytes: PROJECT_DOC_MAX_BYTES,
+      extraSections: asNonEmpty(renderCoworkerSections(ROOT, 'default', null, { mcpInstructions })),
+    });
+  }
+
   // The reason this step lands AFTER the cap. Operator prose is unbounded; before
   // #1344 an oversized entry would push the document past 4 MiB and Claude Code
   // would silently skip the whole file, leaving the agent with no instructions.
-  it('is caught by the cap rather than silently blanking the document', () => {
-    const doc = compose({ big: 'x'.repeat(PROJECT_DOC_MAX_BYTES) });
+  //
+  // Asserted through `renderProjectDoc`, where the cap now lives. It used to be a
+  // standalone check on the composed string, which could only refuse because it ran
+  // after assembly. Inside the assembler the oversized server is EVICTED and the
+  // document publishes without it; refusal is reserved for the case where nothing
+  // droppable is left.
+  it('sheds an oversized server rather than silently blanking the document', () => {
+    expect(Buffer.byteLength(compose(oversized), 'utf-8')).toBeGreaterThan(PROJECT_DOC_MAX_BYTES);
 
-    expect(Buffer.byteLength(doc, 'utf-8')).toBeGreaterThan(PROJECT_DOC_MAX_BYTES);
-    expect(() => assertWithinDocSizeCap(doc, 'g')).toThrow(/over the/);
+    const out = capped(oversized);
+
+    expect(out.dropped).toEqual(['MCP Server: big']);
+    expect(out.diagnostics.bytes).toBeLessThanOrEqual(PROJECT_DOC_MAX_BYTES);
+    expect(out.content).not.toContain('xxxx');
   });
 
-  it('names the MCP section as the culprit', () => {
-    try {
-      assertWithinDocSizeCap(compose({ big: 'x'.repeat(PROJECT_DOC_MAX_BYTES) }), 'g');
-      expect.unreachable('should have thrown');
-    } catch (err) {
-      expect((err as { sections: { section: string }[] }).sections[0].section).toBe('MCP Servers');
-    }
+  // The wrapper goes only when its last member does, and it is reported as a
+  // STRUCTURAL omission rather than as something the ladder chose: an empty wrapper
+  // is not guidance an operator lost, and listing it as dropped would misreport
+  // what was discarded.
+  it('drops the MCP wrapper structurally once its last server is evicted', () => {
+    const out = capped(oversized);
+
+    expect(out.content).not.toContain('## MCP Servers');
+    expect(out.diagnostics.structurallyOmitted).toContain('MCP Servers');
+    expect(out.dropped).not.toContain('MCP Servers');
   });
 });

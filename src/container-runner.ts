@@ -15,18 +15,21 @@ import path from 'path';
 import { promisify } from 'util';
 
 import {
-  composeCoworkerSpine,
+  asNonEmpty,
+  composedDocHeader,
   getAppliedOverlayNames,
   materializeCritiqueDeliveryMarkers,
   materializeCritiqueRequiredStages,
   materializeOverlayMarkers,
   readCoworkerTypes,
   readSkillCatalog,
+  renderCoworkerSections,
   resolveCoworkerManifest,
   type CoworkerTypeEntry,
   type SkillMeta,
 } from './claude-composer.js';
-import { assertWithinDocSizeCap } from './claude-composer/doc-size-cap.js';
+import { PROJECT_DOC_MAX_BYTES, ProjectDocTooLargeError } from './claude-composer/doc-size-cap.js';
+import { renderProjectDoc, type CapDiagnostics } from './claude-composer/project-doc.js';
 import {
   CONTAINER_CPU_LIMIT,
   CONTAINER_IMAGE,
@@ -77,7 +80,12 @@ import { GROUP_FOLDER_LABEL, labelValueLegal, specInvalid } from './drivers/type
 import type { ContainerSpec, MountSpec, SessionFailure, SessionSpec } from './drivers/types.js';
 import { getGatewayProvider, type GatewayContribution } from './gateway-providers/index.js';
 import { initGroupFilesystem } from './group-init.js';
-import { PERSONA_PREPEND_FILE, isComposedDocument, readGroupPersona, writeComposedDocument } from './group-persona.js';
+import {
+  PERSONA_PREPEND_FILE,
+  isComposedDocument,
+  readStandingInstructionsFile,
+  writeComposedDocument,
+} from './group-persona.js';
 import { getAgentMailbox } from './mailbox/index.js';
 import { stopTypingRefresh } from './modules/typing/index.js';
 import { log } from './log.js';
@@ -363,29 +371,51 @@ const wakePromises = new Map<string, Promise<boolean>>();
  * group from `init-first-agent` got no persona at all. Silently.
  *
  * `.instructions.md` was the fork's parallel surface. Rather than read both
- * forever — two names for one concept is what caused this — migrate it once,
- * on the spawn that finds it, and read only the canonical file afterwards.
- * The rename is skipped when both exist: that means someone wrote the
- * canonical file too, and clobbering it would lose the newer intent.
+ * forever — two names for one concept is what caused this — migrate it once, on
+ * the spawn that finds it, and read only the canonical file afterwards.
+ *
+ * READ-ONLY, and that is load-bearing. Four call sites need standing
+ * instructions: the two spawn paths and the two staleness-hash paths. The sweep
+ * hashes every group's candidate document every 60 seconds, so a rename in here
+ * meant the "pure" render mutated the shared group directory on a timer — the one
+ * thing the seam's design and `composed-doc-render-seam.test.ts` both claim it
+ * does not do. The rename now lives in `migrateStandingInstructions`, called once
+ * from the publication path, which is the only caller allowed to write.
  */
 export function readStandingInstructions(groupDir: string, instructionsPath: string): string | null {
+  // PRESENCE decides precedence, not content. A canonical file that exists but
+  // yields nothing usable — empty, whitespace-only, a directory, a symlink — must
+  // not hand precedence back to a stale legacy file. The rename made that
+  // unreachable at base; reading both files makes it reachable again.
+  const canonical = readStandingInstructionsFile(path.join(groupDir, PERSONA_PREPEND_FILE));
+  if (canonical.present) return canonical.content;
+
+  // Same no-follow reader for the legacy name. Both files sit in the read-WRITE
+  // group mount and both land verbatim in the composed system prompt, so both
+  // need the same guard: a plain `readFileSync` here lets a symlinked
+  // `.instructions.md` read an arbitrary host file into the next document.
+  // Measured, before this call went through the guard: a symlink to a file
+  // outside the group dir was returned as the persona.
+  return readStandingInstructionsFile(instructionsPath).content;
+}
+
+/**
+ * Perform the one-time `.instructions.md` → `instructions.prepend.md` rename.
+ *
+ * Skipped when the canonical file also exists: that means someone wrote it too,
+ * and clobbering it would lose the newer intent. A failure is not fatal —
+ * `readStandingInstructions` still finds the legacy file, so the group keeps its
+ * persona this spawn and the rename is retried on the next one.
+ */
+export function migrateStandingInstructions(groupDir: string, instructionsPath: string): void {
   const canonical = path.join(groupDir, PERSONA_PREPEND_FILE);
-  if (fs.existsSync(instructionsPath) && !fs.existsSync(canonical)) {
-    try {
-      fs.renameSync(instructionsPath, canonical);
-      log.info('Migrated .instructions.md to instructions.prepend.md', { dir: groupDir });
-    } catch (err) {
-      // Leave the legacy file alone and fall back to reading it directly — a
-      // failed rename must not cost the group its persona this spawn.
-      log.warn('Could not migrate .instructions.md; reading it in place', { dir: groupDir, err });
-      try {
-        return fs.readFileSync(instructionsPath, 'utf-8');
-      } catch {
-        return null;
-      }
-    }
+  if (!fs.existsSync(instructionsPath) || fs.existsSync(canonical)) return;
+  try {
+    fs.renameSync(instructionsPath, canonical);
+    log.info('Migrated .instructions.md to instructions.prepend.md', { dir: groupDir });
+  } catch (err) {
+    log.warn('Could not migrate .instructions.md; reading it in place', { dir: groupDir, err });
   }
-  return readGroupPersona(groupDir);
 }
 
 /**
@@ -473,38 +503,85 @@ function readMcpInstructions(rawMcpServers: string | undefined, groupName: strin
  * Both staleness paths and the spawn hash agree by construction rather than by
  * four separate call sites happening to stay in sync.
  */
-export async function renderComposedDocument(
-  agentGroup: AgentGroup,
-): Promise<{ content: string; hash: string; opts: Awaited<ReturnType<typeof composeOptionsFor>> }> {
+export async function renderComposedDocument(agentGroup: AgentGroup): Promise<{
+  content: string;
+  hash: string;
+  dropped: readonly string[];
+  diagnostics: CapDiagnostics;
+  opts: Awaited<ReturnType<typeof composeOptionsFor>>;
+}> {
   const opts = await composeOptionsFor(agentGroup);
-  const content = composeCoworkerSpine(opts);
+  // Cap applied by the assembler now, which is what makes eviction possible: the
+  // ladder drops the largest droppable section (per-server MCP guidance) before
+  // concluding the document cannot fit, instead of refusing outright. Only when
+  // nothing droppable is left does it throw, and the caller's `catch` still routes
+  // to `assertComposedDocUsable`.
+  //
   // Here rather than at the write sites: this seam is the one place both spawn
   // paths and both staleness paths pass through, so an oversized document can
-  // never reach `writeComposedDocument`, and the sweep sees the same refusal
-  // instead of hashing a document that spawn would reject.
-  assertWithinDocSizeCap(content, agentGroup.folder);
-  return { content, hash: crypto.createHash('sha256').update(content).digest('hex'), opts };
+  // never reach `writeComposedDocument`, and the sweep sees the same decision
+  // instead of hashing a document spawn would reject.
+  const rendered = renderProjectDoc(composedDocHeader(), {
+    fileName: 'CLAUDE.md',
+    maxBytes: PROJECT_DOC_MAX_BYTES,
+    extraSections: asNonEmpty(
+      renderCoworkerSections(process.cwd(), opts.coworkerType, opts.extraInstructions, {
+        disableOverlays: opts.disableOverlays,
+        overlays: opts.overlays,
+        cliScope: opts.cliScope,
+        mcpInstructions: opts.mcpInstructions,
+      }),
+    ),
+  });
+
+  return {
+    content: rendered.content,
+    // Of the bytes just assembled, not of a second composition: the file and the
+    // hash come from one render, so an input edited between two calls can no
+    // longer make `spawnedClaudeMdHash` describe a document never published.
+    hash: rendered.hash,
+    dropped: rendered.dropped,
+    diagnostics: rendered.diagnostics,
+    opts,
+  };
 }
 
-export function assertComposedDocUsable(claudeMdPath: string, agentGroup: AgentGroup, err: unknown): void {
-  let existing = 0;
+/**
+ * Returns the RETAINED document so the caller can report it, rather than only
+ * asserting it exists.
+ *
+ * The bytes and the digest come from one read of the same unmodified string:
+ * `trim()` decides usability only, and hashing a trimmed copy would produce a
+ * digest of a document that was never on disk — which `detectStaleContainers`
+ * would then compare against a real one, forever.
+ */
+export function assertComposedDocUsable(
+  claudeMdPath: string,
+  agentGroup: AgentGroup,
+  err: unknown,
+): { content: string; hash: string } {
+  let content: string | undefined;
   try {
     // Read, don't stat. `size > 0` accepted a file of pure whitespace as
     // "usable", so a group could spawn on a document carrying no instructions at
     // all while the log claimed a healthy fallback. Cheap: these documents are
     // tens of KB, bounded by the size cap.
-    existing = fs.readFileSync(claudeMdPath, 'utf-8').trim().length;
+    content = fs.readFileSync(claudeMdPath, 'utf-8');
   } catch {
     /* absent or unreadable — handled below */
   }
 
-  if (existing > 0) {
-    log.error('CLAUDE.md composition failed; spawning on the previous document', {
+  if (content !== undefined && content.trim().length > 0) {
+    // "render/publication", not "composition": this is reached both when the
+    // render throws and when the atomic write fails, and "retained" rather than
+    // "previous" because the distinction that matters is that these bytes were
+    // NOT produced by this attempt.
+    log.error('CLAUDE.md render/publication failed; spawning on the retained document', {
       folder: agentGroup.folder,
-      bytes: existing,
+      bytes: content.length,
       err,
     });
-    return;
+    return { content, hash: crypto.createHash('sha256').update(content).digest('hex') };
   }
 
   log.error('CLAUDE.md composition failed and no usable document exists — refusing to spawn', {
@@ -517,7 +594,65 @@ export function assertComposedDocUsable(claudeMdPath: string, agentGroup: AgentG
   );
 }
 
-async function composeCoworkerClaudeMd(agentGroup: AgentGroup): Promise<void> {
+/**
+ * What one publication attempt did. Consumed by spawn, the only caller that
+ * publishes and the only one that can act on a marker failure — because it has
+ * not started the container yet.
+ */
+export type PublishedProjectDoc =
+  | {
+      published: true;
+      content: string;
+      hash: string;
+      dropped: readonly string[];
+      diagnostics: CapDiagnostics;
+      /** Document written atomically, but marker materialization threw. */
+      markersStale: boolean;
+    }
+  /** `content`/`hash` describe the RETAINED document, still on disk. */
+  | { published: false; content: string; hash: string; attemptedDropped: readonly string[] };
+
+/**
+ * Report size-cap pressure after a successful publication.
+ *
+ * At base this warning came from `assertWithinDocSizeCap`, which spawn called
+ * inside `renderComposedDocument`. Moving the cap into the assembler removed that
+ * helper's last production caller, so until this existed a group could sit one
+ * byte under the cap, or silently lose whole sections to eviction, with nothing in
+ * the log — the diagnostics were computed and thrown away.
+ *
+ * It cannot live in the render: the 60s sweep renders every group to compare
+ * hashes, so a near-cap document would repeat the same warning forever.
+ * Publication happens once per spawn, which is the rate this should fire at.
+ *
+ * A separate exported function rather than an inline block so the three
+ * conditions can be asserted behaviourally against a mocked logger. Asserting
+ * them by matching the runner's source text passes for logging that is dead or
+ * fires on the wrong condition.
+ */
+export function reportProjectDocPressure(
+  folder: string,
+  coworkerType: string,
+  rendered: { dropped: readonly string[]; diagnostics: CapDiagnostics },
+): void {
+  const { diagnostics } = rendered;
+  if (diagnostics.nearCap || rendered.dropped.length > 0 || diagnostics.structurallyOmitted.length > 0) {
+    log.warn('Composed document is under size-cap pressure', {
+      folder,
+      coworkerType,
+      bytes: diagnostics.bytes,
+      maxBytes: diagnostics.maxBytes,
+      dropped: rendered.dropped.length > 0 ? rendered.dropped : undefined,
+      structurallyOmitted: diagnostics.structurallyOmitted.length > 0 ? diagnostics.structurallyOmitted : undefined,
+      largestSections: diagnostics.sections.slice(0, 5),
+    });
+    return;
+  }
+
+  log.debug('CLAUDE.md composed from lego spine', { folder, coworkerType });
+}
+
+async function composeCoworkerClaudeMd(agentGroup: AgentGroup): Promise<PublishedProjectDoc> {
   const groupDir = path.resolve(GROUPS_DIR, agentGroup.folder);
   const claudeMdPath = path.join(groupDir, 'CLAUDE.md');
   const instructionsPath = path.join(groupDir, '.instructions.md');
@@ -576,53 +711,85 @@ async function composeCoworkerClaudeMd(agentGroup: AgentGroup): Promise<void> {
     }
   }
 
-  if (!agentGroup.coworker_type) {
-    // Untyped coworker: compose via the 'default' typed leaf + .instructions.md.
-    // 'default' extends base-common with no project skills, so it's the bare
-    // spine — minimum operational guidance for a coworker that needs no
-    // project-specific knowledge. This goes through the same composer
-    // pipeline as typed coworkers.
-    try {
-      const { content: composed, opts: composeOpts } = await renderComposedDocument(agentGroup);
-      fs.mkdirSync(groupDir, { recursive: true });
-      writeComposedDocument(claudeMdPath, composed);
-      // Materialize MARKER files for overlays carrying one (e.g. buddy-monitor).
-      // Containers see /workspace/agent/.overlay-<name> via the standard mount;
-      // hooks like spawn-buddy.sh test for these files to gate themselves.
-      const appliedOverlays = getAppliedOverlayNames(process.cwd(), 'default', composeOpts);
-      materializeOverlayMarkers(appliedOverlays, process.cwd(), groupDir);
-      materializeCritiqueRequiredStages('default', readCoworkerTypes(process.cwd()), appliedOverlays, groupDir);
-      materializeCritiqueDeliveryMarkers('default', readCoworkerTypes(process.cwd()), appliedOverlays, groupDir);
-      log.debug('CLAUDE.md composed for untyped coworker via default type', { folder: agentGroup.folder });
-    } catch (err) {
-      assertComposedDocUsable(claudeMdPath, agentGroup, err);
-    }
-    return;
-  }
+  // Converge the two standing-instruction filenames, here and nowhere else. The
+  // read path is shared with the 60s staleness sweep, so a rename inside it turned
+  // every hash comparison into a write against the shared group directory.
+  // Publication runs once per spawn and already owns the writes.
+  migrateStandingInstructions(groupDir, instructionsPath);
 
+  // ONE publication path for typed and untyped groups. They were two
+  // near-identical arms differing only in the coworker type they named, and
+  // `composeOptionsFor` already resolves an untyped group to the 'default' leaf —
+  // so the duplication bought nothing and was exactly the shape that lets two
+  // behaviours drift apart.
+  //
+  // Phase 1 — render and publish the document. Only these three operations belong
+  // in this catch, because only they leave the previous document intact on failure.
+  let rendered: Awaited<ReturnType<typeof renderComposedDocument>>;
+  let attemptedDropped: readonly string[] = [];
   try {
-    const { content: composed, opts: composeOpts } = await renderComposedDocument(agentGroup);
+    rendered = await renderComposedDocument(agentGroup);
+    // The ladder may have evicted sections before succeeding; report them even on
+    // the happy path's failure sibling below.
+    attemptedDropped = rendered.dropped;
 
     fs.mkdirSync(groupDir, { recursive: true });
-    writeComposedDocument(claudeMdPath, composed);
-    const appliedOverlays = getAppliedOverlayNames(process.cwd(), agentGroup.coworker_type, composeOpts);
-    materializeOverlayMarkers(appliedOverlays, process.cwd(), groupDir);
-    materializeCritiqueRequiredStages(
-      agentGroup.coworker_type,
-      readCoworkerTypes(process.cwd()),
-      appliedOverlays,
-      groupDir,
-    );
-    materializeCritiqueDeliveryMarkers(
-      agentGroup.coworker_type,
-      readCoworkerTypes(process.cwd()),
-      appliedOverlays,
-      groupDir,
-    );
-    log.debug('CLAUDE.md composed from lego spine', { folder: agentGroup.folder });
+    writeComposedDocument(claudeMdPath, rendered.content);
   } catch (err) {
-    assertComposedDocUsable(claudeMdPath, agentGroup, err);
+    // Drop-some-then-still-fail: the eviction list exists only inside the render,
+    // which threw, so the error is the only path it can travel.
+    if (err instanceof ProjectDocTooLargeError) attemptedDropped = err.dropped;
+
+    const previous = assertComposedDocUsable(claudeMdPath, agentGroup, err);
+    return { published: false, content: previous.content, hash: previous.hash, attemptedDropped };
   }
+
+  // Phase 2 — markers, in their OWN catch. Sharing the phase-1 catch was the
+  // misattribution bug: a marker throw sent `assertComposedDocUsable` to read the
+  // document THIS call just wrote, which is non-empty, so it logged "spawning on
+  // the previous document" (wrong file, wrong cause) and let the spawn proceed with
+  // markers describing the old document.
+  const coworkerType = rendered.opts.coworkerType;
+  try {
+    // Materialize MARKER files for overlays carrying one (e.g. buddy-monitor).
+    // Containers see /workspace/agent/.overlay-<name> via the standard mount;
+    // hooks like spawn-buddy.sh test for these files to gate themselves.
+    const appliedOverlays = getAppliedOverlayNames(process.cwd(), coworkerType, rendered.opts);
+    const types = readCoworkerTypes(process.cwd());
+    materializeOverlayMarkers(appliedOverlays, process.cwd(), groupDir);
+    materializeCritiqueRequiredStages(coworkerType, types, appliedOverlays, groupDir);
+    materializeCritiqueDeliveryMarkers(coworkerType, types, appliedOverlays, groupDir);
+  } catch (err) {
+    // Deliberately NOT `assertComposedDocUsable`: the document has already been
+    // replaced, so there is nothing to fall back to and that helper would inspect
+    // the new document and call it the previous one.
+    log.error('CLAUDE.md published but marker materialization failed — refusing to spawn', {
+      folder: agentGroup.folder,
+      coworkerType,
+      hash: rendered.hash.slice(0, 12),
+      err,
+    });
+    return {
+      published: true,
+      content: rendered.content,
+      hash: rendered.hash,
+      dropped: rendered.dropped,
+      diagnostics: rendered.diagnostics,
+      markersStale: true,
+    };
+  }
+
+  // After the markers, so the log describes a fully published document.
+  reportProjectDocPressure(agentGroup.folder, coworkerType, rendered);
+
+  return {
+    published: true,
+    content: rendered.content,
+    hash: rendered.hash,
+    dropped: rendered.dropped,
+    diagnostics: rendered.diagnostics,
+    markersStale: false,
+  };
 }
 
 /** Resolve the coworker manifest once; returns tools, mcpServers, overlay names, and workflow summaries. */
@@ -875,19 +1042,37 @@ async function spawnContainer(session: Session): Promise<void> {
   // host restart triggers backfillContainerConfigs from container.json.
   initGroupFilesystem(agentGroup);
 
-  // Compose CLAUDE.md for typed coworkers (lego spine model).
-  await composeCoworkerClaudeMd(agentGroup);
+  // Compose CLAUDE.md for typed coworkers (lego spine model). The result is
+  // CONSUMED, not discarded: it is the only place a marker failure is knowable, and
+  // the only place it can still be acted on.
+  const projectDoc = await composeCoworkerClaudeMd(agentGroup);
 
-  // Store a hash of the just-composed CLAUDE.md so the host sweep can detect
-  // staleness if skills/overlays/workflows change while the container is running.
-  try {
-    const claudeContent = fs.readFileSync(path.join(GROUPS_DIR, agentGroup.folder, 'CLAUDE.md'));
-    const hash = crypto.createHash('sha256').update(claudeContent).digest('hex');
-    spawnedClaudeMdHash.set(session.id, hash);
-    log.debug('CLAUDE.md hash stored at spawn', { sessionId: session.id, hash: hash.slice(0, 12) });
-  } catch {
-    /* composition failed — no hash to track */
+  // Markers describe the enforcement the document claims — `.overlay-critique-gate`
+  // gating deliveries, `.critique-required-stages` naming which stages must have
+  // run. Starting anyway means an agent whose document says a gate applies while
+  // the marker that arms it is missing: it ships without the gate and reports
+  // success. So refuse, before any hash is recorded and before the container exists.
+  //
+  // Self-healing without new machinery: `wakeContainer` catches, logs, returns
+  // false, and pending messages stay in `messages_in` for the sweep's due-message
+  // wake. A persistent filesystem fault becomes a loud retry loop rather than a
+  // silent wrong-enforcement start — the trade the design records.
+  if (projectDoc.published && projectDoc.markersStale) {
+    throw new Error(
+      `Marker materialization failed for '${agentGroup.folder}' after CLAUDE.md publication; refusing to spawn`,
+    );
   }
+
+  // From the seam, not from a second read of the file. `published: true` gives the
+  // digest of the exact bytes handed to `writeComposedDocument`; `published: false`
+  // gives the digest of the exact retained document. Re-reading could only
+  // disagree — and did, whenever the on-disk file predated this spawn.
+  spawnedClaudeMdHash.set(session.id, projectDoc.hash);
+  log.debug('CLAUDE.md hash stored at spawn', {
+    sessionId: session.id,
+    hash: projectDoc.hash.slice(0, 12),
+    published: projectDoc.published,
+  });
 
   // Refresh the destination map and current-thread routing so any admin
   // changes take effect on wake. Destinations come from the agent-to-agent
@@ -1431,26 +1616,67 @@ export function resolveProviderName(
 }
 
 /**
- * Recompose CLAUDE.md for a running container and update the stored hash.
- * Call after sending /clear so the next SDK turn picks up the fresh file
- * and the sweep doesn't re-detect as stale.
+ * What the sweep learned. It publishes nothing, so it cannot report a publication
+ * result — only whether it got a hash worth restarting for.
  */
-export async function recomposeAndUpdateHash(sessionId: string): Promise<void> {
+export type RecomposeOutcome =
+  /** Got a hash. The only outcome that may kill + notify. */
+  | { kind: 'restart-ready'; hash: string }
+  /** Render threw. Nothing was published, so nothing to roll back. */
+  | { kind: 'render-failed' }
+  /** The session or group vanished mid-sweep. Absence is not a failure. */
+  | { kind: 'skipped'; reason: 'session-gone' | 'group-gone' };
+
+/**
+ * Recompose CLAUDE.md's hash for a running container so the sweep can decide
+ * whether to restart it. Renders only — see the body for why publishing here is
+ * actively wrong.
+ */
+export async function recomposeAndUpdateHash(sessionId: string): Promise<RecomposeOutcome> {
   const session = await getSession(sessionId);
-  if (!session) return;
+  if (!session) return { kind: 'skipped', reason: 'session-gone' };
   const ag = await getAgentGroup(session.agent_group_id);
-  if (!ag) return;
-  await composeCoworkerClaudeMd(ag);
-  // Same seam `detectStaleContainers` hashes, so the two agree by construction.
+  if (!ag) return { kind: 'skipped', reason: 'group-gone' };
+
+  // Renders, does NOT publish. Rewriting the file cannot update a RUNNING
+  // container anyway — the composed document is a file bind mount, so the
+  // established mount keeps the old inode however the host replaces the path, and
+  // the caller must kill the container for a recompose to take effect.
   //
-  // Rewriting the file does NOT update a RUNNING container: the composed document
-  // is a file bind mount, so the established mount keeps the old inode however the
-  // host replaces the path. The caller must kill the container for a recompose to
-  // take effect — `host-sweep.ts` does exactly that on the next line.
+  // Publishing here was worse than merely useless. Markers live in the group dir,
+  // mounted READ-WRITE, and three hooks `-f` test them at hook time, so a
+  // sweep-time write mutates live enforcement for a container still running its
+  // OLD document. Worse, document and markers would be two separately-failing
+  // writes: sweep publishes D1 and retains M0, then a transient failure in the
+  // respawn's publication falls back onto D1 with M0 and records D1's hash — a
+  // mismatch `detectStaleContainers` can never see, because the hash matches.
+  //
+  // So spawn is the sole writer: it publishes the document, then the markers, and
+  // refuses that spawn if marker publication fails. NOT "together or not at all" —
+  // with the marker receipt deferred, a marker failure still leaves D1 on disk with
+  // M0 beside it. What the refusal buys is that no container starts on that pair,
+  // and the divergence is reachable today (`:636-658`), not introduced here.
+  //
+  // The sweep only needs a hash to compare against, and the respawn three lines
+  // later composes and publishes for itself.
   try {
-    spawnedClaudeMdHash.set(sessionId, (await renderComposedDocument(ag)).hash);
-  } catch {
-    /* best-effort */
+    const { hash } = await renderComposedDocument(ag);
+    // Recorded so a sweep tick landing inside the async shutdown window does not
+    // re-detect the OLD hash and fire a second kill plus a second refresh message:
+    // `killContainer` is fire-and-forget, so the session stays in
+    // `activeContainers` until `finishAndResolve` removes it.
+    spawnedClaudeMdHash.set(sessionId, hash);
+    return { kind: 'restart-ready', hash };
+  } catch (err) {
+    // A render can still throw — an unresolvable coworker type, or a document
+    // oversized on irreducible core. Nothing was published, so there is nothing to
+    // roll back; the next tick retries.
+    log.warn('Recompose failed — leaving the container on its current document', {
+      sessionId,
+      folder: ag.folder,
+      err,
+    });
+    return { kind: 'render-failed' };
   }
 }
 

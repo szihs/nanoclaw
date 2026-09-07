@@ -242,3 +242,17 @@ ops/**
 # exist. Shared infrastructure, not project-specific: every coworker reaches
 # external APIs through this proxy.
 container/skills/onecli-gateway/**
+
+# Upstream sync (0d9328d2, 2026-09-03): upstream moved the Slack agents
+# companion skills in-tree and made `main` canonical for them (bcc53e88), so
+# they now arrive on every sync. Same class as the absorbed upstream skills
+# above (claw, learn, migrate-memory, the Qodo pair) and as the
+# `.claude/skills/add-*/**` and `slack-formatting` entries already here:
+# channel-side, not project-overlay. Verified neither path existed on
+# origin/nv-main before this merge, so this RECORDS new upstream ownership
+# rather than widening the fork's.
+.claude/skills/slack-a2a-rooms/**
+.claude/skills/slack-agent-flow/**
+# Upstream's top-level security policy — same class as README_ko.md, AGENTS.md
+# and CONTRIBUTING.md above.
+SECURITY.md

@@ -29,16 +29,31 @@ import { deletePendingApproval, getPendingApprovalsByAction } from './sessions.j
 
 export type CostCeilingAdjustmentState = 'pending' | 'enqueued' | 'applied' | 'conflict' | 'rejected';
 
+/** Which runner operation a ledger row carries — set the ceiling to an exact value
+ *  (migration 942) or reconcile live enforcement spend to the transcript oracle
+ *  (migration 943, issue #1327). See `cost_reconcile` in `src/modules/cost-ceiling-adjustment`. */
+export type CostAdjustmentOperation = 'set_ceiling' | 'reconcile';
+
 const TERMINAL_STATES = new Set<CostCeilingAdjustmentState>(['applied', 'conflict', 'rejected']);
 
 export interface CostCeilingAdjustmentRow {
   adjustment_id: string;
   protocol_version: number;
+  /** `set_ceiling` (default; migration 942) or `reconcile` (migration 943). */
+  operation: CostAdjustmentOperation;
   session_id: string;
   agent_group_id: string;
   expected_epoch_key: string;
   expected_ceiling_cents: number;
   target_ceiling_cents: number;
+  /** The reconcile target (transcript-oracle spend, integer cents). NULL for `set_ceiling`. */
+  target_spent_cents: number | null;
+  /** The live spend the host read when stamping a reconcile — the third CAS leg
+   *  (epoch + ceiling + spend). NULL for `set_ceiling`. */
+  expected_spent_cents: number | null;
+  /** 1 iff this reconcile was `--force`d past an already-decided card on its epoch
+   *  (migration 944, the #1327 recovery deadlock). 0 otherwise. Audit only. */
+  forced: number;
   state: CostCeilingAdjustmentState;
   inbound_message_id: string;
   requested_at: string;
@@ -59,11 +74,23 @@ export interface CostCeilingAdjustmentRow {
 export interface CostCeilingAdjustmentInsert {
   adjustment_id: string;
   protocol_version: number;
+  /** Defaults to `'set_ceiling'` when omitted (the pre-943 shape). */
+  operation?: CostAdjustmentOperation;
   session_id: string;
   agent_group_id: string;
   expected_epoch_key: string;
   expected_ceiling_cents: number;
   target_ceiling_cents: number;
+  /** Required for `operation: 'reconcile'`; NULL/omitted for `set_ceiling`. */
+  target_spent_cents?: number | null;
+  /** The live spend at stamp time (reconcile CAS third leg); NULL/omitted for `set_ceiling`. */
+  expected_spent_cents?: number | null;
+  /** Reconcile only (issue #1327): relax the `card_already_decided` fence so the
+   *  reconcile may apply on an epoch that already has a resolved decision card.
+   *  Relaxes ONLY that check — every other guard (lower-only, the three-leg CAS,
+   *  idempotency, the runner's preserve-human-stop) is unaffected. When this
+   *  request actually bypasses a decided card, the persisted `forced` column is set. */
+  force?: boolean;
   inbound_message_id: string;
   requested_at: string;
   requested_by: string;
@@ -79,11 +106,14 @@ async function db(): Promise<DbDriver | null> {
 /** Whether two creation requests are the "same" request (byte-identical body) for idempotency. */
 function sameRequest(row: CostCeilingAdjustmentRow, input: CostCeilingAdjustmentInsert): boolean {
   return (
+    row.operation === (input.operation ?? 'set_ceiling') &&
     row.session_id === input.session_id &&
     row.agent_group_id === input.agent_group_id &&
     row.expected_epoch_key === input.expected_epoch_key &&
     row.expected_ceiling_cents === input.expected_ceiling_cents &&
     row.target_ceiling_cents === input.target_ceiling_cents &&
+    (row.target_spent_cents ?? null) === (input.target_spent_cents ?? null) &&
+    (row.expected_spent_cents ?? null) === (input.expected_spent_cents ?? null) &&
     row.inbound_message_id === input.inbound_message_id
   );
 }
@@ -113,6 +143,11 @@ export type CreateCostCeilingAdjustmentResult =
  *   3. A `continued`/`stopped` escalation episode already owns this EXACT
  *      (session, epoch) → refuse (a card decision beat this request — the
  *      episode's `cost_override` may already be durably enqueued for the runner).
+ *      EXCEPTION: a RECONCILE with `input.force` (issue #1327) applies past a
+ *      `continued` card (only) and records `forced = 1` — the deadlock escape for a
+ *      session `continue`d on inflated spend. A `stopped` card is NEVER forceable
+ *      (that would defeat a human stop). This relaxes ONLY this step; the
+ *      downward-only + three-leg CAS guards downstream are untouched.
  *   4. Any still-`pending` episode for this (session, epoch) is superseded (so a
  *      delayed card click can never apply once this request has claimed the epoch).
  *   5. Each superseded episode's dashboard `pending_approvals` row is deleted in
@@ -140,10 +175,27 @@ export async function createCostCeilingAdjustment(
       }
 
       const episodesForEpoch = await getEpisodesForSessionEpoch(input.session_id, input.expected_epoch_key);
-      const alreadyWon = episodesForEpoch.find(
-        (e) => e.decision_state === 'continued' || e.decision_state === 'stopped',
-      );
-      if (alreadyWon) return { outcome: 'episode-already-won', episode: alreadyWon };
+      // A `stopped` card is NEVER forceable: `--force` corrects a session a human
+      // meant to keep running (a `continue` on inflated spend), and its rationale is
+      // "strictly more permissive than the human's CONTINUE intent." Forcing past a
+      // `stopped` card would instead DEFEAT the human's stop — and racily so: the
+      // stop's `cost_override` may not have reached the runner yet, so a forced
+      // reconcile that rotates the epoch first would make that stop go stale. So a
+      // stopped card always wins.
+      const stoppedWinner = episodesForEpoch.find((e) => e.decision_state === 'stopped');
+      if (stoppedWinner) return { outcome: 'episode-already-won', episode: stoppedWinner };
+
+      // `--force` (RECONCILE only, issue #1327) relaxes ONLY this fence for a
+      // `continued` card: it lets a downward reconcile apply on an epoch whose
+      // card was continued on inflated spend. Everything downstream still holds —
+      // it does NOT bypass the lower-only rule or the runner's three-leg CAS. The
+      // operation scope is defense-in-depth: `force` on a set-ceiling row (which
+      // its own submit path never sets) can never bypass this. When a continued
+      // card IS overridden, `forced` is persisted for the audit trail.
+      const continuedWinner = episodesForEpoch.find((e) => e.decision_state === 'continued');
+      const forcedOverride =
+        (input.operation ?? 'set_ceiling') === 'reconcile' && input.force === true && !!continuedWinner;
+      if (continuedWinner && !forcedOverride) return { outcome: 'episode-already-won', episode: continuedWinner };
 
       const superseded = await supersedePendingEpisodesForEpoch(
         input.session_id,
@@ -155,13 +207,13 @@ export async function createCostCeilingAdjustment(
 
       await d.run(
         `INSERT INTO cost_ceiling_adjustments
-           (adjustment_id, protocol_version, session_id, agent_group_id, expected_epoch_key,
-            expected_ceiling_cents, target_ceiling_cents, state, inbound_message_id,
-            requested_at, requested_by, enqueue_attempts)
+           (adjustment_id, protocol_version, operation, session_id, agent_group_id, expected_epoch_key,
+            expected_ceiling_cents, target_ceiling_cents, target_spent_cents, expected_spent_cents, forced, state,
+            inbound_message_id, requested_at, requested_by, enqueue_attempts)
          VALUES
-           ($adjustment_id, $protocol_version, $session_id, $agent_group_id, $expected_epoch_key,
-            $expected_ceiling_cents, $target_ceiling_cents, 'pending', $inbound_message_id,
-            $requested_at, $requested_by, 0)`,
+           ($adjustment_id, $protocol_version, $operation, $session_id, $agent_group_id, $expected_epoch_key,
+            $expected_ceiling_cents, $target_ceiling_cents, $target_spent_cents, $expected_spent_cents, $forced,
+            'pending', $inbound_message_id, $requested_at, $requested_by, 0)`,
         {
           // better-sqlite3's named-parameter binding requires the OBJECT key to be
           // the BARE name (no $/@/: sigil) even though the SQL text uses $-prefixed
@@ -169,11 +221,15 @@ export async function createCostCeilingAdjustment(
           // sigil in the object key too. Bare keys here, always.
           adjustment_id: input.adjustment_id,
           protocol_version: input.protocol_version,
+          operation: input.operation ?? 'set_ceiling',
           session_id: input.session_id,
           agent_group_id: input.agent_group_id,
           expected_epoch_key: input.expected_epoch_key,
           expected_ceiling_cents: input.expected_ceiling_cents,
           target_ceiling_cents: input.target_ceiling_cents,
+          target_spent_cents: input.target_spent_cents ?? null,
+          expected_spent_cents: input.expected_spent_cents ?? null,
+          forced: forcedOverride ? 1 : 0,
           inbound_message_id: input.inbound_message_id,
           requested_at: input.requested_at,
           requested_by: input.requested_by,
@@ -289,6 +345,9 @@ export interface CostCeilingAdjustmentResultInput {
   expected_epoch_key: string;
   expected_ceiling_cents: number;
   target_ceiling_cents: number;
+  /** Echoed reconcile target (integer cents). Validated in place of
+   *  `target_ceiling_cents` when the central row's `operation` is `'reconcile'`. */
+  target_spent_cents?: number | null;
 }
 
 export type RecordCostCeilingAdjustmentResultOutcome =
@@ -320,11 +379,18 @@ export async function recordCostCeilingAdjustmentResult(
     const existing = await getCostCeilingAdjustment(input.adjustment_id);
     if (!existing) return { outcome: 'not-found' };
 
+    // The TARGET echo validated depends on the operation: a reconcile row's
+    // target is `target_spent_cents`, a set-ceiling row's is `target_ceiling_cents`.
+    // The central row's own `operation` is authoritative (never the receipt's claim).
+    const targetMatches =
+      existing.operation === 'reconcile'
+        ? (existing.target_spent_cents ?? null) === (input.target_spent_cents ?? null)
+        : existing.target_ceiling_cents === input.target_ceiling_cents;
     const echoMatches =
       existing.session_id === input.session_id &&
       existing.expected_epoch_key === input.expected_epoch_key &&
       existing.expected_ceiling_cents === input.expected_ceiling_cents &&
-      existing.target_ceiling_cents === input.target_ceiling_cents;
+      targetMatches;
     if (!echoMatches) return { outcome: 'mismatch', row: existing };
 
     if (TERMINAL_STATES.has(existing.state)) {

@@ -16,14 +16,17 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 
 import { composeCoworkerSpine, readCoworkerTypes } from '../src/claude-composer.js';
-import { writeComposedDocument } from '../src/group-persona.js';
+import { readStandingInstructionsFile, writeComposedDocument } from '../src/group-persona.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const projectRoot = path.resolve(__dirname, '..');
 
 function readInstructions(groupDir: string): string | null {
-  const p = path.join(groupDir, '.instructions.md');
-  return fs.existsSync(p) ? fs.readFileSync(p, 'utf-8') : null;
+  // Through the spawn path's no-follow reader, not a plain read: this file is
+  // agent-authored (the group dir is mounted read-write into the container) and
+  // its content is composed verbatim into the document that agent then runs
+  // under, so a symlink here would be an arbitrary host-file read.
+  return readStandingInstructionsFile(path.join(groupDir, '.instructions.md')).content;
 }
 
 function regenerateGroup(folder: string, coworkerType: string): void {

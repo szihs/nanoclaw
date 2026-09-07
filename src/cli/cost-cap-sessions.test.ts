@@ -9,6 +9,8 @@ import { describe, it, expect, vi, afterEach } from 'vitest';
 import {
   aggregateSessionCosts,
   fetchSessionCosts,
+  filterStoppedSessions,
+  listStoppedSessions,
   percentileNearestRank,
   rankSessionCosts,
   type SessionCostRow,
@@ -152,5 +154,123 @@ describe('fetchSessionCosts — transport + costUnavailable threading + error su
   it('throws on an unexpected shape (no sessions array)', async () => {
     stubFetch(() => ({ ok: true, json: async () => ({ nope: true }) }));
     await expect(fetchSessionCosts('30d')).rejects.toThrow(/unexpected shape/);
+  });
+});
+
+describe('filterStoppedSessions — the LIVE currently-stopped set (mirrors the dashboard predicate)', () => {
+  const s = (over: Partial<SessionCostRow> & { session_id: string; group_folder: string }): SessionCostRow => ({
+    agent_group_id: `ag-${over.group_folder}`,
+    group_name: over.group_folder,
+    cost: 0,
+    ...over,
+  });
+
+  it('keeps ONLY costStatus==="stopped" rows — never escalated/warn/ok/undefined', () => {
+    const out = filterStoppedSessions([
+      s({ session_id: 's-stop', group_folder: 'fixer', costStatus: 'stopped', costLifetime: 60 }),
+      s({ session_id: 's-esc', group_folder: 'fixer', costStatus: 'escalated', costLifetime: 90 }),
+      s({ session_id: 's-warn', group_folder: 'fixer', costStatus: 'warn' }),
+      s({ session_id: 's-ok', group_folder: 'fixer', costStatus: 'ok' }),
+      s({ session_id: 's-none', group_folder: 'fixer' }), // no costStatus (older runner) — excluded
+    ]);
+    expect(out.map((r) => r.session_id)).toEqual(['s-stop']);
+    expect(out[0].status).toBe('stopped');
+  });
+
+  it('ranks stopped rows by spend desc, then session id; shapes the cost fields', () => {
+    const out = filterStoppedSessions([
+      s({
+        session_id: 's1',
+        group_folder: 'reader',
+        costStatus: 'stopped',
+        costLifetime: 42.005,
+        costCap: 10,
+        costCeiling: 40,
+        costImmortal: false,
+        cost: 12.34,
+      }),
+      s({ session_id: 's2', group_folder: 'fixer', costStatus: 'stopped', costLifetime: 60, costCeiling: 50 }),
+    ]);
+    expect(out.map((r) => r.session_id)).toEqual(['s2', 's1']); // 60 before 42
+    expect(out[1]).toMatchObject({
+      session_id: 's1',
+      group_folder: 'reader',
+      status: 'stopped',
+      spent_usd: 42.01, // rounded to cents
+      cap_usd: 10,
+      ceiling_usd: 40,
+      immortal: false,
+      cost_usd: 12.34,
+    });
+  });
+
+  it('falls back to costSpent when costLifetime is absent', () => {
+    const out = filterStoppedSessions([
+      s({ session_id: 's1', group_folder: 'g', costStatus: 'stopped', costSpent: 15 }),
+    ]);
+    expect(out[0].spent_usd).toBe(15);
+  });
+
+  it('filters to one coworker folder', () => {
+    const out = filterStoppedSessions(
+      [
+        s({ session_id: 's1', group_folder: 'reader', costStatus: 'stopped', costLifetime: 10 }),
+        s({ session_id: 's2', group_folder: 'fixer', costStatus: 'stopped', costLifetime: 20 }),
+      ],
+      { group: 'fixer' },
+    );
+    expect(out.map((r) => r.session_id)).toEqual(['s2']);
+  });
+});
+
+describe('listStoppedSessions — reads the dashboard /api/sessions, fails loud, guards typos', () => {
+  afterEach(() => vi.unstubAllGlobals());
+  const stubSessions = (sessions: unknown[], costUnavailable?: string) =>
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => ({ ok: true, json: async () => ({ sessions, costUnavailable }) })),
+    );
+
+  it('returns the live-stopped set + count + threaded costUnavailable', async () => {
+    stubSessions(
+      [
+        {
+          session_id: 's1',
+          agent_group_id: 'ag-1',
+          group_folder: 'fixer',
+          group_name: 'Fixer',
+          costStatus: 'stopped',
+          costLifetime: 60,
+        },
+        { session_id: 's2', agent_group_id: 'ag-2', group_folder: 'reader', costStatus: 'ok' },
+      ],
+      'ccusage absent',
+    );
+    const res = await listStoppedSessions();
+    expect(res.count).toBe(1);
+    expect(res.group).toBeNull();
+    expect(res.costUnavailable).toBe('ccusage absent');
+    expect(res.stopped.map((r) => r.session_id)).toEqual(['s1']);
+  });
+
+  it('throws (never false-empty) when the dashboard is unreachable', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => {
+        throw new Error('ECONNREFUSED');
+      }),
+    );
+    await expect(listStoppedSessions()).rejects.toThrow(/could not reach the dashboard cost API/);
+  });
+
+  it('throws on a --group folder that matches no session (typo guard)', async () => {
+    stubSessions([{ session_id: 's1', agent_group_id: 'ag-1', group_folder: 'fixer', costStatus: 'stopped' }]);
+    await expect(listStoppedSessions({ group: 'fxier' })).rejects.toThrow(/no sessions found for group folder 'fxier'/);
+  });
+
+  it('accepts a valid --group that exists but has no stopped session (count 0, no throw)', async () => {
+    stubSessions([{ session_id: 's1', agent_group_id: 'ag-1', group_folder: 'fixer', costStatus: 'ok' }]);
+    const res = await listStoppedSessions({ group: 'fixer' });
+    expect(res).toMatchObject({ count: 0, group: 'fixer', stopped: [] });
   });
 });

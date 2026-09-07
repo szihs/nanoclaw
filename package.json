@@ -27,6 +27,7 @@
     "setup:auto": "tsx setup/auto.ts",
     "ncl": "tsx src/cli/client.ts",
     "migrate": "tsx scripts/migrate.ts",
+    "release-notes": "node scripts/release-notes.mjs",
     "chat": "tsx scripts/chat.ts",
     "auth": "tsx src/whatsapp-auth.ts",
     "validate:templates": "tsx scripts/validate-templates.ts",
