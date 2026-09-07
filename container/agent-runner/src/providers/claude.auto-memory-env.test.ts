@@ -26,7 +26,9 @@ mock.module('@anthropic-ai/claude-agent-sdk', () => ({
   },
 }));
 
-const { ClaudeProvider } = await import('./claude.js');
+await import('./index.js');
+await import('../provider-contracts/index.js');
+const { createProvider } = await import('./factory.js');
 const { MEMORY_SESSION_HOOK } = await import('../memory/session-hook.js');
 
 let tmp: string;
@@ -54,7 +56,7 @@ async function drain(provider: InstanceType<typeof ClaudeProvider>) {
 
 describe('ClaudeProvider env — native auto-memory stays disabled', () => {
   it('passes CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 to the SDK', async () => {
-    const provider = new ClaudeProvider({});
+    const provider = createProvider('claude', {});
     provider.registerMemorySessionHook(MEMORY_SESSION_HOOK);
     await drain(provider);
 
@@ -64,7 +66,7 @@ describe('ClaudeProvider env — native auto-memory stays disabled', () => {
   // A caller-supplied env must not be able to switch native memory back on:
   // the provider's own entries are spread last precisely so they win.
   it('is not overridable by caller-supplied env', async () => {
-    const provider = new ClaudeProvider({ env: { CLAUDE_CODE_DISABLE_AUTO_MEMORY: '0' } });
+    const provider = createProvider('claude', { env: { CLAUDE_CODE_DISABLE_AUTO_MEMORY: '0' } });
     provider.registerMemorySessionHook(MEMORY_SESSION_HOOK);
     await drain(provider);
 
@@ -73,7 +75,7 @@ describe('ClaudeProvider env — native auto-memory stays disabled', () => {
 
   // Guards against a "fix" that hardcodes the map and drops the sibling key.
   it('still passes the auto-compact window alongside it', async () => {
-    const provider = new ClaudeProvider({});
+    const provider = createProvider('claude', {});
     provider.registerMemorySessionHook(MEMORY_SESSION_HOOK);
     await drain(provider);
 

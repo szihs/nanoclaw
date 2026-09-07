@@ -32,6 +32,13 @@ export const RUNTIME_CONTRACT_SECTION = 'NanoClaw Runtime Contract';
 export const RUNTIME_CONTRACT_PATH = path.join('container', 'CLAUDE.md');
 
 /**
+ * Must equal `MEMORY_NOTE_PLACEHOLDER` in project-doc-compose.ts. Duplicated as a
+ * literal for the require()-ability reason documented at its use below; the
+ * composed-document byte parity test fails if upstream changes the token.
+ */
+const MEMORY_NOTE_PLACEHOLDER = '{{provider-memory-note}}';
+
+/**
  * The `##` headings carried into the composed document, in document order.
  *
  * Everything not listed is dropped as duplicated elsewhere. A heading listed
@@ -100,7 +107,23 @@ export function renderRuntimeContract(projectRoot: string): string | undefined {
     return undefined;
   }
 
-  const byHeading = new Map(splitH2Sections(raw).map((s) => [s.heading, s.body]));
+  // Upstream's template carries a `{{provider-memory-note}}` placeholder that its
+  // own renderer (`renderBaseInstructions` in project-doc-compose.ts) substitutes
+  // from a provider's declared native override files. Without substitution the raw
+  // token reaches every agent's prompt verbatim.
+  //
+  // Mirrored here rather than imported: `dist/claude-composer.js` must stay
+  // require()-able — `scripts/fetch-skills.sh` loads it with `require()` — and
+  // project-doc-compose reaches the DB layer, whose migration auto-discovery ends in
+  // a TOP-LEVEL AWAIT (`db/migrations/index.ts`). Importing it turns this bundle into
+  // an async ESM graph and `require()` of it throws ERR_REQUIRE_ASYNC_MODULE.
+  //
+  // `claude` declares no override files, so the note is empty and the placeholder
+  // (with its preceding blank line) is removed — leaving the document byte-identical
+  // to the pre-placeholder text, which the parity digests assert.
+  const template = raw.replace(`\n\n${MEMORY_NOTE_PLACEHOLDER}`, '');
+
+  const byHeading = new Map(splitH2Sections(template).map((s) => [s.heading, s.body]));
   const blocks: string[] = [];
   for (const heading of EMITTED_CONTRACT_SECTIONS) {
     const body = byHeading.get(heading);

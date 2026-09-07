@@ -30,7 +30,9 @@ mock.module('@anthropic-ai/claude-agent-sdk', () => ({
   },
 }));
 
-const { ClaudeProvider } = await import('./claude.js');
+await import('./index.js');
+await import('../provider-contracts/index.js');
+const { createProvider } = await import('./factory.js');
 const { MEMORY_SESSION_HOOK } = await import('../memory/session-hook.js');
 
 let tmp: string;
@@ -59,7 +61,7 @@ const USAGE = {
 };
 
 function provider() {
-  const p = new ClaudeProvider({});
+  const p = createProvider('claude', {});
   p.registerMemorySessionHook(MEMORY_SESSION_HOOK);
   return p;
 }

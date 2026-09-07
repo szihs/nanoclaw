@@ -91,7 +91,7 @@ describe('stripHarnessTagArtifacts', () => {
 
 // Wiring guards: the sanitizer must be applied at BOTH delivery seams inside
 // the real processQuery path — the <message> block extraction in
-// dispatchResultText (exercised here without emitsMidTurnText, where the
+// dispatchResultText (exercised here without mid-turn delivery, where the
 // result is the delivery door; the mid-turn seam has its own sanitization
 // test in poll-loop.midturn.test.ts), and the bare error-result delivery.
 // Removing either call site (not just the helper) goes red here.

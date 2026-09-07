@@ -17,7 +17,7 @@ import { getCostCapPolicy } from './db/cost-cap-policy.js';
 import { getAgentGroup } from './db/agent-groups.js';
 import { isValidTimezone } from './timezone.js';
 import { log } from './log.js';
-import type { AgentGroup, ContainerConfigRow } from './types.js';
+import type { AgentGroup, ContainerConfigRow, ContainerSpeed } from './types.js';
 
 /**
  * Container-side path where a group's stamped plugins are mounted read-only.
@@ -250,8 +250,13 @@ export interface ContainerConfig {
   maxMessagesPerPrompt?: number;
   model?: string;
   effort?: string;
-  /** API fast serving tier for this container; absent = the provider default. */
-  fastMode?: boolean;
+  /**
+   * Legacy mirror of `speed: 'fast'`, written exactly as the host did before
+   * `speed` existed so an agent image built then keeps fast mode working.
+   */
+  fastMode?: true;
+  /** Provider-declared speed tier (`standard` or `fast` for Claude); the group value overrides the install default. */
+  speed?: ContainerSpeed;
   timezone?: string;
   /** Session isolation tier for the group's containers; absent = the composer's default ('container'). */
   runtimeTier?: 'container' | 'vm';
@@ -518,13 +523,29 @@ export async function configFromDb(row: ContainerConfigRow, group: AgentGroup): 
     // that have none. Both absent leaves the field out and the SDK decides.
     model: row.model ?? (DEFAULT_MODEL || undefined),
     effort: row.effort ?? undefined,
-    fastMode: FAST_MODE || undefined,
+    // A cleared group value falls back to the install-wide default.
+    ...speedFields(parseContainerSpeed(row.speed) ?? (FAST_MODE ? 'fast' : undefined)),
     timezone: row.timezone && isValidTimezone(row.timezone) ? row.timezone : undefined,
     runtimeTier: parseRuntimeTier(row.runtime_tier, group.name),
     immortal,
     costCapT2Usd,
     costCeilingT2Usd,
   };
+}
+
+/** The stored tier was validated against the provider's declaration when written; empty means unset. */
+function parseContainerSpeed(value: string | null): ContainerSpeed | undefined {
+  return value ? value : undefined;
+}
+
+/**
+ * Unset writes neither key, so an install that sets nothing produces the same
+ * file it always did. `fast` also writes the legacy `fastMode: true`, in the
+ * position it always had, for agent images that still read only that key.
+ */
+function speedFields(speed: ContainerSpeed | undefined): Pick<ContainerConfig, 'fastMode' | 'speed'> {
+  if (speed === undefined) return {};
+  return speed === 'fast' ? { fastMode: true, speed } : { speed };
 }
 
 /**

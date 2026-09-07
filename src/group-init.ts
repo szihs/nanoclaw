@@ -7,70 +7,15 @@ import { getDb } from './db/connection.js';
 import { ensureContainerConfig } from './db/container-configs.js';
 import { PERSONA_PREPEND_FILE, stageGroupPersona } from './group-persona.js';
 import { log } from './log.js';
+import {
+  CLAUDE_DEFAULT_SETTINGS,
+  CLEANUP_PERIOD_DAYS_NEVER,
+  migrateClaudeMemorySettings,
+} from './migrate-claude-memory-settings.js';
+import { getProviderHostContract } from './provider-contracts/registry.js';
+import { initializeProviderGroupSurfaces } from './provider-contracts/realize.js';
 import { providerProvidesAgentSurfaces } from './providers/provider-container-registry.js';
 import type { AgentGroup } from './types.js';
-
-// Effectively "never" — Claude Code's own cleanupPeriodDays setting prunes
-// ~/.claude/projects/*.jsonl at CLI startup (default 30 when unset). Every
-// active group was silently losing its own transcript history to this on a
-// rolling 30-day window — the file NanoClaw's own cost accounting (dashboard
-// + fleet ccusage reporting) reads as its source of truth. Proven on prod:
-// oldest-surviving-transcript date tracked (today − 30d) exactly, across
-// every busy group; idle groups (whose `claude` never restarts to run the
-// sweep) kept full history back to April. See issue #1327.
-const CLEANUP_PERIOD_DAYS_NEVER = 3650;
-
-const DEFAULT_SETTINGS_JSON =
-  JSON.stringify(
-    {
-      cleanupPeriodDays: CLEANUP_PERIOD_DAYS_NEVER,
-      sandbox: {
-        enabled: false,
-      },
-      preferences: {
-        reasoningEffort: 'max',
-      },
-      // OKF (`memory/`, injected by the agent-runner's SessionStart hook) is the
-      // only memory system. Claude Code's native auto-memory is off via BOTH
-      // switches: `autoMemoryEnabled` is settings-level, the env var runtime, and
-      // leaving either unset means "whatever the CLI defaults to" — not a promise
-      // that survives a CLI upgrade. Two systems writing memory into one context
-      // window is the collision this avoids; OKF also survives a provider switch
-      // and is budget-capped per file, neither of which the native store offers.
-      //
-      // NEW groups only. Existing groups keep their settings.json — they are
-      // flipped by `migrateClaudeMemorySettings`, which MUST run only after
-      // `/migrate-memory` has carried their native memories into OKF.
-      autoMemoryEnabled: false,
-      env: {
-        CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD: '1',
-        CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1',
-      },
-      // Strip Claude Code's native Workflow tool — the single largest tool
-      // schema on every turn (~26KB) — because NanoClaw orchestrates its own
-      // sessions (a2a messaging + host-side orchestration), so it is dead
-      // weight. Matches merged upstream #3031 ("lean harness defaults"), whose
-      // group-init.ts delta our fork's diverged copy dropped on the Aug-5 sync.
-      // NEW groups only; existing groups keep their settings.json (never
-      // regenerated) — re-enable per group by editing that group's
-      // .claude-shared/settings.json and restarting.
-      disableWorkflows: true,
-      hooks: {
-        PreCompact: [
-          {
-            hooks: [
-              {
-                type: 'command',
-                command: 'bun /app/src/compact-instructions.ts',
-              },
-            ],
-          },
-        ],
-      },
-    },
-    null,
-    2,
-  ) + '\n';
 
 /**
  * Deepest mtime under `p` (file or directory, recursive). Returns 0 on
@@ -142,6 +87,14 @@ export async function initGroupFilesystem(
 
   // Default agent surfaces apply unless the provider declares (at registration)
   // that it provides its own.
+  //
+  // NOT gated on `contract`, unlike upstream. Claude declares a host contract,
+  // and this fork's group surfaces are the lego mirrors below — scoped skills/,
+  // agents/, overlays/ selected by coworker_type — which the contract's
+  // group-init operations do not reproduce. Gating on the contract here would
+  // silently stop mirroring skills for every claude coworker while every test
+  // that checks the contract path stayed green.
+  const contract = getProviderHostContract(providerHint);
   const defaultSurfaces = !providerProvidesAgentSurfaces(providerHint);
 
   // 1. groups/<folder>/ — group memory + working dir
@@ -217,7 +170,11 @@ export async function initGroupFilesystem(
   initialized.push('container_configs');
 
   // 2. data/v2-sessions/<id>/.claude-shared/ — Claude state + per-group skills
-  if (defaultSurfaces) {
+  // A contract realizes the surfaces only for a provider that owns them; when
+  // this fork owns them (defaultSurfaces) the legacy branch below is the one.
+  if (contract && !defaultSurfaces) {
+    initialized.push(...initializeProviderGroupSurfaces(providerHint, contract, group.id, groupDir));
+  } else if (defaultSurfaces) {
     const claudeDir = path.join(DATA_DIR, 'v2-sessions', group.id, '.claude-shared');
     if (!fs.existsSync(claudeDir)) {
       fs.mkdirSync(claudeDir, { recursive: true });
@@ -226,7 +183,7 @@ export async function initGroupFilesystem(
 
     const settingsFile = path.join(claudeDir, 'settings.json');
     if (!fs.existsSync(settingsFile)) {
-      fs.writeFileSync(settingsFile, DEFAULT_SETTINGS_JSON);
+      fs.writeFileSync(settingsFile, CLAUDE_DEFAULT_SETTINGS);
       initialized.push('settings.json');
     } else {
       ensurePreCompactHook(settingsFile, initialized);
