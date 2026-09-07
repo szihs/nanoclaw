@@ -46,6 +46,7 @@
  *     against the central record before accepting it as authoritative, and is
  *     idempotent under replay.
  */
+import { randomUUID } from 'crypto';
 import fs from 'fs';
 
 import { getAgentGroup } from '../../db/agent-groups.js';
@@ -73,6 +74,13 @@ import type { Session } from '../../types.js';
  *  runner's own identical check (poll-loop.ts's MAX_CEILING_CENTS); neither
  *  layer trusts the other alone. */
 const MAX_CEILING_CENTS = 100_000;
+
+/** Server-enforced sanity ceiling for a reconcile target — $1,000,000.00 in
+ *  integer cents. This is NOT a policy limit (the reconcile target is the
+ *  transcript oracle, which we do not second-guess) but a bound against a bug or
+ *  a fat-fingered `--to`; no single session's real cost approaches it. Enforced
+ *  identically on the runner (poll-loop.ts's `MAX_SPENT_CENTS`). */
+const MAX_SPENT_CENTS = 100_000_000;
 
 /** Safe charset for an id that becomes both a DB primary key and part of a
  *  deterministic message id — not a security boundary (queries are
@@ -357,8 +365,26 @@ export async function submitCostCeilingAdjustment(
 
 /** The exact control-message content a ledger row implies — a pure function of
  *  the row's own columns, so it can be reproduced identically by the
- *  reconciler without needing to separately persist the content anywhere. */
+ *  reconciler without needing to separately persist the content anywhere.
+ *  Both operations ride the same `kind:'cost_override'` inbound row (an old
+ *  runner ignores an operation it does not recognize); the runner dispatches on
+ *  `operation` (`applySetCeilingOverride` / `applyReconcileOverride`). */
 function controlMessageContent(row: CostCeilingAdjustmentRow): string {
+  if (row.operation === 'reconcile') {
+    return JSON.stringify({
+      protocolVersion: 2,
+      operation: 'reconcile',
+      adjustmentId: row.adjustment_id,
+      expectedEpochKey: row.expected_epoch_key,
+      expectedCeilingCents: row.expected_ceiling_cents,
+      expectedSpentCents: row.expected_spent_cents ?? 0,
+      targetSpentCents: row.target_spent_cents ?? 0,
+      // Audit passthrough only — the runner echoes it in the receipt. It does NOT
+      // change any runner logic (no card concept there); the fence it relaxed is
+      // purely host-side.
+      forced: row.forced === 1,
+    });
+  }
   return JSON.stringify({
     protocolVersion: 2,
     operation: 'set_ceiling',
@@ -477,8 +503,20 @@ type ReadinessResult = { ready: true } | { ready: false; reason: 'unsupported_pr
  * `getActiveContainerInstanceId` returns undefined for those; see
  * `container-runner.ts`'s `ActiveSessionRuntime.instanceId` doc comment) —
  * that session cannot accept a live adjustment until it next respawns.
+ *
+ * `requireReconcile` gates the SECOND operation (issue #1327). Reconcile ships on
+ * the SAME protocol version 2 as set-ceiling, so the version number alone cannot
+ * tell a reconcile-capable runner from a set-ceiling-only one (a container that
+ * started before this feature deployed still advertises version 2). The runner
+ * therefore also publishes an `operations` capability list; when
+ * `requireReconcile` is set, readiness additionally requires that list to include
+ * `'reconcile'`. This fails LOUDLY (`unsupported_protocol` → 426) instead of
+ * enqueueing a control message an old runner would consume-and-drop without a
+ * receipt — which would strand the ledger row (the message is marked completed,
+ * so it never reprocesses even after the runner updates). The operator restarts
+ * the group (respawn onto the reconcile-capable runner) and retries.
  */
-async function ensureRunnerReady(session: Session): Promise<ReadinessResult> {
+async function ensureRunnerReady(session: Session, requireReconcile = false): Promise<ReadinessResult> {
   if (!isContainerRunning(session.id)) {
     await wakeContainer(session).catch(() => false);
   }
@@ -488,7 +526,11 @@ async function ensureRunnerReady(session: Session): Promise<ReadinessResult> {
     const activeInstanceId = getActiveContainerInstanceId(session.id);
     const handshake = activeInstanceId ? await readSessionCostControlProtocol(session.id) : undefined;
     if (activeInstanceId && handshake && handshake.runner_instance_id === activeInstanceId) {
-      return handshake.version === 2 ? { ready: true } : { ready: false, reason: 'unsupported_protocol' };
+      if (handshake.version !== 2) return { ready: false, reason: 'unsupported_protocol' };
+      if (requireReconcile && !(handshake.operations ?? []).includes('reconcile')) {
+        return { ready: false, reason: 'unsupported_protocol' };
+      }
+      return { ready: true };
     }
     if (Date.now() >= deadline) return { ready: false, reason: 'unavailable' };
     await sleep(handshakePollIntervalMs);
@@ -587,6 +629,361 @@ export async function ingestCostCeilingAdjustmentReceipt(
   log.info('cost-ceiling-adjustment: outcome recorded', { adjustmentId, outcome, sessionId: session.id });
 }
 
+// ── cost_reconcile: set live enforcement spend to the transcript oracle ──────
+//
+// A SECOND operation on the SAME ledger + CAS as set-ceiling (issue #1327). The
+// #1327 pre-fix accounting over-charged spend (per content block, ~1.7x–17x), so
+// sessions sit falsely-stopped with `costSpentUsd` ≫ ceiling; the fix stopped the
+// over-count going forward but RETAINED the inflated spend. This corrects one
+// session's live enforcement spend to its real, transcript-priced cost — the
+// oracle the caller supplies (dashboard `dashboard/session-costs.ts` / #68's
+// litellm capture), never a guess. It cannot be fixed by editing outbound.db (the
+// container is the sole writer and re-persists its in-memory `costSpentUsd`), so
+// like set-ceiling it goes THROUGH the runner: host writes a `kind:'cost_override'`
+// control message, the runner applies it against live state and rotates the epoch,
+// and confirms via a `cost_reconcile_result` receipt. Epoch-fenced by the SAME
+// `UNIQUE(session_id, expected_epoch_key)` as set-ceiling; idempotent (a replay is
+// stale once the epoch rotated); never double-applied.
+
+export interface SubmitReconcileResult {
+  status: 200 | 202 | 400 | 404 | 409 | 422 | 426 | 503;
+  body: Record<string, unknown>;
+}
+
+function reconcileBadRequest(error: string, message: string): SubmitReconcileResult {
+  return { status: 400, body: { ok: false, error, message } };
+}
+
+/**
+ * Submit a `cost_reconcile` for one session: set its live enforcement spend
+ * (`costSpentUsd`) to `targetSpentUsd` (the transcript oracle, in USD → integer
+ * cents). Unlike the dashboard set-ceiling endpoint, the caller supplies NO
+ * `expected*` values — the host reads the session's live epoch/ceiling itself and
+ * uses them as the compare-and-set basis, so a normal turn accruing spend (which
+ * never rotates the epoch) cannot make a reconcile stale, while a set-ceiling /
+ * continue / clear that DID rotate the epoch between this read and the runner's
+ * apply makes the runner refuse it as a conflict.
+ *
+ * `source` is recorded in the ledger's `requested_by` audit column (e.g. the
+ * operator or the `cli_scope:'global'` agent group that ran `ncl cost-cap
+ * reconcile`). Returns the same status/body envelope as
+ * `submitCostCeilingAdjustment`; the ncl verb throws on any non-2xx.
+ *
+ * `force` (issue #1327 recovery) relaxes ONLY the `card_already_decided` fence for
+ * a CONTINUED card, so a reconcile can correct a session `continue`d on inflated
+ * spend (the deadlock: it is falsely-stopped and cannot self-advance). A `stopped`
+ * card is NEVER forceable — that would defeat a human stop, so it still 409s. It
+ * changes NOTHING else — the reconcile is still downward-only (a target above live
+ * spend is refused regardless of `force`), still the three-leg epoch+ceiling+spend
+ * CAS at the runner, still idempotent. A forced override is recorded (`forced` on
+ * the ledger row + receipt) and logged host-side. Because the correction is
+ * strictly downward, it is more permissive than the human's `continue` intent and
+ * can never violate the decision.
+ */
+export async function submitCostReconcile(
+  sessionId: string,
+  targetSpentUsd: number,
+  source: string,
+  force = false,
+): Promise<SubmitReconcileResult> {
+  // 1. Shape/value validation (pure).
+  const sid = typeof sessionId === 'string' ? sessionId.trim() : '';
+  if (!sid) return reconcileBadRequest('invalid_session_id', 'sessionId is required');
+  if (typeof targetSpentUsd !== 'number' || !Number.isFinite(targetSpentUsd) || targetSpentUsd < 0) {
+    return reconcileBadRequest('invalid_target_spent', 'targetSpentUsd must be a finite number >= 0');
+  }
+  const targetSpentCents = Math.round(targetSpentUsd * 100);
+  if (!Number.isInteger(targetSpentCents) || targetSpentCents < 0 || targetSpentCents > MAX_SPENT_CENTS) {
+    return reconcileBadRequest(
+      'invalid_target_spent',
+      `targetSpentUsd converts to ${targetSpentCents}¢, out of range [0, ${MAX_SPENT_CENTS}]`,
+    );
+  }
+
+  // 2. Resolve session.
+  const session = await getSession(sid);
+  if (!session) {
+    return { status: 404, body: { ok: false, error: 'session_not_found', message: `session not found: ${sid}` } };
+  }
+
+  // 3. Resolve group; reject immortal AUTHORITATIVELY from central-DB fields.
+  const group = await getAgentGroup(session.agent_group_id);
+  if (!group) {
+    return {
+      status: 404,
+      body: { ok: false, error: 'agent_group_not_found', message: `agent group not found for session ${sid}` },
+    };
+  }
+  if (isImmortalGroup(group)) {
+    return {
+      status: 422,
+      body: { ok: false, error: 'immortal', message: 'immortal (admin/main) sessions are not enforcement-capped' },
+    };
+  }
+
+  // 4. Live cost state — the shared host reader. This is the CAS basis.
+  const capView = await readSessionCostCapStatus(sid);
+  if (capView.immortal === true) {
+    return {
+      status: 422,
+      body: { ok: false, error: 'immortal', message: 'immortal (admin/main) sessions are not enforcement-capped' },
+    };
+  }
+  if (capView.status === 'unknown') {
+    return {
+      status: 422,
+      body: { ok: false, error: 'cost_tracking_unavailable', message: 'cost tracking is not active for this session' },
+    };
+  }
+  if (typeof capView.ceiling_usd !== 'number' || capView.ceiling_usd <= 0) {
+    return {
+      status: 422,
+      body: { ok: false, error: 'no_live_ceiling', message: 'this session has no live Tier-2 ceiling configured' },
+    };
+  }
+  if (typeof capView.budget_gen !== 'number') {
+    return {
+      status: 422,
+      body: {
+        ok: false,
+        error: 'cost_tracking_unavailable',
+        message: 'no live budget generation reported for this session',
+      },
+    };
+  }
+  const liveEpochKey = String(capView.budget_gen);
+  const liveCeilingCents = Math.round(capView.ceiling_usd * 100);
+  // The ledger reuses `target_ceiling_cents` (unchanged by a reconcile) to record
+  // the live ceiling; that column keeps the 942 CHECK (1..100000), so a session
+  // whose ceiling exceeds the $1,000 set-ceiling maximum is out of scope here.
+  if (liveCeilingCents < 1 || liveCeilingCents > MAX_CEILING_CENTS) {
+    return {
+      status: 422,
+      body: {
+        ok: false,
+        error: 'ceiling_out_of_range',
+        message: `live ceiling ${liveCeilingCents}¢ is outside the reconcile-supported range [1, ${MAX_CEILING_CENTS}]`,
+      },
+    };
+  }
+
+  // 5. Live spend — the reconcile CAS third leg (epoch + ceiling + SPEND). A
+  // reconcile is an ABSOLUTE set, so it must fence on the exact spend it is
+  // correcting: the runner refuses it unless its live spend still equals this,
+  // which is what stops a turn that accrued between this read and the runner's
+  // apply from being silently erased. A session with no live spend figure cannot
+  // be reconciled.
+  if (typeof capView.spent_usd !== 'number') {
+    return {
+      status: 422,
+      body: { ok: false, error: 'cost_tracking_unavailable', message: 'no live spend reported for this session' },
+    };
+  }
+  const liveSpentCents = Math.round(capView.spent_usd * 100);
+
+  // Reconcile only ever LOWERS enforcement spend to the (lower) transcript oracle
+  // — that is the whole shape of the #1327 correction (the pre-fix basis only ever
+  // over-counted). A target above live spend is refused, so a typo can never raise
+  // enforcement or stop a healthy session.
+  if (targetSpentCents > liveSpentCents) {
+    return {
+      status: 422,
+      body: {
+        ok: false,
+        error: 'target_above_live_spend',
+        message: `target ${(targetSpentCents / 100).toFixed(2)} exceeds live spend ${(liveSpentCents / 100).toFixed(2)} — reconcile only lowers spend to the transcript oracle`,
+      },
+    };
+  }
+
+  // No-op guard: reconciling to the already-live spend changes nothing (and would
+  // needlessly rotate the epoch, invalidating any in-flight override).
+  if (targetSpentCents === liveSpentCents) {
+    return {
+      status: 200,
+      body: {
+        ok: true,
+        noop: true,
+        sessionId: sid,
+        message: `live spend is already ${(targetSpentCents / 100).toFixed(2)} — nothing to reconcile`,
+        liveEpochKey,
+        targetSpentCents,
+      },
+    };
+  }
+
+  // 6. Runner readiness handshake — no control message unless the CURRENT
+  // container advertises protocol 2 AND the reconcile capability (see
+  // `ensureRunnerReady`). A set-ceiling-only runner is refused here, LOUDLY.
+  const readiness = await ensureRunnerReady(session, true);
+  if (!readiness.ready) {
+    if (readiness.reason === 'unsupported_protocol') {
+      return {
+        status: 426,
+        body: {
+          ok: false,
+          error: 'unsupported_protocol',
+          message: "this session's runner build does not support cost_reconcile (restart the group to pick it up)",
+        },
+      };
+    }
+    return {
+      status: 503,
+      body: { ok: false, error: 'runner_not_ready', message: 'could not confirm the runner was ready in time' },
+    };
+  }
+
+  // 7. Create the ledger row (same epoch CAS + episode-supersede transaction).
+  const adjustmentId = `csr-${randomUUID()}`;
+  const inboundMessageId = `cost-ceiling-adjustment:${adjustmentId}`;
+  const created = await createCostCeilingAdjustment({
+    adjustment_id: adjustmentId,
+    protocol_version: 2,
+    operation: 'reconcile',
+    session_id: session.id,
+    agent_group_id: session.agent_group_id,
+    expected_epoch_key: liveEpochKey,
+    expected_ceiling_cents: liveCeilingCents,
+    target_ceiling_cents: liveCeilingCents, // unchanged by a reconcile
+    target_spent_cents: targetSpentCents,
+    expected_spent_cents: liveSpentCents,
+    force,
+    inbound_message_id: inboundMessageId,
+    requested_at: new Date().toISOString(),
+    requested_by: source,
+  });
+
+  if (created.outcome === 'id-conflict') {
+    // A fresh random adjustment_id colliding is effectively impossible; treat as a
+    // server error the caller retries.
+    return {
+      status: 409,
+      body: { ok: false, error: 'request_id_conflict', message: 'adjustment id already used with a different body' },
+    };
+  }
+  if (created.outcome === 'episode-already-won') {
+    // Only reachable when NOT forced (createCostCeilingAdjustment applies past a
+    // decided card when force is set) — point the operator at the escape hatch.
+    return {
+      status: 409,
+      body: {
+        ok: false,
+        error: 'card_already_decided',
+        message:
+          'a decision card already resolved this exact epoch — re-run with --force to correct a session ' +
+          'CONTINUEd on inflated (#1327) spend (downward-only). A stopped card is never forceable.',
+      },
+    };
+  }
+  if (created.outcome === 'epoch-conflict') {
+    return {
+      status: 409,
+      body: {
+        ok: false,
+        error: 'epoch_conflict',
+        message: 'another live cost action already claimed this exact epoch',
+        winner: created.row.adjustment_id,
+      },
+    };
+  }
+  if (created.outcome === 'idempotent-existing') {
+    const row = created.row;
+    return {
+      status: TERMINAL_STATES.has(row.state) ? 200 : 202,
+      body: { ...adjustmentResponseBody(row), forced: row.forced === 1 },
+    };
+  }
+
+  // A forced reconcile that actually overrode a decided card — durable audit + a
+  // loud host log so the override is traceable, not silent.
+  if (created.row.forced === 1) {
+    log.warn('cost-reconcile: FORCED override of an already-decided card', {
+      adjustmentId: created.row.adjustment_id,
+      sessionId: session.id,
+      epochKey: liveEpochKey,
+      targetSpentCents,
+      expectedSpentCents: liveSpentCents,
+      requestedBy: source,
+    });
+  }
+
+  // 8. Best-effort enqueue (same path + reconciler re-drive as set-ceiling).
+  await enqueueAdjustment(session, created.row);
+  const finalRow = (await getCostCeilingAdjustment(created.row.adjustment_id)) ?? created.row;
+  return { status: 202, body: { ...adjustmentResponseBody(finalRow), forced: finalRow.forced === 1 } };
+}
+
+/**
+ * Ingest a `cost_reconcile_result` receipt (registered as a `src/delivery.ts`
+ * action). Maps the reconcile receipt's echoed fields onto the shared ledger CAS
+ * (`recordCostCeilingAdjustmentResult`), which validates `target_spent_cents`
+ * against the central record for a `reconcile` row. Idempotent under replay.
+ */
+export async function ingestCostReconcileReceipt(content: Record<string, unknown>, session: Session): Promise<void> {
+  const c = content as ReconcileReceiptPayload;
+  const adjustmentId = typeof c.adjustmentId === 'string' && c.adjustmentId ? c.adjustmentId : undefined;
+  const outcome = c.outcome;
+  if (!adjustmentId || (outcome !== 'applied' && outcome !== 'conflict' && outcome !== 'rejected')) {
+    log.warn('cost-reconcile: receipt with missing/invalid adjustmentId or outcome — ignoring', {
+      sessionId: session.id,
+      adjustmentId,
+      outcome,
+    });
+    return;
+  }
+
+  const result = await recordCostCeilingAdjustmentResult({
+    adjustment_id: adjustmentId,
+    outcome,
+    completed_at: new Date().toISOString(),
+    result_epoch_key: typeof c.resultEpochKey === 'string' ? c.resultEpochKey : null,
+    result_ceiling_cents: typeof c.resultCeilingCents === 'number' ? c.resultCeilingCents : null,
+    result_spent_usd: typeof c.spentUsd === 'number' ? c.spentUsd : null,
+    result_cost_status: typeof c.status === 'string' ? c.status : null,
+    result_reason: typeof c.reason === 'string' ? c.reason : null,
+    session_id: session.id,
+    expected_epoch_key: typeof c.expectedEpochKey === 'string' ? c.expectedEpochKey : String(c.expectedEpochKey ?? ''),
+    expected_ceiling_cents: Number(c.expectedCeilingCents),
+    // A reconcile row validates on target_spent_cents; target_ceiling_cents is the
+    // unchanged ceiling (== expected) and is not the echo the CAS checks here.
+    target_ceiling_cents: Number(c.expectedCeilingCents),
+    target_spent_cents: Number(c.targetSpentCents),
+  });
+
+  if (result.outcome === 'not-found') {
+    log.warn('cost-reconcile: receipt for an unknown adjustment_id — ignoring', {
+      adjustmentId,
+      sessionId: session.id,
+    });
+    return;
+  }
+  if (result.outcome === 'mismatch') {
+    log.error('cost-reconcile: receipt fields do NOT match the central record — refusing to accept as authoritative', {
+      adjustmentId,
+      sessionId: session.id,
+    });
+    return;
+  }
+  if (result.outcome === 'replayed-identical') {
+    log.info('cost-reconcile: receipt replay — already recorded, idempotent no-op', { adjustmentId, outcome });
+    return;
+  }
+  log.info('cost-reconcile: outcome recorded', { adjustmentId, outcome, sessionId: session.id });
+}
+
+interface ReconcileReceiptPayload {
+  adjustmentId?: unknown;
+  outcome?: unknown;
+  expectedEpochKey?: unknown;
+  resultEpochKey?: unknown;
+  expectedCeilingCents?: unknown;
+  targetSpentCents?: unknown;
+  resultCeilingCents?: unknown;
+  spentUsd?: unknown;
+  status?: unknown;
+  reason?: unknown;
+}
+
 // ── Host-sweep reconciler ───────────────────────────────────────────────────
 
 const RECONCILE_BASE_BACKOFF_MS = 5_000;
@@ -639,14 +1036,20 @@ async function reconcileOne(row: CostCeilingAdjustmentRow, nowIso: string): Prom
   if (row.state === 'pending') await markCostCeilingAdjustmentEnqueued(row.adjustment_id, nowIso);
 
   // Best-effort protocol-incompatibility check: if a handshake IS present
-  // (the runner is up and has spoken) but reports a version other than 2,
-  // this row can never resolve — terminalize instead of retrying forever. An
-  // ABSENT handshake is NOT the same signal (could just be a cold container
-  // that hasn't started yet) and keeps retrying.
+  // (the runner is up and has spoken) but cannot handle this row's operation,
+  // it can never resolve — terminalize instead of retrying forever. An ABSENT
+  // handshake is NOT the same signal (could just be a cold container that
+  // hasn't started yet) and keeps retrying. A reconcile row additionally needs
+  // the runner to advertise the `reconcile` capability (a set-ceiling-only
+  // runner would consume-and-drop the message without a receipt).
   const handshake = await readSessionCostControlProtocol(session.id);
-  if (handshake && handshake.version !== 2) {
-    await rejectCostCeilingAdjustment(row.adjustment_id, 'unsupported_protocol', nowIso);
-    return;
+  if (handshake) {
+    const incompatible =
+      handshake.version !== 2 || (row.operation === 'reconcile' && !(handshake.operations ?? []).includes('reconcile'));
+    if (incompatible) {
+      await rejectCostCeilingAdjustment(row.adjustment_id, 'unsupported_protocol', nowIso);
+      return;
+    }
   }
 
   try {

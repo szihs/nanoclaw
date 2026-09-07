@@ -17,7 +17,7 @@ Emit **N separate `<message to="<name>">` blocks** in your final response, one p
 
 Bundle items into one message **only when handled together** (same PR, ordered dependency) and say so (_"bundle into one PR"_, _"do A before B"_) — a prose blob defaults to sequential single-threaded handling.
 
-Replying on an existing thread (peer conversation, reporting to parent): no new `thread_id` — `in_reply_to="<msg-id>"` carries context. See [chain-reporting](#chain-reporting).
+Replying on an existing thread (peer conversation, reporting to parent): no new `thread_id` — `in_reply_to="<msg-id>"` carries context. See [chain-reporting](#chain-communication--the-rules).
 
 ### Build / compile / install — delegate to `Agent`, never run inline
 

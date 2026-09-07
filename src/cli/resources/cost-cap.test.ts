@@ -36,13 +36,24 @@ vi.mock('../session-cost-cap.js', () => ({
   readSessionCostCapStatus: (...a: unknown[]) => mockReadSessionCostCapStatus(...a),
 }));
 
+// `stopped`'s handler is a thin delegate to cost-cap-sessions.ts'
+// listStoppedSessions (which reads the dashboard's /api/sessions). Mock only that
+// export, preserving the rest of the module so the other verbs still register.
+const mockListStoppedSessions = vi.fn();
+vi.mock('../cost-cap-sessions.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../cost-cap-sessions.js')>()),
+  listStoppedSessions: (...a: unknown[]) => mockListStoppedSessions(...a),
+}));
+
 // `set-ceiling` dynamic-imports submitCostCeilingAdjustment; mock it so the
 // verb's OWN logic (live-epoch read → cents conversion → money-safe failure
 // surfacing) is what's under test, not the full ledger/runner flow (which has
 // its own tests in db/cost-ceiling-adjustments.test.ts + the module test).
 const mockSubmitCostCeilingAdjustment = vi.fn();
+const mockSubmitCostReconcile = vi.fn();
 vi.mock('../../modules/cost-ceiling-adjustment/index.js', () => ({
   submitCostCeilingAdjustment: (...a: unknown[]) => mockSubmitCostCeilingAdjustment(...a),
+  submitCostReconcile: (...a: unknown[]) => mockSubmitCostReconcile(...a),
 }));
 
 // `continue`/`stop` dynamic-import the shared decision path; mock it so we
@@ -53,7 +64,7 @@ vi.mock('../../modules/cost-approval/index.js', () => ({
   applyCostOverrideDecision: (...a: unknown[]) => mockApplyCostOverrideDecision(...a),
 }));
 
-import './cost-cap.js'; // side-effect: registers cost-cap-{get,set,clear,status,sessions,continue,stop,set-ceiling}
+import './cost-cap.js'; // side-effect: registers cost-cap-{get,set,clear,status,stopped,escalations,sessions,continue,stop,set-ceiling,reconcile,coworkers}
 import { commandGuard, lookup } from '../registry.js';
 import { guard, type GuardActor } from '../../guard/index.js';
 import type { CallerContext } from '../frame.js';
@@ -64,10 +75,13 @@ const COMMANDS = [
   'cost-cap-get',
   'cost-cap-clear',
   'cost-cap-status',
+  'cost-cap-stopped',
+  'cost-cap-escalations',
   'cost-cap-sessions',
   'cost-cap-continue',
   'cost-cap-stop',
   'cost-cap-set-ceiling',
+  'cost-cap-reconcile',
 ] as const;
 
 describe('cost-cap scope gate (elevated only)', () => {
@@ -168,6 +182,54 @@ describe('cost-cap status', () => {
   });
 });
 
+describe('cost-cap stopped — the LIVE currently-blocked set (distinct from the escalations history)', () => {
+  const HOST: CallerContext = { caller: 'host' };
+  const run = async (raw: Record<string, unknown>) => {
+    const cmd = lookup('cost-cap-stopped');
+    if (!cmd) throw new Error('cost-cap-stopped not registered');
+    return cmd.handler(cmd.parseArgs(raw), HOST);
+  };
+
+  beforeEach(() => mockListStoppedSessions.mockReset());
+
+  it('delegates to listStoppedSessions with no group filter and returns its result verbatim', async () => {
+    const result = {
+      count: 2,
+      group: null,
+      costUnavailable: null,
+      stopped: [
+        { session_id: 's2', agent_group_id: 'ag-2', status: 'stopped', spent_usd: 60, group_folder: 'slang-fixer' },
+        { session_id: 's1', agent_group_id: 'ag-1', status: 'stopped', spent_usd: 42, group_folder: 'slang-reader' },
+      ],
+    };
+    mockListStoppedSessions.mockResolvedValue(result);
+    const res = await run({});
+    expect(mockListStoppedSessions).toHaveBeenCalledWith({ group: undefined });
+    expect(res).toBe(result); // returned verbatim, incl. the dashboard's costUnavailable signal
+  });
+
+  it('passes --group through as the folder filter', async () => {
+    mockListStoppedSessions.mockResolvedValue({ count: 0, group: 'slang-fixer', costUnavailable: null, stopped: [] });
+    await run({ group: 'slang-fixer' });
+    expect(mockListStoppedSessions).toHaveBeenCalledWith({ group: 'slang-fixer' });
+  });
+
+  it('does NOT read the episode ledger — the stopped set comes only from the live /api/sessions delegate', async () => {
+    // listEscalationEpisodes is the history ledger; the stopped verb must never
+    // consult it. We assert this indirectly: the only source it calls is the
+    // live listStoppedSessions delegate.
+    mockListStoppedSessions.mockResolvedValue({ count: 0, group: null, costUnavailable: null, stopped: [] });
+    await run({});
+    expect(mockListStoppedSessions).toHaveBeenCalledTimes(1);
+  });
+
+  it('rejects an unknown flag', () => {
+    const cmd = lookup('cost-cap-stopped');
+    if (!cmd) throw new Error('cost-cap-stopped not registered');
+    expect(() => cmd.parseArgs({ groop: 'x' })).toThrow(/unknown flag/);
+  });
+});
+
 describe('cost-cap set-ceiling — live-epoch CAS precondition + money-safe failure surfacing', () => {
   const HOST: CallerContext = { caller: 'host' };
   const run = async (raw: Record<string, unknown>) => {
@@ -247,6 +309,98 @@ describe('cost-cap set-ceiling — live-epoch CAS precondition + money-safe fail
     await expect(run({ session: 's1', ceiling: '0' })).rejects.toThrow(/--ceiling must be a number > 0/);
     await expect(run({ session: 's1', ceiling: '1001' })).rejects.toThrow(/between \$0.01 and \$1000.00/);
     expect(mockReadSessionCostCapStatus).not.toHaveBeenCalled();
+  });
+});
+
+describe('cost-cap reconcile — USD→cents conversion, actor tag, money-safe failure surfacing', () => {
+  const HOST: CallerContext = { caller: 'host' };
+  const run = async (raw: Record<string, unknown>) => {
+    const cmd = lookup('cost-cap-reconcile');
+    if (!cmd) throw new Error('cost-cap-reconcile not registered');
+    return cmd.handler(cmd.parseArgs(raw), HOST);
+  };
+
+  beforeEach(() => mockSubmitCostReconcile.mockReset());
+
+  it('passes the USD target verbatim (module does cents) with an ncl: source tag; force defaults to false', async () => {
+    mockSubmitCostReconcile.mockResolvedValue({
+      status: 202,
+      body: { ok: true, adjustmentId: 'csr-x', state: 'enqueued' },
+    });
+    const res = (await run({ session: 's1', to: '42.17' })) as Record<string, unknown>;
+    expect(mockSubmitCostReconcile).toHaveBeenCalledTimes(1);
+    const [sessionId, targetSpentUsd, source, force] = mockSubmitCostReconcile.mock.calls[0] as [
+      string,
+      number,
+      string,
+      boolean,
+    ];
+    expect(sessionId).toBe('s1');
+    expect(targetSpentUsd).toBeCloseTo(42.17);
+    expect(source).toMatch(/^ncl:/);
+    expect(force).toBe(false);
+    expect(res).toMatchObject({ status: 202, targetSpentUsd: 42.17, adjustmentId: 'csr-x' });
+  });
+
+  it('--force is threaded through to submitCostReconcile and surfaced in output', async () => {
+    mockSubmitCostReconcile.mockResolvedValue({
+      status: 202,
+      body: { ok: true, adjustmentId: 'csr-f', state: 'enqueued', forced: true },
+    });
+    const res = (await run({ session: 's1', to: '116', force: true })) as Record<string, unknown>;
+    const [, , , force] = mockSubmitCostReconcile.mock.calls[0] as [string, number, string, boolean];
+    expect(force).toBe(true);
+    expect(res).toMatchObject({ forced: true });
+  });
+
+  it('accepts a $0 target (full absorb)', async () => {
+    mockSubmitCostReconcile.mockResolvedValue({ status: 202, body: { ok: true, adjustmentId: 'csr-z' } });
+    await run({ session: 's1', to: '0' });
+    const [, targetSpentUsd] = mockSubmitCostReconcile.mock.calls[0] as [string, number, string];
+    expect(targetSpentUsd).toBe(0);
+  });
+
+  it('requires --session and --to', () => {
+    const cmd = lookup('cost-cap-reconcile');
+    if (!cmd) throw new Error('cost-cap-reconcile not registered');
+    expect(() => cmd.parseArgs({ to: '10' })).toThrow(/--session is required/);
+    expect(() => cmd.parseArgs({ session: 's1' })).toThrow(/--to is required/);
+  });
+
+  it('rejects a negative --to before ever submitting', async () => {
+    await expect(run({ session: 's1', to: '-5' })).rejects.toThrow(/--to must be a number >= 0/);
+    expect(mockSubmitCostReconcile).not.toHaveBeenCalled();
+  });
+
+  it('FAILS LOUDLY on a stale-epoch 409 rather than reporting success', async () => {
+    mockSubmitCostReconcile.mockResolvedValue({
+      status: 409,
+      body: {
+        ok: false,
+        error: 'epoch_conflict',
+        message: 'another live cost action already claimed this exact epoch',
+      },
+    });
+    await expect(run({ session: 's1', to: '42' })).rejects.toThrow(/cost reconcile failed \(409 epoch_conflict\)/);
+  });
+
+  it('FAILS LOUDLY on an unsupported-protocol 426', async () => {
+    mockSubmitCostReconcile.mockResolvedValue({
+      status: 426,
+      body: { ok: false, error: 'unsupported_protocol', message: 'runner too old' },
+    });
+    await expect(run({ session: 's1', to: '42' })).rejects.toThrow(
+      /cost reconcile failed \(426 unsupported_protocol\)/,
+    );
+  });
+
+  it('surfaces a 200 no-op without throwing', async () => {
+    mockSubmitCostReconcile.mockResolvedValue({
+      status: 200,
+      body: { ok: true, noop: true, message: 'already at target' },
+    });
+    const res = (await run({ session: 's1', to: '42' })) as Record<string, unknown>;
+    expect(res).toMatchObject({ status: 200, noop: true });
   });
 });
 

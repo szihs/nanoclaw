@@ -1,71 +1,93 @@
 /**
- * cost-per-coworker — exact per-coworker inference cost, read HOST-SIDE from the
- * OneCLI gateway's `request_logs`.
+ * cost-per-coworker — per-coworker inference cost, read HOST-SIDE from the
+ * OneCLI gateway's `request_logs` and priced from the TOKEN USAGE the patched
+ * gateway records for every response body (`usage_*` keys — see
+ * scripts/onecli-cost-capture/README.md §v2) × NanoClaw's rate table
+ * (`inference-pricing.ts`, a tested mirror of the dashboard/runner tables).
  *
- * The `ncl cost-cap coworkers` verb calls `readCostPerCoworker`. It reads the
- * EXACT litellm per-request cost that the (patched) OneCLI gateway records into
- * `request_logs.extra_data` under the header `x-litellm-response-cost-original`
- * (see scripts/onecli-cost-capture/), joined to `agents` so each row is
- * attributed to a NanoClaw agent group: `agents.identifier` IS the agent group id
- * (`ag-…`) and `agents.name` is the coworker's display name. Rolling that up by
- * `identifier` is cost-per-coworker, from the billing system's own number — no
- * token estimation, date-correct by construction.
+ * Why tokens and not litellm's cost header: `x-litellm-response-cost-original`
+ * is emitted BEFORE a streamed completion exists, so it reads 0.0 for ~all
+ * coworker traffic (proven on prod 2026-09-03). The header is still captured and
+ * reported as `headerCostUsd` — exact for non-streamed calls, informational
+ * otherwise — so the two can be reconciled per model.
  *
- * SECURITY — this only ever runs in the HOST process.
- *   The `cost-cap` resource is elevated-only (host operator or a cli_scope=global
- *   orchestrator). Even when a container issues `ncl cost-cap coworkers`, the
- *   handler is dispatched host-side (src/cli/delivery-action.ts) and the container
- *   receives only the aggregated dollar figures back through its session DB. A
- *   container has no docker socket, no Postgres credentials, and no network route
- *   to OneCLI's DB (host-loopback bound) — so there is no path by which a
- *   container reads OneCLI directly, and this module never executes inside one.
+ * UNKNOWN, never $0: rows without usable body usage — everything logged before
+ * the body-tap gateway went live (`BODY_USAGE_SINCE`), calls whose model the
+ * table can't price, and any capture gap — are counted in `unknownCalls` and
+ * EXCLUDED from `costUsd`. That history is deliberately not backfilled.
+ * `/v1/messages/count_tokens` calls are free and excluded entirely.
  *
- * CONFIG (host env, read at call time):
- *   ONECLI_PG_CONTAINER  the OneCLI Postgres container name (e.g. onecli-lego-postgres-1).
- *                        UNSET ⇒ the verb reports `configured:false` (a no-op, not an error),
- *                        so installs without the cost capture keep working.
- *   ONECLI_PG_RUNTIME    container runtime for `exec` (default 'docker').
- *   ONECLI_PG_USER       psql user (default 'onecli').
- *   ONECLI_PG_DB         psql database (default 'onecli').
+ * Security (unchanged): `cost-cap` is elevated-only (host operator or a
+ * cli_scope=global orchestrator). Even when a container issues
+ * `ncl cost-cap coworkers`, the psql runs on the HOST via the mailbox transport
+ * and only the numbers travel back — the container never touches the OneCLI DB.
+ *
+ * Env: ONECLI_PG_CONTAINER (OneCLI Postgres container; UNSET ⇒ `configured:false`,
+ * a no-op not an error), ONECLI_PG_RUNTIME (default docker), ONECLI_PG_USER /
+ * ONECLI_PG_DB (default onecli).
  */
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 
 import { getAllAgentGroups } from '../db/agent-groups.js';
 
+import { priceUsageBucket } from './inference-pricing.js';
+
 const execFileAsync = promisify(execFile);
 
-/** The captured litellm response header carrying the exact per-request cost. */
-const COST_KEY = 'x-litellm-response-cost-original';
+/** The captured litellm response-cost header — exact for NON-streamed calls only. */
+export const HEADER_COST_KEY = 'x-litellm-response-cost-original';
+/** When the body-usage (v2) gateway went live; rows logged before it can only be UNKNOWN. */
+export const BODY_USAGE_SINCE = '2026-09-03 13:11 UTC (prod)';
 
 /** An `ag-…` id shape guard — the only value we interpolate into SQL besides a digit-derived interval. */
 const GROUP_ID_RE = /^ag-[a-z0-9-]+$/i;
+
+export interface CoworkerTokenTotals {
+  input: number;
+  output: number;
+  cacheRead: number;
+  cacheCreate: number;
+}
 
 export interface CoworkerCostRow {
   groupId: string;
   folder: string | null;
   name: string;
+  /** Successful inference calls in the window (count_tokens excluded). */
   calls: number;
+  /** Calls priced from body usage (`usage_source` sse|json, priced model). */
+  pricedCalls: number;
+  /** Calls with NO usable usage — before the v2 gateway, or an unpriced model. UNKNOWN cost, never $0. */
+  unknownCalls: number;
+  /** USD priced from body usage × NanoClaw rates — the cost of record for `pricedCalls`. */
   costUsd: number;
+  /** Σ litellm header cost: exact only for non-streamed calls, informational otherwise. */
+  headerCostUsd: number;
+  tokens: CoworkerTokenTotals;
+  /** Models seen WITH usage that the rate table cannot price (their calls count as unknown). */
+  unpricedModels: string[];
 }
 
 export interface CostPerCoworkerResult {
   source: 'onecli-request-logs';
+  basis: 'body-usage-tokens-x-nanoclaw-rates';
   /** false when ONECLI_PG_CONTAINER is unset — the cost source isn't wired here. */
   configured: boolean;
-  /** false when the gateway has captured no cost rows yet (flag off, or no traffic). */
+  /** false when the gateway has captured no rows yet (flags off, or no traffic). */
   captured: boolean;
   /** 'all', or the echoed --period (e.g. '30d'). */
   period: string;
   coworkers: CoworkerCostRow[];
   totalUsd: number;
+  unknownCalls: number;
+  headerTotalUsd: number;
   note?: string;
 }
 
 /**
  * Validate `--period` ("30d", "24h", …) → a safe Postgres interval literal built
- * only from a digit-count and a fixed unit word. Returns null when absent
- * (all-time). Throws on a malformed value rather than silently ignoring it.
+ * from digits + a fixed unit word only (never interpolates user text).
  */
 export function periodToInterval(period: string | undefined): string | null {
   if (!period) return null;
@@ -77,44 +99,154 @@ export function periodToInterval(period: string | undefined): string | null {
 }
 
 /**
- * Build the per-coworker aggregation SQL. The ONLY interpolations are
- * `intervalSql` (from {@link periodToInterval}: digits + a fixed unit word) and
- * `groupId` (an `ag-…` id the caller has already shape-checked) — never raw user
- * text. The verb runs via `execFile(..., [args])` (no shell), so there is no shell
- * layer either.
+ * One aggregated bucket per (coworker, usage_api, usage_model) — the raw SQL
+ * output before pricing. Rows logged without body usage land in the bucket with
+ * empty `usageApi`/`model` and `usageCalls = 0`.
+ */
+export interface UsageAggRow {
+  groupId: string;
+  name: string;
+  usageApi: string;
+  model: string;
+  calls: number;
+  usageCalls: number;
+  input: number;
+  output: number;
+  cacheRead: number;
+  /** cache_creation_input_tokens from calls WITHOUT a 5m/1h split (priced at the 5m rate). */
+  cacheCreateFlat: number;
+  cacheCreate5m: number;
+  cacheCreate1h: number;
+  headerUsd: number;
+}
+
+/**
+ * Build the per-coworker usage aggregation. Only `intervalSql` (from
+ * {@link periodToInterval}) and a shape-checked `ag-…` id are ever interpolated.
  */
 export function buildCoworkerCostSql(opts: { intervalSql: string | null; groupId: string | null }): string {
-  const filters = [`r.extra_data ? '${COST_KEY}'`, `a.identifier LIKE 'ag-%'`];
+  const filters = [
+    `(r.extra_data ? '${HEADER_COST_KEY}' OR r.extra_data ? 'usage_source')`,
+    `a.identifier LIKE 'ag-%'`,
+    `r.status BETWEEN 200 AND 299`,
+    `r.path NOT LIKE '%/count_tokens%'`,
+  ];
   if (opts.intervalSql) filters.push(`r.created_at > now() - interval '${opts.intervalSql}'`);
   if (opts.groupId) filters.push(`a.identifier = '${opts.groupId}'`);
+  const tok = (k: string) => `coalesce(sum((r.extra_data->>'${k}')::bigint),0)`;
   return (
-    `SELECT a.identifier, coalesce(a.name,''), count(*), ` +
-    `coalesce(round(sum((r.extra_data->>'${COST_KEY}')::numeric),6),0) ` +
+    `SELECT a.identifier, coalesce(a.name,''), ` +
+    `coalesce(r.extra_data->>'usage_api',''), coalesce(r.extra_data->>'usage_model',''), ` +
+    `count(*), count(*) FILTER (WHERE r.extra_data ? 'usage_input_tokens'), ` +
+    `${tok('usage_input_tokens')}, ${tok('usage_output_tokens')}, ${tok('usage_cache_read_input_tokens')}, ` +
+    `coalesce(sum((r.extra_data->>'usage_cache_creation_input_tokens')::bigint) ` +
+    `FILTER (WHERE NOT (r.extra_data ? 'usage_cache_creation_5m_input_tokens')),0), ` +
+    `${tok('usage_cache_creation_5m_input_tokens')}, ${tok('usage_cache_creation_1h_input_tokens')}, ` +
+    `coalesce(round(sum((r.extra_data->>'${HEADER_COST_KEY}')::numeric),6),0) ` +
     `FROM request_logs r JOIN agents a ON a.id = r.agent_id ` +
     `WHERE ${filters.join(' AND ')} ` +
-    `GROUP BY a.identifier, a.name ORDER BY 4 DESC`
+    `GROUP BY a.identifier, a.name, r.extra_data->>'usage_api', r.extra_data->>'usage_model' ` +
+    `ORDER BY a.identifier, 3, 4`
   );
 }
 
-/** Parse `psql -tAc` pipe-separated output into rows (folder is filled in by the caller). */
-export function parseCoworkerRows(raw: string): Omit<CoworkerCostRow, 'folder'>[] {
-  const rows: Omit<CoworkerCostRow, 'folder'>[] = [];
+/** Parse `psql -tAc` pipe-separated output of {@link buildCoworkerCostSql}. Malformed lines are skipped. */
+export function parseCoworkerRows(raw: string): UsageAggRow[] {
+  const rows: UsageAggRow[] = [];
+  const num = (s: string | undefined): number => {
+    const n = Number.parseFloat(s ?? '');
+    return Number.isFinite(n) ? n : 0;
+  };
   for (const line of raw.split('\n')) {
-    const trimmed = line.trim();
-    if (!trimmed) continue;
-    const parts = trimmed.split('|');
-    if (parts.length < 4) continue;
-    const groupId = parts[0].trim();
-    const name = (parts[1] ?? '').trim();
-    const calls = Number.parseInt(parts[2], 10);
-    const costUsd = Number.parseFloat(parts[3]);
-    if (!groupId || !Number.isFinite(calls)) continue;
-    rows.push({ groupId, name, calls, costUsd: Number.isFinite(costUsd) ? costUsd : 0 });
+    const t = line.trim();
+    if (!t) continue;
+    const p = t.split('|');
+    if (p.length < 13) continue;
+    const groupId = p[0].trim();
+    if (!GROUP_ID_RE.test(groupId)) continue;
+    const calls = Number.parseInt(p[4], 10);
+    if (!Number.isFinite(calls)) continue;
+    rows.push({
+      groupId,
+      name: p[1],
+      usageApi: p[2],
+      model: p[3],
+      calls,
+      usageCalls: Math.trunc(num(p[5])),
+      input: num(p[6]),
+      output: num(p[7]),
+      cacheRead: num(p[8]),
+      cacheCreateFlat: num(p[9]),
+      cacheCreate5m: num(p[10]),
+      cacheCreate1h: num(p[11]),
+      headerUsd: num(p[12]),
+    });
   }
   return rows;
 }
 
-/** Runs one psql query and returns raw stdout. Injectable so tests need no docker. */
+const round6 = (n: number): number => Number(n.toFixed(6));
+
+/**
+ * Price the aggregated buckets and roll them up per coworker. Buckets without
+ * usage, and buckets whose model/API the table can't price, become
+ * `unknownCalls` (excluded from `costUsd`) — never $0.
+ */
+export function aggregateCoworkerCosts(rows: UsageAggRow[], folderById?: Map<string, string>): CoworkerCostRow[] {
+  const byGroup = new Map<string, CoworkerCostRow>();
+  for (const r of rows) {
+    let g = byGroup.get(r.groupId);
+    if (!g) {
+      g = {
+        groupId: r.groupId,
+        folder: folderById?.get(r.groupId) ?? null,
+        name: r.name,
+        calls: 0,
+        pricedCalls: 0,
+        unknownCalls: 0,
+        costUsd: 0,
+        headerCostUsd: 0,
+        tokens: { input: 0, output: 0, cacheRead: 0, cacheCreate: 0 },
+        unpricedModels: [],
+      };
+      byGroup.set(r.groupId, g);
+    }
+    if (!g.name && r.name) g.name = r.name;
+    g.calls += r.calls;
+    g.headerCostUsd += r.headerUsd;
+    // Calls in this bucket that carried no usage (header-only, pre-v2) are UNKNOWN.
+    g.unknownCalls += Math.max(0, r.calls - r.usageCalls);
+    if (r.usageCalls <= 0) continue;
+    g.tokens.input += r.input;
+    g.tokens.output += r.output;
+    g.tokens.cacheRead += r.cacheRead;
+    g.tokens.cacheCreate += r.cacheCreateFlat + r.cacheCreate5m + r.cacheCreate1h;
+    const usd = priceUsageBucket(r.usageApi, r.model, {
+      input: r.input,
+      output: r.output,
+      cacheRead: r.cacheRead,
+      cacheCreateFlat: r.cacheCreateFlat,
+      cacheCreate5m: r.cacheCreate5m,
+      cacheCreate1h: r.cacheCreate1h,
+    });
+    if (usd === null) {
+      g.unknownCalls += r.usageCalls;
+      const label = r.model || r.usageApi || '(unknown)';
+      if (!g.unpricedModels.includes(label)) g.unpricedModels.push(label);
+    } else {
+      g.pricedCalls += r.usageCalls;
+      g.costUsd += usd;
+    }
+  }
+  const out = [...byGroup.values()].map((g) => ({
+    ...g,
+    costUsd: round6(g.costUsd),
+    headerCostUsd: round6(g.headerCostUsd),
+  }));
+  out.sort((a, b) => b.costUsd - a.costUsd || b.unknownCalls - a.unknownCalls || a.groupId.localeCompare(b.groupId));
+  return out;
+}
+
 export type PsqlRunner = (sql: string) => Promise<string>;
 
 export interface ReadCostPerCoworkerOpts {
@@ -152,14 +284,20 @@ export async function readCostPerCoworker(
   }
   if (groupId && !GROUP_ID_RE.test(groupId)) throw new Error(`unexpected group id shape: ${groupId}`);
 
+  const base = {
+    source: 'onecli-request-logs' as const,
+    basis: 'body-usage-tokens-x-nanoclaw-rates' as const,
+    period: periodLabel,
+  };
   if (!container) {
     return {
-      source: 'onecli-request-logs',
+      ...base,
       configured: false,
       captured: false,
-      period: periodLabel,
       coworkers: [],
       totalUsd: 0,
+      unknownCalls: 0,
+      headerTotalUsd: 0,
       note:
         'Cost source not configured. Set ONECLI_PG_CONTAINER to the OneCLI Postgres container name ' +
         '(see scripts/onecli-cost-capture/README.md).',
@@ -168,25 +306,32 @@ export async function readCostPerCoworker(
 
   const sql = buildCoworkerCostSql({ intervalSql, groupId });
   const runPsql = deps.runPsql ?? defaultRunPsql(container);
-  const raw = await runPsql(sql);
+  const coworkers = aggregateCoworkerCosts(parseCoworkerRows(await runPsql(sql)), folderById);
+  const totalUsd = round6(coworkers.reduce((s, c) => s + c.costUsd, 0));
+  const headerTotalUsd = round6(coworkers.reduce((s, c) => s + c.headerCostUsd, 0));
+  const unknownCalls = coworkers.reduce((s, c) => s + c.unknownCalls, 0);
 
-  const coworkers: CoworkerCostRow[] = parseCoworkerRows(raw).map((r) => ({
-    ...r,
-    folder: folderById?.get(r.groupId) ?? null,
-  }));
-  const totalUsd = Number(coworkers.reduce((sum, r) => sum + r.costUsd, 0).toFixed(6));
+  let note: string | undefined;
+  if (coworkers.length === 0) {
+    note =
+      'No captured rows. Is the OneCLI gateway running the cost-capture image with ' +
+      `ONECLI_CAPTURE_RESPONSE_HEADERS (incl. '${HEADER_COST_KEY}') and ONECLI_CAPTURE_BODY_USAGE_HOSTS set?`;
+  } else if (unknownCalls > 0) {
+    note =
+      `${unknownCalls} call${unknownCalls === 1 ? '' : 's'} have UNKNOWN cost (no body usage: logged before the ` +
+      `body-usage gateway went live — ${BODY_USAGE_SINCE} — or an unpriced model). They are NOT $0 and are ` +
+      'excluded from costUsd; that history is deliberately not backfilled.';
+  }
 
   return {
-    source: 'onecli-request-logs',
+    ...base,
     configured: true,
     captured: coworkers.length > 0,
-    period: periodLabel,
     coworkers,
     totalUsd,
-    note:
-      coworkers.length === 0
-        ? `No captured cost rows. Is ONECLI_CAPTURE_RESPONSE_HEADERS set on the OneCLI gateway (including '${COST_KEY}')?`
-        : undefined,
+    unknownCalls,
+    headerTotalUsd,
+    note,
   };
 }
 

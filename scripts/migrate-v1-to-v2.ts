@@ -30,6 +30,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import Database from 'better-sqlite3';
 
+import { readStandingInstructionsFile } from '../src/group-persona.js';
 import { extractLegacyCustomInstructions, recomposeLegacyTemplate } from '../src/v1-migration.js';
 
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
@@ -243,7 +244,13 @@ for (const g of groups) {
   // directly. The custom/role-specific part is what v2 needs as
   // .instructions.md. We reconstruct the template portion and diff it
   // against the actual CLAUDE.md to extract just the custom additions.
-  let instructions = readFileOr(path.join(groupDir, '.instructions.md'));
+  // Not `readFileOr`: this one file is agent-authored, so it is read with
+  // `O_NOFOLLOW` — a symlink would export an arbitrary host file as the group's
+  // instructions. `readFileOr` still serves the reads below, of files v1
+  // composed rather than an agent. Whitespace-only content now reads as absent,
+  // so the CLAUDE.md extraction below runs instead of exporting blank
+  // instructions.
+  let instructions = readStandingInstructionsFile(path.join(groupDir, '.instructions.md')).content;
   if (!instructions) {
     const claudeMd = readFileOr(path.join(groupDir, 'CLAUDE.md'));
     if (claudeMd) {

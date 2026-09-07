@@ -1,0 +1,894 @@
+diff --git a/apps/gateway/src/gateway.rs b/apps/gateway/src/gateway.rs
+index d25dae7..1165540 100644
+--- a/apps/gateway/src/gateway.rs
++++ b/apps/gateway/src/gateway.rs
+@@ -32,6 +32,8 @@ mod mitm;
+ mod response;
+ mod transforms;
+ mod tunnel;
++#[allow(dead_code)] // called from the OSS `hooks`; cloud/on-prem hook overlays may not use it
++pub(crate) mod usage_tap;
+ mod websocket;
+ 
+ use std::net::SocketAddr;
+diff --git a/apps/gateway/src/gateway/hooks.rs b/apps/gateway/src/gateway/hooks.rs
+index 20a4c90..2bdadbb 100644
+--- a/apps/gateway/src/gateway/hooks.rs
++++ b/apps/gateway/src/gateway/hooks.rs
+@@ -4,8 +4,9 @@
+ //! via `#[path = "ee/hooks.rs"]` to add cloud-specific telemetry.
+ 
+ use std::pin::Pin;
++use std::task::{Context, Poll};
+ 
+-use futures_util::TryStreamExt;
++use futures_util::{Stream, TryStreamExt};
+ use http_body_util::{Either, Full, StreamBody};
+ use hyper::body::{Bytes, Frame};
+ use hyper::Response;
+@@ -105,20 +106,21 @@ fn capture_header_allowlist() -> &'static [String] {
+     })
+ }
+ 
+-/// Serialize the allowlisted response headers as a JSON object string (for the
+-/// `request_logs.extra_data` jsonb column), or "" when none are configured or
+-/// present.
+-fn capture_headers(resp_headers: &hyper::HeaderMap) -> String {
+-    let allow = capture_header_allowlist();
+-    if allow.is_empty() {
+-        return String::new();
+-    }
++/// Collect the allowlisted response headers into a JSON object (for the
++/// `request_logs.extra_data` jsonb column). Empty when none are configured
++/// or present on the response.
++fn capture_headers(resp_headers: &hyper::HeaderMap) -> serde_json::Map<String, serde_json::Value> {
+     let mut map = serde_json::Map::new();
+-    for name in allow {
++    for name in capture_header_allowlist() {
+         if let Some(val) = resp_headers.get(name.as_str()).and_then(|v| v.to_str().ok()) {
+             map.insert(name.clone(), serde_json::Value::String(val.to_string()));
+         }
+     }
++    map
++}
++
++/// Serialize an `extra_data` object; "" when empty (the batch INSERT maps "" → NULL).
++fn extra_data_json(map: serde_json::Map<String, serde_json::Value>) -> String {
+     if map.is_empty() {
+         String::new()
+     } else {
+@@ -126,13 +128,79 @@ fn capture_headers(resp_headers: &hyper::HeaderMap) -> String {
+     }
+ }
+ 
++/// Pass-through body stream that lets the usage tap observe each chunk and
++/// emits the telemetry event only once the upstream body has ended (or the
++/// client went away), so end-of-stream token usage rides along in
++/// `extra_data`. Bytes are forwarded unchanged and without buffering.
++struct TappedStream {
++    inner: Pin<Box<dyn Stream<Item = Result<Bytes, reqwest::Error>> + Send>>,
++    tap: Option<super::usage_tap::UsageTap>,
++    event: Option<crate::telemetry::RequestEvent>,
++    extra: serde_json::Map<String, serde_json::Value>,
++}
++
++impl TappedStream {
++    /// Emit the (single) telemetry event with headers + body usage merged.
++    fn finish(&mut self) {
++        let Some(mut event) = self.event.take() else {
++            return;
++        };
++        let mut extra = std::mem::take(&mut self.extra);
++        if let Some(tap) = self.tap.take() {
++            for (k, v) in tap.finish() {
++                extra.insert(k, v);
++            }
++        }
++        event.captured_headers = extra_data_json(extra);
++        crate::telemetry::on_request(event);
++    }
++}
++
++impl Stream for TappedStream {
++    type Item = Result<Frame<Bytes>, reqwest::Error>;
++
++    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
++        let this = self.get_mut();
++        match this.inner.as_mut().poll_next(cx) {
++            Poll::Ready(Some(Ok(bytes))) => {
++                if let Some(tap) = this.tap.as_mut() {
++                    tap.observe(&bytes);
++                }
++                Poll::Ready(Some(Ok(Frame::data(bytes))))
++            }
++            Poll::Ready(Some(Err(e))) => {
++                this.finish();
++                Poll::Ready(Some(Err(e)))
++            }
++            Poll::Ready(None) => {
++                this.finish();
++                Poll::Ready(None)
++            }
++            Poll::Pending => Poll::Pending,
++        }
++    }
++}
++
++impl Drop for TappedStream {
++    /// Client disconnect / abandoned stream: still record what we have.
++    fn drop(&mut self) {
++        self.finish();
++    }
++}
++
+ pub(crate) fn track_and_wrap(
+     meta: RequestMeta,
+     _rules: &ResolvedRules,
+     resp_headers: &hyper::HeaderMap,
+-    stream: impl futures_util::Stream<Item = Result<Bytes, reqwest::Error>> + Send + 'static,
++    stream: impl Stream<Item = Result<Bytes, reqwest::Error>> + Send + 'static,
+ ) -> BodyStream {
+-    crate::telemetry::on_request(crate::telemetry::RequestEvent {
++    let extra = capture_headers(resp_headers);
++    let tap = if super::usage_tap::wants_host(&meta.host) {
++        Some(super::usage_tap::UsageTap::from_headers(resp_headers))
++    } else {
++        None
++    };
++    let event = crate::telemetry::RequestEvent {
+         org_id: meta.org_id,
+         project_id: meta.project_id,
+         agent_id: meta.agent_id,
+@@ -153,7 +221,59 @@ pub(crate) fn track_and_wrap(
+         existing_log_id: meta.existing_log_id,
+         log_id: None,
+         budget_charge: None,
+-        captured_headers: capture_headers(resp_headers),
+-    });
+-    Box::pin(stream.map_ok(Frame::data))
++        captured_headers: String::new(),
++    };
++    match tap {
++        // Stock behaviour (plus header capture): emit at header time, pass through.
++        None => {
++            let mut event = event;
++            event.captured_headers = extra_data_json(extra);
++            crate::telemetry::on_request(event);
++            Box::pin(stream.map_ok(Frame::data))
++        }
++        // Body-usage tap: emit once the body has ended so usage is included.
++        Some(tap) => Box::pin(TappedStream {
++            inner: Box::pin(stream),
++            tap: Some(tap),
++            event: Some(event),
++            extra,
++        }),
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use futures_util::StreamExt;
++    use hyper::header::{HeaderValue, CONTENT_TYPE};
++
++    /// The tapped stream must forward every byte unchanged, in order, even
++    /// when the body is malformed, and must not panic on drop.
++    #[tokio::test]
++    async fn tapped_stream_is_byte_identical_passthrough() {
++        let chunks: Vec<&'static [u8]> = vec![
++            b"event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":3}}}\n\n",
++            b"data: {\"type\":\"message_delta\",\"usage\":{\"output_tok",
++            b"ens\":5}}\n\ndata: {broken\n\n",
++        ];
++        let expected: Vec<u8> = chunks.concat();
++        let mut headers = hyper::HeaderMap::new();
++        headers.insert(CONTENT_TYPE, HeaderValue::from_static("text/event-stream"));
++        let inner = futures_util::stream::iter(
++            chunks.into_iter().map(|c| Ok::<Bytes, reqwest::Error>(Bytes::from_static(c))),
++        );
++        let tapped = TappedStream {
++            inner: Box::pin(inner),
++            tap: Some(super::super::usage_tap::UsageTap::from_headers(&headers)),
++            event: None, // telemetry channel is not initialised in unit tests
++            extra: serde_json::Map::new(),
++        };
++        let frames: Vec<_> = tapped.collect().await;
++        let mut got = Vec::new();
++        for f in frames {
++            let data = f.expect("passthrough never errors").into_data().expect("data frame");
++            got.extend_from_slice(&data);
++        }
++        assert_eq!(got, expected);
++    }
+ }
+diff --git a/apps/gateway/src/gateway/usage_tap.rs b/apps/gateway/src/gateway/usage_tap.rs
+new file mode 100644
+index 0000000..29d2555
+--- /dev/null
++++ b/apps/gateway/src/gateway/usage_tap.rs
+@@ -0,0 +1,629 @@
++//! Response-body usage tap.
++//!
++//! Streamed LLM responses (`text/event-stream`) send their HTTP headers before
++//! the completion exists, so any upstream per-request *cost* header is `0` for
++//! them. The token usage IS in the body — in the final SSE event(s). This
++//! module observes the upstream body bytes as they pass through
++//! `hooks::track_and_wrap`, keeps ONLY a small typed usage snapshot, and hands
++//! it back (as flat `usage_*` keys) to be merged into `request_logs.extra_data`
++//! once the stream has ended.
++//!
++//! Guarantees:
++//! - bytes forwarded to the client are never modified, buffered whole, or
++//!   delayed — the scanner only *looks* at each chunk;
++//! - bounded memory: at most one partial SSE line (or one non-streamed JSON
++//!   body) up to `DEFAULT_MAX_BUFFER` is held; everything else is a few words;
++//! - fail-soft: any problem degrades to a `usage_source: unavailable-*` marker,
++//!   never an error on the client path, never a body excerpt in logs;
++//! - no pricing: raw token counts + model id only; consumers price them.
++//!
++//! Opt-in via `ONECLI_CAPTURE_BODY_USAGE_HOSTS` — comma-separated upstream
++//! hosts (with or without `:port`), or `*` for all. Unset = stock behaviour.
++//!
++//! Recognised shapes (all fields optional, unknown fields ignored):
++//! - Anthropic Messages: SSE `message_start.message.{model,usage}` (initial)
++//!   then `message_delta.usage` (cumulative, final); non-streamed JSON
++//!   `{type:"message", model, usage}`.
++//! - OpenAI Responses: SSE `response.completed|incomplete|failed
++//!   .response.{model,usage}`; non-streamed JSON `{object:"response", model, usage}`.
++//! - OpenAI Chat Completions: `{object:"chat.completion[.chunk]", model, usage}`.
++//!
++//! Semantics consumers must respect: OpenAI `input_tokens`/`prompt_tokens`
++//! INCLUDE cached tokens; Anthropic `input_tokens` EXCLUDES cache reads and
++//! cache creation; `usage_cache_creation_input_tokens` is the aggregate and
++//! the `5m`/`1h` keys are its breakdown (never sum both). `usage_api` tells
++//! which convention applies.
++
++use std::sync::OnceLock;
++use std::time::{Instant, SystemTime, UNIX_EPOCH};
++
++use serde::Deserialize;
++use serde_json::{Map, Value};
++
++/// Largest single SSE line (or non-streamed JSON body) held at once. OpenAI's
++/// `response.completed` carries the whole response, so this is generous;
++/// beyond it scanning stops and `usage_source: unavailable-oversize` is reported.
++pub(crate) const DEFAULT_MAX_BUFFER: usize = 8 * 1024 * 1024;
++
++fn tap_hosts() -> &'static [String] {
++    static HOSTS: OnceLock<Vec<String>> = OnceLock::new();
++    HOSTS.get_or_init(|| {
++        std::env::var("ONECLI_CAPTURE_BODY_USAGE_HOSTS")
++            .unwrap_or_default()
++            .split(',')
++            .map(|s| s.trim().to_ascii_lowercase())
++            .filter(|s| !s.is_empty())
++            .collect()
++    })
++}
++
++/// Whether responses from `host` (as logged, e.g. `inference-api.nvidia.com:443`)
++/// should be tapped. False when the env allowlist is unset.
++pub(crate) fn wants_host(host: &str) -> bool {
++    host_allowed(host, tap_hosts())
++}
++
++fn host_allowed(host: &str, allow: &[String]) -> bool {
++    if allow.is_empty() {
++        return false;
++    }
++    let h = host.to_ascii_lowercase();
++    let bare = h.split(':').next().unwrap_or("");
++    allow.iter().any(|p| p == "*" || *p == h || p == bare)
++}
++
++#[derive(Clone, Copy, PartialEq, Eq, Debug)]
++enum Mode {
++    Sse,
++    Json,
++    Compressed,
++    Unsupported,
++}
++
++#[derive(Clone, Copy, PartialEq, Eq, Debug)]
++enum Api {
++    AnthropicMessages,
++    OpenAiResponses,
++    OpenAiChat,
++}
++
++impl Api {
++    fn as_str(self) -> &'static str {
++        match self {
++            Api::AnthropicMessages => "anthropic_messages_v1",
++            Api::OpenAiResponses => "openai_responses_v1",
++            Api::OpenAiChat => "openai_chat_completions_v1",
++        }
++    }
++}
++
++#[derive(Default, Deserialize, Debug, Clone, PartialEq, Eq)]
++#[serde(default)]
++struct CacheCreation {
++    ephemeral_5m_input_tokens: Option<u64>,
++    ephemeral_1h_input_tokens: Option<u64>,
++}
++
++#[derive(Default, Deserialize, Debug, Clone, PartialEq, Eq)]
++#[serde(default)]
++struct TokenDetails {
++    cached_tokens: Option<u64>,
++    reasoning_tokens: Option<u64>,
++}
++
++/// Union of the usage shapes we understand.
++#[derive(Default, Deserialize, Debug, Clone, PartialEq, Eq)]
++#[serde(default)]
++struct Usage {
++    // Anthropic Messages + OpenAI Responses
++    input_tokens: Option<u64>,
++    output_tokens: Option<u64>,
++    // Anthropic
++    cache_creation_input_tokens: Option<u64>,
++    cache_read_input_tokens: Option<u64>,
++    cache_creation: Option<CacheCreation>,
++    // OpenAI Responses
++    input_tokens_details: Option<TokenDetails>,
++    output_tokens_details: Option<TokenDetails>,
++    total_tokens: Option<u64>,
++    // OpenAI Chat Completions
++    prompt_tokens: Option<u64>,
++    completion_tokens: Option<u64>,
++    prompt_tokens_details: Option<TokenDetails>,
++    completion_tokens_details: Option<TokenDetails>,
++}
++
++impl Usage {
++    /// Field-wise overlay: values present in `later` replace ours. SSE counters
++    /// are cumulative, so the final event wins; Anthropic's `message_delta`
++    /// may omit input-side fields that only `message_start` carried.
++    fn overlay(&mut self, later: Usage) {
++        macro_rules! take {
++            ($($f:ident),* $(,)?) => { $( if later.$f.is_some() { self.$f = later.$f; } )* };
++        }
++        take!(
++            input_tokens,
++            output_tokens,
++            cache_creation_input_tokens,
++            cache_read_input_tokens,
++            cache_creation,
++            input_tokens_details,
++            output_tokens_details,
++            total_tokens,
++            prompt_tokens,
++            completion_tokens,
++            prompt_tokens_details,
++            completion_tokens_details,
++        );
++    }
++
++    fn is_empty(&self) -> bool {
++        *self == Usage::default()
++    }
++}
++
++#[derive(Default, Deserialize)]
++#[serde(default)]
++struct MsgLike {
++    model: Option<String>,
++    usage: Option<Usage>,
++}
++
++/// One SSE `data:` payload or one non-streamed JSON body, loosely typed.
++#[derive(Default, Deserialize)]
++#[serde(default)]
++struct Envelope {
++    #[serde(rename = "type")]
++    kind: Option<String>,
++    object: Option<String>,
++    model: Option<String>,
++    usage: Option<Usage>,
++    /// Anthropic `message_start`.
++    message: Option<MsgLike>,
++    /// OpenAI `response.*` events.
++    response: Option<MsgLike>,
++}
++
++/// Incremental, bounded, panic-free usage scanner for one response body.
++pub(crate) struct UsageTap {
++    mode: Mode,
++    max_buffer: usize,
++    buf: Vec<u8>,
++    api: Option<Api>,
++    model: Option<String>,
++    usage: Option<Usage>,
++    /// A terminal usage event was seen (final SSE usage / whole JSON body).
++    complete: bool,
++    oversize: bool,
++    parse_errors: u32,
++    started: Instant,
++}
++
++impl UsageTap {
++    /// Decide the scanning mode from the upstream response headers.
++    pub(crate) fn from_headers(headers: &hyper::HeaderMap) -> Self {
++        let encoding = headers
++            .get(hyper::header::CONTENT_ENCODING)
++            .and_then(|v| v.to_str().ok())
++            .map(|s| s.trim().to_ascii_lowercase())
++            .unwrap_or_default();
++        let content_type = headers
++            .get(hyper::header::CONTENT_TYPE)
++            .and_then(|v| v.to_str().ok())
++            .map(|s| s.trim().to_ascii_lowercase())
++            .unwrap_or_default();
++        let mode = if !encoding.is_empty() && encoding != "identity" {
++            Mode::Compressed
++        } else if content_type.starts_with("text/event-stream") {
++            Mode::Sse
++        } else if content_type.starts_with("application/json") {
++            Mode::Json
++        } else {
++            Mode::Unsupported
++        };
++        Self {
++            mode,
++            max_buffer: DEFAULT_MAX_BUFFER,
++            buf: Vec::new(),
++            api: None,
++            model: None,
++            usage: None,
++            complete: false,
++            oversize: false,
++            parse_errors: 0,
++            started: Instant::now(),
++        }
++    }
++
++    #[cfg(test)]
++    fn with_max_buffer(mut self, max_buffer: usize) -> Self {
++        self.max_buffer = max_buffer;
++        self
++    }
++
++    /// Observe one chunk of the upstream body. Never modifies or retains the
++    /// chunk beyond the current partial line / bounded JSON buffer.
++    pub(crate) fn observe(&mut self, chunk: &[u8]) {
++        match self.mode {
++            Mode::Compressed | Mode::Unsupported => {}
++            Mode::Json => {
++                if self.oversize {
++                    return;
++                }
++                if self.buf.len() + chunk.len() > self.max_buffer {
++                    self.oversize = true;
++                    self.buf = Vec::new();
++                } else {
++                    self.buf.extend_from_slice(chunk);
++                }
++            }
++            Mode::Sse => {
++                if self.oversize {
++                    return;
++                }
++                if self.buf.len() + chunk.len() > self.max_buffer {
++                    self.oversize = true;
++                    self.buf = Vec::new();
++                    return;
++                }
++                self.buf.extend_from_slice(chunk);
++                let buf = std::mem::take(&mut self.buf);
++                let mut start = 0usize;
++                while let Some(rel) = buf[start..].iter().position(|&b| b == b'\n') {
++                    let end = start + rel;
++                    let mut line = &buf[start..end];
++                    if let Some(stripped) = line.strip_suffix(b"\r") {
++                        line = stripped;
++                    }
++                    self.handle_sse_line(line);
++                    start = end + 1;
++                }
++                // Keep only the trailing partial line for the next chunk.
++                self.buf = buf[start..].to_vec();
++            }
++        }
++    }
++
++    fn handle_sse_line(&mut self, line: &[u8]) {
++        let Some(rest) = line.strip_prefix(b"data:") else {
++            return;
++        };
++        let payload = trim_ascii_start(rest);
++        // Cheap pre-filter: only JSON objects that mention "usage" at all.
++        if payload.first() != Some(&b'{') || !contains(payload, b"\"usage\"") {
++            return;
++        }
++        match serde_json::from_slice::<Envelope>(payload) {
++            Ok(env) => self.absorb(env),
++            Err(_) => self.parse_errors = self.parse_errors.saturating_add(1),
++        }
++    }
++
++    /// Classify one envelope and fold its usage/model into the snapshot.
++    fn absorb(&mut self, env: Envelope) {
++        let kind = env.kind.as_deref().unwrap_or("");
++        let object = env.object.as_deref().unwrap_or("");
++        let (api, model, usage, terminal) = if kind == "message_start" {
++            let m = env.message.unwrap_or_default();
++            (Api::AnthropicMessages, m.model, m.usage, false)
++        } else if kind == "message_delta" || kind == "message" {
++            (Api::AnthropicMessages, env.model, env.usage, true)
++        } else if kind.starts_with("response.")
++            && env.response.as_ref().is_some_and(|r| r.usage.is_some())
++        {
++            let r = env.response.unwrap_or_default();
++            (Api::OpenAiResponses, r.model, r.usage, true)
++        } else if object == "response" {
++            (Api::OpenAiResponses, env.model, env.usage, true)
++        } else if object == "chat.completion" || object == "chat.completion.chunk" {
++            (Api::OpenAiChat, env.model, env.usage, true)
++        } else {
++            return;
++        };
++        self.api = Some(api);
++        if model.is_some() {
++            self.model = model;
++        }
++        if let Some(u) = usage {
++            if !u.is_empty() {
++                match self.usage.as_mut() {
++                    Some(cur) => cur.overlay(u),
++                    None => self.usage = Some(u),
++                }
++                if terminal {
++                    self.complete = true;
++                }
++            }
++        }
++    }
++
++    /// Consume the tap at end of body and produce the flat `usage_*` keys.
++    pub(crate) fn finish(mut self) -> Map<String, Value> {
++        if self.mode == Mode::Json && !self.oversize && !self.buf.is_empty() {
++            let buf = std::mem::take(&mut self.buf);
++            if contains(&buf, b"\"usage\"") {
++                match serde_json::from_slice::<Envelope>(&buf) {
++                    Ok(env) => self.absorb(env),
++                    Err(_) => self.parse_errors = self.parse_errors.saturating_add(1),
++                }
++            }
++        }
++
++        let mut out = Map::new();
++        let source = match self.mode {
++            Mode::Compressed => "unavailable-compressed",
++            Mode::Unsupported => "unsupported-content-type",
++            Mode::Sse if self.usage.is_some() => "sse",
++            Mode::Json if self.usage.is_some() => "json",
++            _ if self.oversize => "unavailable-oversize",
++            _ if self.parse_errors > 0 => "unavailable-parse",
++            _ => "none",
++        };
++        out.insert("usage_source".to_string(), Value::from(source));
++        if let Some(api) = self.api {
++            out.insert("usage_api".to_string(), Value::from(api.as_str()));
++        }
++        if let Some(model) = self.model.take() {
++            out.insert("usage_model".to_string(), Value::from(model));
++        }
++        if let Some(u) = self.usage.take() {
++            let input = u.input_tokens.or(u.prompt_tokens);
++            let output = u.output_tokens.or(u.completion_tokens);
++            let cache_read = u
++                .cache_read_input_tokens
++                .or(u.input_tokens_details.as_ref().and_then(|d| d.cached_tokens))
++                .or(u.prompt_tokens_details.as_ref().and_then(|d| d.cached_tokens));
++            let reasoning = u
++                .output_tokens_details
++                .as_ref()
++                .and_then(|d| d.reasoning_tokens)
++                .or(u.completion_tokens_details.as_ref().and_then(|d| d.reasoning_tokens));
++            let (c5, c1) = match &u.cache_creation {
++                Some(c) => (c.ephemeral_5m_input_tokens, c.ephemeral_1h_input_tokens),
++                None => (None, None),
++            };
++            put(&mut out, "usage_input_tokens", input);
++            put(&mut out, "usage_output_tokens", output);
++            put(&mut out, "usage_cache_read_input_tokens", cache_read);
++            put(&mut out, "usage_cache_creation_input_tokens", u.cache_creation_input_tokens);
++            put(&mut out, "usage_cache_creation_5m_input_tokens", c5);
++            put(&mut out, "usage_cache_creation_1h_input_tokens", c1);
++            put(&mut out, "usage_reasoning_output_tokens", reasoning);
++            put(&mut out, "usage_total_tokens", u.total_tokens);
++            out.insert("usage_complete".to_string(), Value::Bool(self.complete));
++        }
++        if self.parse_errors > 0 {
++            out.insert("usage_parse_errors".to_string(), Value::from(self.parse_errors));
++        }
++        out.insert(
++            "usage_body_ms".to_string(),
++            Value::from(self.started.elapsed().as_millis() as u64),
++        );
++        let now_ms = SystemTime::now()
++            .duration_since(UNIX_EPOCH)
++            .map(|d| d.as_millis() as u64)
++            .unwrap_or(0);
++        out.insert("usage_observed_at_ms".to_string(), Value::from(now_ms));
++        out
++    }
++}
++
++fn put(out: &mut Map<String, Value>, key: &str, v: Option<u64>) {
++    if let Some(n) = v {
++        out.insert(key.to_string(), Value::from(n));
++    }
++}
++
++fn trim_ascii_start(mut s: &[u8]) -> &[u8] {
++    while let Some((first, rest)) = s.split_first() {
++        if first.is_ascii_whitespace() {
++            s = rest;
++        } else {
++            break;
++        }
++    }
++    s
++}
++
++fn contains(hay: &[u8], needle: &[u8]) -> bool {
++    needle.is_empty() || hay.windows(needle.len()).any(|w| w == needle)
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use hyper::header::{HeaderValue, CONTENT_ENCODING, CONTENT_TYPE};
++
++    fn headers(content_type: &str, encoding: Option<&str>) -> hyper::HeaderMap {
++        let mut h = hyper::HeaderMap::new();
++        h.insert(CONTENT_TYPE, HeaderValue::from_str(content_type).unwrap());
++        if let Some(e) = encoding {
++            h.insert(CONTENT_ENCODING, HeaderValue::from_str(e).unwrap());
++        }
++        h
++    }
++
++    /// Feed `body` in `n`-byte chunks and return the usage keys minus the
++    /// timing fields (which legitimately differ between runs).
++    fn run(content_type: &str, encoding: Option<&str>, body: &[u8], n: usize) -> Map<String, Value> {
++        let mut tap = UsageTap::from_headers(&headers(content_type, encoding));
++        for chunk in body.chunks(n.max(1)) {
++            tap.observe(chunk);
++        }
++        let mut out = tap.finish();
++        out.remove("usage_body_ms");
++        out.remove("usage_observed_at_ms");
++        out
++    }
++
++    const ANTHROPIC_SSE: &str = "event: message_start\r\n\
++data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"claude-sonnet-5\",\"content\":[],\"usage\":{\"input_tokens\":25,\"cache_creation_input_tokens\":7,\"cache_read_input_tokens\":1000,\"output_tokens\":1}}}\r\n\
++\r\n\
++event: content_block_start\r\n\
++data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\r\n\
++\r\n\
++event: content_block_delta\r\n\
++data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"the \\\"usage\\\" field is {\\\"input_tokens\\\":999999}\"}}\r\n\
++\r\n\
++event: message_delta\r\n\
++data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"input_tokens\":25,\"cache_creation_input_tokens\":7,\"cache_read_input_tokens\":1000,\"output_tokens\":42,\"cache_creation\":{\"ephemeral_5m_input_tokens\":7,\"ephemeral_1h_input_tokens\":0}}}\r\n\
++\r\n\
++event: message_stop\r\n\
++data: {\"type\":\"message_stop\"}\r\n\
++\r\n";
++
++    const OPENAI_RESPONSES_SSE: &str = "event: response.created\n\
++data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_1\",\"object\":\"response\",\"model\":\"gpt-5.6-sol\",\"usage\":null}}\n\
++\n\
++event: response.output_text.delta\n\
++data: {\"type\":\"response.output_text.delta\",\"delta\":\"usage\"}\n\
++\n\
++event: response.completed\n\
++data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"object\":\"response\",\"model\":\"gpt-5.6-sol\",\"usage\":{\"input_tokens\":12,\"input_tokens_details\":{\"cached_tokens\":4},\"output_tokens\":7,\"output_tokens_details\":{\"reasoning_tokens\":3},\"total_tokens\":19}}}\n\
++\n";
++
++    fn expect_anthropic(out: &Map<String, Value>) {
++        assert_eq!(out["usage_source"], "sse");
++        assert_eq!(out["usage_api"], "anthropic_messages_v1");
++        assert_eq!(out["usage_model"], "claude-sonnet-5");
++        assert_eq!(out["usage_input_tokens"], 25);
++        assert_eq!(out["usage_output_tokens"], 42);
++        assert_eq!(out["usage_cache_read_input_tokens"], 1000);
++        assert_eq!(out["usage_cache_creation_input_tokens"], 7);
++        assert_eq!(out["usage_cache_creation_5m_input_tokens"], 7);
++        assert_eq!(out["usage_cache_creation_1h_input_tokens"], 0);
++        assert_eq!(out["usage_complete"], true);
++        assert!(out.get("usage_parse_errors").is_none());
++    }
++
++    #[test]
++    fn anthropic_sse_final_usage_wins_regardless_of_chunking() {
++        let whole = run("text/event-stream; charset=utf-8", None, ANTHROPIC_SSE.as_bytes(), usize::MAX);
++        expect_anthropic(&whole);
++        for n in [1usize, 7, 64, 1000] {
++            let out = run("text/event-stream", None, ANTHROPIC_SSE.as_bytes(), n);
++            assert_eq!(out, whole, "chunk size {n}");
++        }
++    }
++
++    #[test]
++    fn anthropic_sse_without_final_delta_is_incomplete() {
++        let cut = ANTHROPIC_SSE.find("event: message_delta").unwrap();
++        let out = run("text/event-stream", None, &ANTHROPIC_SSE.as_bytes()[..cut], 13);
++        assert_eq!(out["usage_source"], "sse");
++        assert_eq!(out["usage_input_tokens"], 25);
++        assert_eq!(out["usage_output_tokens"], 1);
++        assert_eq!(out["usage_complete"], false);
++    }
++
++    #[test]
++    fn openai_responses_sse() {
++        let whole = run("text/event-stream", None, OPENAI_RESPONSES_SSE.as_bytes(), usize::MAX);
++        assert_eq!(whole["usage_source"], "sse");
++        assert_eq!(whole["usage_api"], "openai_responses_v1");
++        assert_eq!(whole["usage_model"], "gpt-5.6-sol");
++        assert_eq!(whole["usage_input_tokens"], 12);
++        assert_eq!(whole["usage_output_tokens"], 7);
++        assert_eq!(whole["usage_cache_read_input_tokens"], 4);
++        assert_eq!(whole["usage_reasoning_output_tokens"], 3);
++        assert_eq!(whole["usage_total_tokens"], 19);
++        assert_eq!(whole["usage_complete"], true);
++        for n in [1usize, 5, 33] {
++            assert_eq!(run("text/event-stream", None, OPENAI_RESPONSES_SSE.as_bytes(), n), whole);
++        }
++    }
++
++    #[test]
++    fn non_streamed_json_bodies() {
++        let anthropic = br#"{"id":"msg","type":"message","role":"assistant","model":"claude-haiku-4-5","content":[{"type":"text","text":"usage"}],"usage":{"input_tokens":8,"output_tokens":3,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}"#;
++        let out = run("application/json", None, anthropic, 3);
++        assert_eq!(out["usage_source"], "json");
++        assert_eq!(out["usage_api"], "anthropic_messages_v1");
++        assert_eq!(out["usage_model"], "claude-haiku-4-5");
++        assert_eq!(out["usage_input_tokens"], 8);
++        assert_eq!(out["usage_output_tokens"], 3);
++        assert_eq!(out["usage_cache_read_input_tokens"], 0);
++        assert_eq!(out["usage_complete"], true);
++
++        let openai = br#"{"id":"resp","object":"response","model":"gpt-5.6-sol","output":[],"usage":{"input_tokens":5,"output_tokens":9,"total_tokens":14}}"#;
++        let out = run("application/json; charset=utf-8", None, openai, 1000);
++        assert_eq!(out["usage_source"], "json");
++        assert_eq!(out["usage_api"], "openai_responses_v1");
++        assert_eq!(out["usage_input_tokens"], 5);
++        assert_eq!(out["usage_output_tokens"], 9);
++        assert_eq!(out["usage_total_tokens"], 14);
++
++        let chat = br#"{"id":"c","object":"chat.completion","model":"gpt-x","choices":[],"usage":{"prompt_tokens":3,"completion_tokens":2,"prompt_tokens_details":{"cached_tokens":1},"completion_tokens_details":{"reasoning_tokens":1}}}"#;
++        let out = run("application/json", None, chat, 4);
++        assert_eq!(out["usage_api"], "openai_chat_completions_v1");
++        assert_eq!(out["usage_input_tokens"], 3);
++        assert_eq!(out["usage_output_tokens"], 2);
++        assert_eq!(out["usage_cache_read_input_tokens"], 1);
++        assert_eq!(out["usage_reasoning_output_tokens"], 1);
++    }
++
++    #[test]
++    fn chat_completion_chunk_with_usage() {
++        let sse = "data: {\"id\":\"c\",\"object\":\"chat.completion.chunk\",\"model\":\"gpt-x\",\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n\
++data: {\"id\":\"c\",\"object\":\"chat.completion.chunk\",\"model\":\"gpt-x\",\"choices\":[],\"usage\":{\"prompt_tokens\":30,\"completion_tokens\":4}}\n\n\
++data: [DONE]\n\n";
++        let out = run("text/event-stream", None, sse.as_bytes(), 9);
++        assert_eq!(out["usage_source"], "sse");
++        assert_eq!(out["usage_api"], "openai_chat_completions_v1");
++        assert_eq!(out["usage_input_tokens"], 30);
++        assert_eq!(out["usage_output_tokens"], 4);
++        assert_eq!(out["usage_complete"], true);
++    }
++
++    #[test]
++    fn malformed_bodies_are_fail_soft() {
++        let bad_sse = b"data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":\n\ndata: [DONE]\n\n";
++        let out = run("text/event-stream", None, bad_sse, 6);
++        assert_eq!(out["usage_source"], "unavailable-parse");
++        assert_eq!(out["usage_parse_errors"], 1);
++        assert!(out.get("usage_input_tokens").is_none());
++
++        let bad_json = b"{\"usage\": not json";
++        let out = run("application/json", None, bad_json, 100);
++        assert_eq!(out["usage_source"], "unavailable-parse");
++
++        let no_usage = b"data: {\"type\":\"ping\"}\n\n";
++        let out = run("text/event-stream", None, no_usage, 100);
++        assert_eq!(out["usage_source"], "none");
++        assert!(out.get("usage_api").is_none());
++    }
++
++    #[test]
++    fn oversize_line_is_reported_not_buffered() {
++        let mut tap = UsageTap::from_headers(&headers("text/event-stream", None)).with_max_buffer(64);
++        let long_line = format!("data: {{\"usage\":\"{}\"}}\n", "x".repeat(200));
++        for chunk in long_line.as_bytes().chunks(10) {
++            tap.observe(chunk);
++        }
++        assert!(tap.buf.len() <= 64);
++        let out = tap.finish();
++        assert_eq!(out["usage_source"], "unavailable-oversize");
++    }
++
++    #[test]
++    fn compressed_and_unsupported_bodies_are_not_scanned() {
++        let out = run("text/event-stream", Some("gzip"), ANTHROPIC_SSE.as_bytes(), 8);
++        assert_eq!(out["usage_source"], "unavailable-compressed");
++        assert!(out.get("usage_api").is_none());
++        let out = run("text/html", None, b"<html>usage</html>", 8);
++        assert_eq!(out["usage_source"], "unsupported-content-type");
++        // identity encoding is not compression
++        let out = run("text/event-stream", Some("identity"), ANTHROPIC_SSE.as_bytes(), 8);
++        assert_eq!(out["usage_source"], "sse");
++    }
++
++    #[test]
++    fn host_allowlist() {
++        let allow = vec!["inference-api.nvidia.com".to_string()];
++        assert!(host_allowed("inference-api.nvidia.com:443", &allow));
++        assert!(host_allowed("INFERENCE-API.nvidia.com", &allow));
++        assert!(!host_allowed("api.github.com:443", &allow));
++        assert!(!host_allowed("inference-api.nvidia.com:443", &[]));
++        assert!(host_allowed("anything:443", &["*".to_string()]));
++    }
++}
+diff --git a/apps/gateway/src/telemetry.rs b/apps/gateway/src/telemetry.rs
+index bc59f78..2d15541 100644
+--- a/apps/gateway/src/telemetry.rs
++++ b/apps/gateway/src/telemetry.rs
+@@ -68,7 +68,7 @@ async fn update_batch(pool: &PgPool, events: &[RequestEvent]) {
+         let Some(log_id) = event.existing_log_id.as_ref() else {
+             continue;
+         };
+-        let extra = match &event.decision {
++        let approval = match &event.decision {
+             RequestDecision::ApprovalApproved {
+                 approval_id,
+                 triggered_at,
+@@ -80,8 +80,7 @@ async fn update_batch(pool: &PgPool, events: &[RequestEvent]) {
+                 "triggered_at": triggered_at,
+                 "resolved_at": resolved_at,
+                 "approved_by": approved_by,
+-            })
+-            .to_string(),
++            }),
+             RequestDecision::ApprovalDenied {
+                 approval_id,
+                 reason,
+@@ -95,10 +94,28 @@ async fn update_batch(pool: &PgPool, events: &[RequestEvent]) {
+                 "triggered_at": triggered_at,
+                 "resolved_at": resolved_at,
+                 "approved_by": approved_by,
+-            })
+-            .to_string(),
+-            _ => "{}".to_string(),
++            }),
++            _ => json!({}),
+         };
++        // Merge: start from whatever the event already captured (allowlisted
++        // response headers, body usage) and let the approval fields win on
++        // conflict. Previously only the approval fields were written here, so
++        // captured data was silently dropped for approved requests.
++        let mut extra: serde_json::Map<String, serde_json::Value> = if event.captured_headers.is_empty() {
++            serde_json::Map::new()
++        } else {
++            serde_json::from_str::<serde_json::Value>(&event.captured_headers)
++                .ok()
++                .and_then(|v| match v {
++                    serde_json::Value::Object(m) => Some(m),
++                    _ => None,
++                })
++                .unwrap_or_default()
++        };
++        if let serde_json::Value::Object(fields) = approval {
++            extra.extend(fields);
++        }
++        let extra = serde_json::Value::Object(extra).to_string();
+         if let Err(e) = sqlx::query(
+             "UPDATE request_logs \
+              SET status = $1, latency_ms = $2, \

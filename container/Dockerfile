@@ -24,7 +24,7 @@ ARG INSTALL_CJK_FONTS=false
 # all users. The global Node CLIs (claude-code, agent-browser, claude-trace,
 # codex) are pinned in cli-tools.json so a skill can add one with a json-merge;
 # Bun (the runtime) is pinned here because it installs from a different source.
-ARG BUN_VERSION=1.3.12
+ARG BUN_VERSION=1.4.0
 
 # Enable contrib + non-free + non-free-firmware so per-group container_configs
 # can install packages like nvidia-cuda-toolkit (in non-free) without surprise

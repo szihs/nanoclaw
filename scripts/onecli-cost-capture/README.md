@@ -60,3 +60,65 @@ To confirm correctness, make a call with `curl -i` from inside a coworker contai
 The change is a generic "capture response headers into request_logs" feature — a clean PR candidate for
 `onecli/onecli` (not litellm- or NanoClaw-specific). Keep this patch pinned to the OneCLI version it was
 cut against (`v1.41.0`); re-cut on upgrade.
+
+## v2 — body usage tap (`gateway-body-usage-tap.patch`, applies ON TOP of the header patch)
+
+**Why.** The header capture alone does NOT measure coworker cost: for **streamed** responses
+(`text/event-stream` — i.e. ~all Claude Agent-SDK and Codex traffic) litellm's
+`x-litellm-response-cost-original` is `0.0` (Anthropic) or a tiny prompt-only partial (OpenAI
+`/v1/responses`), because HTTP headers are emitted before the completion exists. Verified on prod
+2026-09-03 with an 8-probe matrix (haiku / sonnet-5 / bedrock-opus-4-8 / gpt-5.6-sol × stream on/off):
+non-streamed rows carry the real cost, streamed rows carry `0.0` while `x-litellm-key-spend` climbs.
+The token usage IS in the body — in the final SSE event(s).
+
+**What it does.** `apps/gateway/src/gateway/usage_tap.rs` (new, shared) + `hooks.rs`: the response body
+stream is wrapped in a pass-through that *observes* each chunk (bytes forwarded unchanged, never buffered
+whole, never delayed), keeps only a small typed usage snapshot, and emits the telemetry event once the
+body has ended (or the client disconnected), so the end-of-stream usage lands in `extra_data`.
+`telemetry.rs`: `update_batch` (approved requests) now MERGES captured data instead of dropping it.
+
+Recognised: Anthropic Messages (`message_start` → final `message_delta`, and non-streamed JSON),
+OpenAI Responses (`response.completed|incomplete|failed`, and JSON), OpenAI Chat Completions
+(`chat.completion[.chunk]`). Compressed bodies are not decompressed (`unavailable-compressed`);
+oversize / malformed bodies degrade to `unavailable-oversize` / `unavailable-parse`. No pricing in Rust —
+raw counts only; NanoClaw prices them with its date-aware, ccusage-parity-validated table.
+
+**Opt-in.** `ONECLI_CAPTURE_BODY_USAGE_HOSTS=inference-api.nvidia.com` (comma-separated hosts, with or
+without `:port`, or `*`). Unset = the header-only behaviour above.
+
+**Keys written to `request_logs.extra_data` (flat, beside the captured headers):**
+
+| key | meaning |
+|---|---|
+| `usage_source` | `sse` \| `json` \| `none` \| `unavailable-compressed` \| `unavailable-oversize` \| `unavailable-parse` \| `unsupported-content-type` |
+| `usage_api` | `anthropic_messages_v1` \| `openai_responses_v1` \| `openai_chat_completions_v1` |
+| `usage_model` | model id reported IN the body (keep litellm's `x-litellm-model-id` header separate) |
+| `usage_input_tokens`, `usage_output_tokens` | **OpenAI input INCLUDES cached tokens; Anthropic input EXCLUDES cache read/creation** |
+| `usage_cache_read_input_tokens` | Anthropic `cache_read_input_tokens` / OpenAI `cached_tokens` |
+| `usage_cache_creation_input_tokens` | Anthropic aggregate; `usage_cache_creation_{5m,1h}_input_tokens` are its breakdown (never sum both) |
+| `usage_reasoning_output_tokens`, `usage_total_tokens` | OpenAI |
+| `usage_complete` | a terminal usage event was seen (false = client disconnected mid-stream) |
+| `usage_body_ms`, `usage_observed_at_ms`, `usage_parse_errors` | diagnostics |
+
+**Build (both patches, in order):**
+
+```bash
+git clone --depth 1 --branch v1.41.0 https://github.com/onecli/onecli onecli-src && cd onecli-src
+git apply /path/to/gateway-response-header-capture.patch
+git apply /path/to/gateway-body-usage-tap.patch
+docker build -f docker/Dockerfile -t onecli-cost:latest .
+```
+
+**Verify (streamed rows must now carry usage):**
+
+```sql
+SELECT extra_data->>'usage_source' src, count(*),
+       sum((extra_data->>'usage_input_tokens')::bigint) input_tok,
+       sum((extra_data->>'usage_output_tokens')::bigint) output_tok
+FROM request_logs
+WHERE host LIKE 'inference-api.nvidia.com%' AND created_at > now() - interval '1 hour'
+GROUP BY 1;
+```
+
+Downstream precedence: body usage → priced cost (NanoClaw table); non-streamed header cost = comparison
+only; streamed header cost = informational; no usage → **UNKNOWN, never 0**.

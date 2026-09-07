@@ -87,23 +87,46 @@ export function stageGroupPersona(groupDir: string, instructions: string): boole
   }
 }
 
-/** Read a group's standing instructions without following symlinks. */
-export function readGroupPersona(groupDir: string): string | null {
-  const file = path.join(groupDir, PERSONA_PREPEND_FILE);
+/**
+ * Read one standing-instructions file without following symlinks, reporting
+ * PRESENCE separately from content.
+ *
+ * `present` distinguishes "no such path" from "a path exists but yields no
+ * usable instructions" (empty, whitespace-only, a directory, a symlink). Callers
+ * that fall back to a second file need that distinction: treating a null content
+ * as absence lets an existing-but-empty canonical file hand precedence to a stale
+ * legacy one.
+ *
+ * `O_NOFOLLOW` is the security boundary, not a nicety. These files live in the
+ * group directory, which is mounted read-WRITE into the container, so their
+ * content is agent-authored — and it lands verbatim in the next composed system
+ * prompt. Following a symlink here turns "edit your own persona" into an
+ * arbitrary host-file read.
+ */
+export function readStandingInstructionsFile(file: string): { present: boolean; content: string | null } {
   let fd: number | undefined;
   try {
     fd = fs.openSync(file, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
-    if (!fs.fstatSync(fd).isFile()) return null;
+    if (!fs.fstatSync(fd).isFile()) return { present: true, content: null };
     const content = fs.readFileSync(fd, 'utf-8').trim();
-    return content || null;
+    return { present: true, content: content || null };
   } catch (err) {
-    if (typeof err === 'object' && err !== null && 'code' in err && err.code === 'ENOENT') return null;
+    if (typeof err === 'object' && err !== null && 'code' in err && err.code === 'ENOENT') {
+      return { present: false, content: null };
+    }
+    // ELOOP from O_NOFOLLOW lands here: the path exists, so `present` stays true
+    // and no fallback may override it.
     log.warn('Could not read group standing instructions; omitting persona', {
       file,
       error: err instanceof Error ? err.message : String(err),
     });
-    return null;
+    return { present: true, content: null };
   } finally {
     if (fd !== undefined) fs.closeSync(fd);
   }
+}
+
+/** Read a group's standing instructions without following symlinks. */
+export function readGroupPersona(groupDir: string): string | null {
+  return readStandingInstructionsFile(path.join(groupDir, PERSONA_PREPEND_FILE)).content;
 }

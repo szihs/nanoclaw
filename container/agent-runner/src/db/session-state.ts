@@ -345,6 +345,16 @@ export interface CostControlProtocolState {
   version: number;
   runnerInstanceId: string;
   readyAt: string;
+  /**
+   * Live-control operations this runner build can handle. `set_ceiling` (NanoClaw
+   * #1) rides the `version` gate; `reconcile` (issue #1327) ships on the SAME
+   * version 2, so it cannot be told apart by version alone — the host requires
+   * this list to include `'reconcile'` before enqueueing one, so a set-ceiling-only
+   * runner is refused rather than silently consuming-and-dropping the control
+   * message (which would strand the host ledger row). Absent on a runner that
+   * predates the capability list.
+   */
+  operations?: string[];
 }
 
 const COST_CONTROL_PROTOCOL_KEY = 'cost_control_protocol';
@@ -427,6 +437,63 @@ export function commitCostCeilingAdjustmentOutcome(params: {
   getAgentMailbox().operations.commitCostCeilingAdjustment({
     inboundMessageId: params.inboundMessageId,
     receiptId: `cost-ceiling-adjustment-result:${params.receipt.adjustmentId}`,
+    receiptContent: JSON.stringify(params.receipt),
+    ...(params.newCostCap ? { costCapKey: COST_CAP_KEY, costCapValue: JSON.stringify(params.newCostCap) } : {}),
+  });
+}
+
+/** The shape of the `cost_reconcile_result` receipt row (outbound `kind:'system'`),
+ *  the runner's confirmation of a `cost_reconcile` control message (issue #1327 —
+ *  set live enforcement spend to the transcript oracle). Field-for-field mirror of
+ *  the host's expectations — see `ingestCostReconcileReceipt` in
+ *  `src/modules/cost-ceiling-adjustment/index.ts`. */
+export interface CostReconcileReceipt {
+  action: 'cost_reconcile_result';
+  protocolVersion: 2;
+  adjustmentId: string;
+  sessionId: string;
+  outcome: 'applied' | 'conflict' | 'rejected';
+  expectedEpochKey: string;
+  previousEpochKey?: string;
+  resultEpochKey?: string;
+  /** The live ceiling at submission — UNCHANGED by a reconcile. Echoed as both
+   *  `expectedCeilingCents` (the CAS basis) and `resultCeilingCents`. */
+  expectedCeilingCents: number;
+  resultCeilingCents?: number;
+  /** The spend the host expected (CAS third leg); echoed for observability. */
+  expectedSpentCents?: number;
+  /** The reconcile target (integer cents) — the field the host CAS validates. */
+  targetSpentCents: number;
+  previousSpentCents?: number;
+  resultSpentCents?: number;
+  /** Result spend in USD (== resultSpentCents/100), for parity with the
+   *  set-ceiling receipt's `spentUsd` and the ledger's `result_spent_usd`. */
+  spentUsd?: number;
+  status?: string;
+  reason?: string;
+  /** Echoed from the control message (issue #1327): this reconcile was `--force`d
+   *  past an already-decided card. Audit only — the runner applies no card logic. */
+  forced?: boolean;
+}
+
+/**
+ * Commit a `cost_reconcile` outcome ATOMICALLY — identical money-safety boundary
+ * to `commitCostCeilingAdjustmentOutcome` (cap state on `applied` only + receipt +
+ * inbound `processing_ack` → 'completed', all-or-nothing in one outbound-DB
+ * transaction). Reuses the SAME generic mailbox operation; only the receipt id
+ * namespace (`cost-reconcile-result:`) and content differ. Deliberately does NOT
+ * catch/swallow — a thrown error must leave the inbound message unclaimed so it is
+ * retried/recovered rather than silently dropped or double-applied.
+ */
+export function commitCostReconcileOutcome(params: {
+  inboundMessageId: string;
+  receipt: CostReconcileReceipt;
+  /** Present only for `outcome:'applied'`. */
+  newCostCap?: CostCapState;
+}): void {
+  getAgentMailbox().operations.commitCostCeilingAdjustment({
+    inboundMessageId: params.inboundMessageId,
+    receiptId: `cost-reconcile-result:${params.receipt.adjustmentId}`,
     receiptContent: JSON.stringify(params.receipt),
     ...(params.newCostCap ? { costCapKey: COST_CAP_KEY, costCapValue: JSON.stringify(params.newCostCap) } : {}),
   });

@@ -35,10 +35,12 @@ import {
   setCostCap,
   setCostControlProtocol,
   commitCostCeilingAdjustmentOutcome,
+  commitCostReconcileOutcome,
   type CostCapState,
   type CostCapStatus,
   type CostCapWindow,
   type CostCeilingAdjustmentReceipt,
+  type CostReconcileReceipt,
 } from './db/session-state.js';
 import { getConfig } from './config.js';
 import { priceUsage } from './pricing.js';
@@ -309,6 +311,17 @@ const COST_ACCOUNTING_VERSION = 2;
  */
 const COST_CONTROL_PROTOCOL_VERSION = 2;
 
+/**
+ * Live-control operations this runner build can apply, published in the readiness
+ * handshake so the host can gate each one (NanoClaw #1 set-ceiling + issue #1327
+ * reconcile). Reconcile rides the same protocol version 2 as set-ceiling, so the
+ * host cannot infer it from `version` alone — a runner that predates reconcile
+ * advertises no list, and the host refuses to enqueue a reconcile to it (fail
+ * loud, never strand). Keep in sync with the operations `applyCostOverride`
+ * dispatches.
+ */
+const RUNNER_COST_CONTROL_OPERATIONS: string[] = ['set_ceiling', 'reconcile'];
+
 /** Current UTC day as "YYYY-MM-DD" — the daily-window bucket key. */
 function utcDayKey(): string {
   return new Date().toISOString().slice(0, 10);
@@ -337,7 +350,16 @@ function utcDayKey(): string {
 function publishRunnerReadiness(): void {
   const runnerInstanceId = process.env.NANOCLAW_RUNNER_INSTANCE_ID || '';
   if (!runnerInstanceId) return;
-  setCostControlProtocol({ version: COST_CONTROL_PROTOCOL_VERSION, runnerInstanceId, readyAt: new Date().toISOString() });
+  setCostControlProtocol({
+    version: COST_CONTROL_PROTOCOL_VERSION,
+    runnerInstanceId,
+    readyAt: new Date().toISOString(),
+    // Capability list the host gates live-control operations on. `reconcile`
+    // (issue #1327) ships on the SAME version as `set_ceiling`, so the host
+    // cannot infer it from the version number — it must be advertised explicitly
+    // or the host refuses to enqueue a reconcile to this runner.
+    operations: RUNNER_COST_CONTROL_OPERATIONS,
+  });
 }
 
 /**
@@ -637,10 +659,16 @@ function computeCostStatus(): CostCapStatus {
   return 'ok';
 }
 
-function persistCostCap(): void {
-  if (!costEnabled) return;
+/**
+ * Build the full, self-consistent `cost_cap` state blob from the current live
+ * accumulator. Extracted from `persistCostCap` so the atomic `cost_reconcile`
+ * commit can write the SAME complete state (accountingVersion + codex/#65 ledger
+ * identity included) inside its single outbound-DB transaction — unlike the
+ * set-ceiling apply, which writes a deliberately minimal blob.
+ */
+function buildCostCapState(): CostCapState {
   const status = computeCostStatus();
-  const state: CostCapState = {
+  return {
     capUsd: costCapUsd,
     spentUsd: costSpentUsd,
     status,
@@ -687,7 +715,11 @@ function persistCostCap(): void {
     // the host ingests it from this durable state (read-only) to build the card.
     ...(costEpisodeId && (status === 'escalated' || status === 'stopped') ? { episodeId: costEpisodeId } : {}),
   };
-  setCostCap(state);
+}
+
+function persistCostCap(): void {
+  if (!costEnabled) return;
+  setCostCap(buildCostCapState());
 }
 
 /**
@@ -942,7 +974,9 @@ function recordCodexLedger(files: ReturnType<typeof scanCodexRollouts>['files'],
     // for pre-existing history a baseline is absorbing — first-write-wins on the
     // id keeps a call in whichever gen first saw it, so a later fold cannot
     // promote baselined history into the reconciled gen.
-    for (const f of files) for (const e of f.dedupedEvents) recordCostEvent(db, codexCallToEvent(e, now), RATE_VERSION, RATE_TABLE, now, windowGen);
+    for (const f of files)
+      for (const e of f.dedupedEvents)
+        recordCostEvent(db, codexCallToEvent(e, now), RATE_VERSION, RATE_TABLE, now, windowGen);
   } catch {
     /* best-effort */
   }
@@ -1382,6 +1416,15 @@ function emitCostEscalation(reason: 'cap' | 'ceiling'): void {
 const MAX_CEILING_CENTS = 100_000;
 
 /**
+ * Server-enforced sanity maximum for a `cost_reconcile` target — $1,000,000.00 in
+ * integer cents (issue #1327). Enforced HERE independently of the host's identical
+ * check: not a policy limit (the reconcile target is the transcript oracle, which
+ * the runner does not second-guess) but defense in depth against a bug/typo in the
+ * control message. No single session's real cost approaches this.
+ */
+const MAX_SPENT_CENTS = 100_000_000;
+
+/**
  * The union of every field either `cost_override` shape can carry — the legacy
  * `decision:'continue'|'stop'` payload and the "set ceiling v2"
  * `protocolVersion:2, operation:'set_ceiling'` payload. Parsed once as this
@@ -1397,6 +1440,13 @@ interface CostOverrideContent {
   expectedEpochKey?: unknown;
   expectedCeilingCents?: unknown;
   targetCeilingCents?: unknown;
+  /** `operation:'reconcile'` only — the transcript-oracle spend target (integer cents). */
+  targetSpentCents?: unknown;
+  /** `operation:'reconcile'` only — the live spend the host read (CAS third leg, integer cents). */
+  expectedSpentCents?: unknown;
+  /** `operation:'reconcile'` only — audit flag: this reconcile was `--force`d past an
+   *  already-decided card (host-side fence relaxation). Echoed in the receipt; no runner logic. */
+  forced?: unknown;
 }
 
 /**
@@ -1431,6 +1481,11 @@ function applyCostOverride(msg: MessageInRow): void {
 
   if (parsed.protocolVersion === 2 && parsed.operation === 'set_ceiling') {
     applySetCeilingOverride(msg, parsed);
+    return;
+  }
+
+  if (parsed.protocolVersion === 2 && parsed.operation === 'reconcile') {
+    applyReconcileOverride(msg, parsed);
     return;
   }
 
@@ -1718,6 +1773,218 @@ function applySetCeilingOverride(msg: MessageInRow, parsed: CostOverrideContent)
     newState,
     `set_ceiling APPLIED for adjustment ${adjustmentId}: ceiling $${(previousCeilingCents / 100).toFixed(2)} -> ` +
       `$${costCeilingUsd.toFixed(2)}, spent=$${costSpentUsd.toFixed(2)}, status=${status} (id=${msg.id})`,
+  );
+}
+
+/**
+ * `{protocolVersion:2, operation:'reconcile'}` — set the live enforcement spend
+ * (`costSpentUsd`) to an exact, operator-supplied value: the session's real,
+ * transcript-priced cost (issue #1327 remediation). The #1327 pre-fix accounting
+ * over-charged spend (once per streamed content block, measured 1.7x–17x), so
+ * sessions sit falsely cost-stopped with `costSpentUsd` ≫ ceiling; the fix stopped
+ * the over-count going forward but RETAINED the inflated figure. This corrects it
+ * to the oracle the host passes in `targetSpentCents`.
+ *
+ * Structurally a sibling of `applySetCeilingOverride`: it ALWAYS sends a receipt
+ * (`cost_reconcile_result`) so the host's ledger row can reach a terminal state,
+ * uses the SAME epoch/ceiling compare-and-set, rotates `costBudgetGen` on every
+ * successful apply (so a redelivered copy of THIS request, or a stale legacy
+ * override, refuses itself), and commits state+receipt+ack in one transaction.
+ *
+ * Money-safety invariants (pinned by `poll-loop.reconcile.test.ts`):
+ *   - THREE-leg compare-and-set: `expectedEpochKey`, `expectedCeilingCents`, AND
+ *     `expectedSpentCents` must all match live state, or the request is a
+ *     `conflict` — never partially applied. The spend leg is what makes the
+ *     absolute set safe: a turn that accrued between the host's read and here
+ *     moves live spend, so the reconcile refuses rather than erasing that accrual.
+ *   - Lower-only: `targetSpentCents` may not exceed `expectedSpentCents` (the
+ *     #1327 basis only ever OVER-counted), so a reconcile can never raise
+ *     enforcement or stop a healthy session. Enforced here, independent of the host.
+ *   - `costSpentUsd` is set VERBATIM to `targetSpentCents/100` — never clamped.
+ *   - Stop state: a correction that leaves spend at/over the ceiling stays stopped
+ *     at the exact value; one that drops below clears the CEILING hard-stop but
+ *     PRESERVES an explicit human `stop` decision (a reconcile must not resurrect a
+ *     session a human deliberately stopped). No "you were resumed" nudge. A drop
+ *     below the Tier-1 cap re-arms `escalatedAt` so the next crossing still fires.
+ *   - The persisted blob keeps `accountingVersion:2` and the #65 ledger identity
+ *     (it is built by `buildCostCapState`, not the minimal set-ceiling blob), so a
+ *     later respawn does not spuriously re-log the #1327 upgrade or re-seed the
+ *     ledger baseline.
+ */
+function applyReconcileOverride(msg: MessageInRow, parsed: CostOverrideContent): void {
+  const adjustmentId = typeof parsed.adjustmentId === 'string' && parsed.adjustmentId ? parsed.adjustmentId : undefined;
+  if (!adjustmentId) {
+    log(`reconcile control with missing/invalid adjustmentId — cannot address a receipt, ignoring (id=${msg.id})`);
+    return;
+  }
+
+  const sessionId = process.env.NANOCLAW_SESSION_ID || '';
+  const requestExpectedEpochKey =
+    typeof parsed.expectedEpochKey === 'string' ? parsed.expectedEpochKey : String(parsed.expectedEpochKey ?? '');
+  const requestExpectedCeilingCents = Number(parsed.expectedCeilingCents);
+  const requestExpectedSpentCents = Number(parsed.expectedSpentCents);
+  const requestTargetSpentCents = Number(parsed.targetSpentCents);
+  // Audit passthrough only — the host relaxed the card fence; the runner applies no
+  // card logic. Echoed in every receipt so a forced correction is traceable.
+  const requestForced = parsed.forced === true;
+
+  const commitOrThrow = (receipt: CostReconcileReceipt, newCostCap: CostCapState | undefined, logMsg: string): void => {
+    try {
+      commitCostReconcileOutcome({ inboundMessageId: msg.id, receipt, newCostCap });
+      log(logMsg);
+    } catch (err) {
+      log(`reconcile: atomic commit FAILED for adjustment ${adjustmentId} — NOT acking (id=${msg.id}): ${String(err)}`);
+      throw err;
+    }
+  };
+
+  const reject = (reason: 'immortal' | 'cost_tracking_disabled' | 'invalid_value'): void => {
+    const receipt: CostReconcileReceipt = {
+      action: 'cost_reconcile_result',
+      protocolVersion: 2,
+      adjustmentId,
+      sessionId,
+      outcome: 'rejected',
+      expectedEpochKey: requestExpectedEpochKey,
+      expectedCeilingCents: Number.isFinite(requestExpectedCeilingCents) ? requestExpectedCeilingCents : 0,
+      expectedSpentCents: Number.isFinite(requestExpectedSpentCents) ? requestExpectedSpentCents : 0,
+      targetSpentCents: Number.isFinite(requestTargetSpentCents) ? requestTargetSpentCents : 0,
+      forced: requestForced,
+      reason,
+      ...(costEnabled
+        ? {
+            resultEpochKey: String(costBudgetGen),
+            resultCeilingCents: Math.round(costCeilingUsd * 100),
+            resultSpentCents: Math.round(costSpentUsd * 100),
+            spentUsd: Number(costSpentUsd.toFixed(4)),
+            status: computeCostStatus(),
+          }
+        : {}),
+    };
+    commitOrThrow(receipt, undefined, `reconcile REJECTED (${reason}) for adjustment ${adjustmentId} (id=${msg.id})`);
+  };
+
+  if (!costEnabled) return reject('cost_tracking_disabled');
+  if (costImmortal) return reject('immortal');
+
+  const validEpoch = requestExpectedEpochKey.length > 0;
+  const validExpectedCeilingCents = Number.isInteger(requestExpectedCeilingCents) && requestExpectedCeilingCents >= 0;
+  const validExpectedSpentCents =
+    Number.isInteger(requestExpectedSpentCents) &&
+    requestExpectedSpentCents >= 0 &&
+    requestExpectedSpentCents <= MAX_SPENT_CENTS;
+  const validTargetCents =
+    Number.isInteger(requestTargetSpentCents) &&
+    requestTargetSpentCents >= 0 &&
+    requestTargetSpentCents <= MAX_SPENT_CENTS;
+  if (!validEpoch || !validExpectedCeilingCents || !validExpectedSpentCents || !validTargetCents) {
+    return reject('invalid_value');
+  }
+  // Lower-only: reconcile corrects the #1327 OVER-count, so the target can never
+  // exceed the spend it is correcting. Independent of the host's identical check —
+  // the runner never trusts the control message to have already enforced it.
+  if (requestTargetSpentCents > requestExpectedSpentCents) return reject('invalid_value');
+
+  const liveCeilingCents = Math.round(costCeilingUsd * 100);
+  const liveSpentCents = Math.round(costSpentUsd * 100);
+  const epochMatches = requestExpectedEpochKey === String(costBudgetGen);
+  const ceilingMatches = requestExpectedCeilingCents === liveCeilingCents;
+  // Third CAS leg: the spend the host read must still be live. A reconcile is an
+  // ABSOLUTE set, so applying it against a DIFFERENT current spend (a turn accrued
+  // between the host read and now) would silently erase that legitimate accrual —
+  // refuse instead, and the operator re-reads the oracle and retries.
+  const spentMatches = requestExpectedSpentCents === liveSpentCents;
+
+  if (!epochMatches || !ceilingMatches || !spentMatches) {
+    const reason = !epochMatches ? 'epoch_mismatch' : !ceilingMatches ? 'ceiling_mismatch' : 'spent_mismatch';
+    const receipt: CostReconcileReceipt = {
+      action: 'cost_reconcile_result',
+      protocolVersion: 2,
+      adjustmentId,
+      sessionId,
+      outcome: 'conflict',
+      expectedEpochKey: requestExpectedEpochKey,
+      expectedCeilingCents: requestExpectedCeilingCents,
+      expectedSpentCents: requestExpectedSpentCents,
+      targetSpentCents: requestTargetSpentCents,
+      forced: requestForced,
+      reason,
+      resultEpochKey: String(costBudgetGen),
+      resultCeilingCents: liveCeilingCents,
+      resultSpentCents: liveSpentCents,
+      spentUsd: Number(costSpentUsd.toFixed(4)),
+      status: computeCostStatus(),
+    };
+    commitOrThrow(
+      receipt,
+      undefined,
+      `reconcile CONFLICT (${reason}) for adjustment ${adjustmentId}: expected epoch=${requestExpectedEpochKey}/` +
+        `ceiling=${requestExpectedCeilingCents}¢/spent=${requestExpectedSpentCents}¢, live epoch=${costBudgetGen}/` +
+        `ceiling=${liveCeilingCents}¢/spent=${liveSpentCents}¢ (id=${msg.id})`,
+    );
+    return;
+  }
+
+  // MATCHED — apply the correction against live state.
+  const previousEpochKey = String(costBudgetGen);
+  const previousSpentCents = Math.round(costSpentUsd * 100);
+
+  costSpentUsd = requestTargetSpentCents / 100;
+  // Rotate on EVERY successful apply — fences a redelivered copy of THIS request
+  // and any stale legacy override still carrying the OLD epoch.
+  costBudgetGen++;
+  costEpisodeId = undefined;
+
+  if (!costImmortal && costCeilingUsd > 0 && costSpentUsd >= costCeilingUsd) {
+    // Still at/over the ceiling after the correction — stay (or remain) stopped.
+    costCeilingHardStop = true;
+    costStopRequested = true;
+  } else {
+    // The correction brought spend under the ceiling — clear the CEILING-derived
+    // hard stop. But do NOT resurrect a session a human explicitly STOPPED: that
+    // decision is unrelated to the inflated number, so preserve it. Only an
+    // auto/ceiling stop (no human 'stop' decision on file) resumes. No nudge:
+    // this is an accounting correction, not a human raising the budget.
+    costCeilingHardStop = false;
+    if (costDecision !== 'stop') costStopRequested = false;
+  }
+  // Re-arm the one-shot Tier-1 cap escalation if the correction dropped spend back
+  // under the cap — otherwise a latched `escalatedAt` would silence the next
+  // genuine cap crossing. (Leave it set when still at/over the cap, so a session
+  // that is still escalated does not immediately re-fire.)
+  if (costSpentUsd < costCapUsd) costEscalatedAt = undefined;
+
+  const status = computeCostStatus();
+  // The FULL state (accountingVersion + #65 ledger identity), not the minimal
+  // set-ceiling blob — a reconcile is precisely the #1327 accounting correction,
+  // so the persisted row must land on the v2 basis.
+  const newState = buildCostCapState();
+
+  const receipt: CostReconcileReceipt = {
+    action: 'cost_reconcile_result',
+    protocolVersion: 2,
+    adjustmentId,
+    sessionId,
+    outcome: 'applied',
+    expectedEpochKey: requestExpectedEpochKey,
+    previousEpochKey,
+    resultEpochKey: String(costBudgetGen),
+    expectedCeilingCents: requestExpectedCeilingCents,
+    resultCeilingCents: liveCeilingCents, // unchanged by a reconcile
+    expectedSpentCents: requestExpectedSpentCents,
+    targetSpentCents: requestTargetSpentCents,
+    forced: requestForced,
+    previousSpentCents,
+    resultSpentCents: Math.round(costSpentUsd * 100),
+    spentUsd: Number(costSpentUsd.toFixed(4)),
+    status,
+  };
+
+  commitOrThrow(
+    receipt,
+    newState,
+    `reconcile APPLIED for adjustment ${adjustmentId}: spent $${(previousSpentCents / 100).toFixed(2)} -> ` +
+      `$${costSpentUsd.toFixed(2)} (ceiling $${costCeilingUsd.toFixed(2)} unchanged), status=${status} (id=${msg.id})`,
   );
 }
 
@@ -2923,7 +3190,9 @@ export async function processQuery(
         // settle — held by the cost-stop gate if the ceiling was crossed, or run
         // in a fresh query if it was not.
         if (providerName === 'codex') {
-          log('Codex follow-up arrived — ending the active query so it is re-claimed after the turn-boundary cost settle');
+          log(
+            'Codex follow-up arrived — ending the active query so it is re-claimed after the turn-boundary cost settle',
+          );
           endedForCommand = true;
           query.end();
           return;

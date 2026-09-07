@@ -26,7 +26,10 @@ import { fanOutboundMessage } from './modules/cross-session-context/index.js';
 import { pickApprover, pickApprovalDelivery } from './modules/approvals/primitive.js';
 import { getEpisode as getCostEpisode } from './db/cost-escalation-episodes.js';
 import { ingestCostEscalation, requestCostDecisionCard } from './modules/cost-approval/index.js';
-import { ingestCostCeilingAdjustmentReceipt } from './modules/cost-ceiling-adjustment/index.js';
+import {
+  ingestCostCeilingAdjustmentReceipt,
+  ingestCostReconcileReceipt,
+} from './modules/cost-ceiling-adjustment/index.js';
 import { log } from './log.js';
 import { normalizeOptions } from './channels/ask-question.js';
 import { clearOutbox, readOutboxFiles, withExistingMailboxSession } from './session-manager.js';
@@ -944,6 +947,24 @@ registerDeliveryAction(
   },
   unguarded(
     'cost_ceiling_adjustment_result is a host-initiated receipt for a request this host already authorized — no privileged mutation',
+  ),
+);
+
+/**
+ * `cost_reconcile` receipt (issue #1327) — the runner's confirmation of a
+ * `cost_reconcile` control message (set live enforcement spend to the transcript
+ * oracle). Same ledger + CAS as the set-ceiling receipt above; unguarded for the
+ * same reason (a host-initiated receipt for a request THIS host already
+ * authorized and enqueued — the privileged surface is `submitCostReconcile` /
+ * `ncl cost-cap reconcile`, not this handler).
+ */
+registerDeliveryAction(
+  'cost_reconcile_result',
+  async (content, session) => {
+    await ingestCostReconcileReceipt(content, session);
+  },
+  unguarded(
+    'cost_reconcile_result is a host-initiated receipt for a request this host already authorized — no privileged mutation',
   ),
 );
 

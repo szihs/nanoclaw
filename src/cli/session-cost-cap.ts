@@ -169,12 +169,18 @@ export interface SessionCostControlProtocolView {
   version: number;
   runner_instance_id: string;
   ready_at: string;
+  /** Live-control operations this runner build can handle (e.g. `set_ceiling`,
+   *  `reconcile`). Absent on a runner that predates the capability list — such a
+   *  runner still supports `set_ceiling` (gated on `version`), but a caller must
+   *  treat any operation not listed here as unsupported. */
+  operations?: string[];
 }
 
 interface StoredCostControlProtocol {
   version?: unknown;
   runnerInstanceId?: unknown;
   readyAt?: unknown;
+  operations?: unknown;
 }
 
 export async function readSessionCostControlProtocol(
@@ -210,7 +216,16 @@ export async function readSessionCostControlProtocol(
       return undefined;
     }
 
-    return { version: parsed.version, runner_instance_id: parsed.runnerInstanceId, ready_at: parsed.readyAt };
+    const operations =
+      Array.isArray(parsed.operations) && parsed.operations.every((o) => typeof o === 'string')
+        ? (parsed.operations as string[])
+        : undefined;
+    return {
+      version: parsed.version,
+      runner_instance_id: parsed.runnerInstanceId,
+      ready_at: parsed.readyAt,
+      ...(operations ? { operations } : {}),
+    };
   } catch {
     return undefined;
   } finally {

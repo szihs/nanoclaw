@@ -36,7 +36,9 @@ node scripts/coworker-mcp/coworker-mcp.mjs
 | `list_sessions` | `GET /api/sessions` | |
 | `talk_to_session` | `POST /api/chat/send-to-session` | reply into a specific session |
 | `cost_status` | `ncl cost-cap status --session` | live cost state for one session |
-| `list_cost_escalations` | `ncl cost-cap escalations --json` | which sessions were cost-stopped + spent/cap/ceiling |
+| `list_stopped_sessions` | `ncl cost-cap stopped --json` | the LIVE currently-blocked set (status=`stopped` right now), deduped per session — same source as the dashboard |
+| `list_cost_escalations` | `ncl cost-cap escalations --json` | append-only HISTORY ledger of every cap/ceiling trip (NOT "blocked now" — use `list_stopped_sessions` for that) |
+| `cost_per_coworker` | `ncl cost-cap coworkers --json` | exact per-coworker $ from the inference gateway (litellm capture) |
 | `continue_session` | `POST /api/cost-override` | resume a cost-stopped session |
 | `resolve_approval` | `POST /api/approvals/action` | |
 | `answer_question` | `POST /api/questions/respond` | |

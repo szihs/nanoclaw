@@ -6,6 +6,8 @@
 // each other directly to avoid circular facades.
 
 import { renderCoworkerSpine } from './claude-composer/spine.js';
+export { asNonEmpty, composedDocHeader, renderCoworkerSections } from './claude-composer/spine.js';
+export type { CapDiagnostics, ComposedSectionInput, ProjectDocSpec } from './claude-composer/project-doc.js';
 import { composeLegacyDocument } from './claude-composer/legacy.js';
 import type { ComposeCoworkerSpineOptions, ComposeLegacyPromptOptions } from './claude-composer/types.js';
 
