@@ -18,6 +18,7 @@
  * per-section decision.
  */
 import fs from 'fs';
+import { protectedProviderDocumentSourcePaths } from '../provider-contracts/realize.js';
 import os from 'os';
 import path from 'path';
 
@@ -176,10 +177,15 @@ describe('against the real contract document', () => {
   // additionalMount covering the project tree is forced read-only. The layer
   // reads it on the host; a writable mount of a document inlined into the prompt
   // would let the agent rewrite its own contract.
+  // Asserts the GUARANTEE, not the spelling: upstream replaced the literal
+  // path.join with protectedProviderDocumentSourcePaths(), so pinning the old
+  // text would go red on a behaviour-preserving refactor while a real
+  // regression — the path dropping out of the protected set — stayed green.
   it('stays an enumerated install surface', () => {
     const drivers = fs.readFileSync(path.join(ROOT, 'src/drivers/index.ts'), 'utf-8');
 
-    expect(drivers).toContain("path.join(projectRoot, 'container', 'CLAUDE.md')");
+    expect(drivers).toContain('protectedProviderDocumentSourcePaths(projectRoot)');
+    expect(protectedProviderDocumentSourcePaths(ROOT)).toContain(path.join(ROOT, 'container', 'CLAUDE.md'));
   });
 });
 
@@ -189,5 +195,41 @@ describe('exported names', () => {
   // differently-titled contract sections.
   it('matches upstream project-doc-compose BASE_DOC_SECTION', () => {
     expect(RUNTIME_CONTRACT_SECTION).toBe('NanoClaw Runtime Contract');
+  });
+
+  // `scripts/fetch-skills.sh` loads dist/claude-composer.js with require(), and CI's
+  // "Fetch external skills" step runs it. A single import that reaches the DB layer
+  // makes the bundle an async ESM graph — `db/migrations/index.ts` ends in a
+  // TOP-LEVEL AWAIT for migration auto-discovery — and require() then throws
+  // ERR_REQUIRE_ASYNC_MODULE. That failure surfaces only in CI, in a step whose name
+  // says nothing about imports, so it is asserted here on the static graph instead.
+  it('composer bundle never imports a module whose graph has a top-level await', () => {
+    const ROOT = process.cwd();
+    const resolveLocal = (fromFile: string, spec: string): string | undefined => {
+      if (!spec.startsWith('.')) return undefined;
+      const abs = path.resolve(path.dirname(fromFile), spec.replace(/\.js$/, '.ts'));
+      return fs.existsSync(abs) ? abs : undefined;
+    };
+    const seen = new Set<string>();
+    const offenders: string[] = [];
+    const walk = (file: string, trail: readonly string[]): void => {
+      if (seen.has(file)) return;
+      seen.add(file);
+      const src = fs.readFileSync(file, 'utf-8');
+      // A top-level await is one at column 0 — anything indented is inside a function.
+      if (/^(?:await |(?:export )?const [^=]+= await )/m.test(src)) {
+        offenders.push([...trail, path.relative(ROOT, file)].join(' -> '));
+        return;
+      }
+      for (const m of src.matchAll(/^\s*(?:import|export)[^'"]*from\s+['"]([^'"]+)['"]/gm)) {
+        const next = resolveLocal(file, m[1]!);
+        if (next) walk(next, [...trail, path.relative(ROOT, file)]);
+      }
+    };
+    walk(path.join(ROOT, 'src/claude-composer.ts'), []);
+
+    // join(): the failure message must NAME the import chain, or the next reader
+    // has to re-derive it from a bare array diff.
+    expect(offenders.join('\n')).toBe('');
   });
 });

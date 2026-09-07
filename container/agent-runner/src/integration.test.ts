@@ -9,6 +9,11 @@ import { MockProvider } from './providers/mock.js';
 import type { ProviderExchange } from './providers/types.js';
 import { runPollLoop } from './poll-loop.js';
 
+const MOCK_PROVIDER_CONTRACT = {
+  textDelivery: 'mid-turn-complete',
+  commands: { formatting: 'xml' },
+} as const;
+
 beforeEach(() => {
   initTestSessionDb();
   // Seed a destination so output parsing can resolve "discord-test" → routing
@@ -320,6 +325,7 @@ describe('poll loop integration', () => {
 async function runPollLoopWithTimeout(provider: MockProvider, signal: AbortSignal, timeoutMs: number): Promise<void> {
   const loop = runPollLoop({
     provider,
+    providerContract: MOCK_PROVIDER_CONTRACT,
     providerName: 'mock',
     cwd: '/tmp',
     signal,
@@ -583,7 +589,6 @@ describe('poll loop — silent turn (Codex last_agent_message: null)', () => {
  * Provider that throws on every query, simulating API failures.
  */
 class ThrowingProvider {
-  readonly supportsNativeSlashCommands = false;
   private errorMessage: string;
 
   constructor(errorMessage: string) {
@@ -612,8 +617,6 @@ class ThrowingProvider {
  * First emits an init event (setting continuation), then throws.
  */
 class InvalidSessionProvider {
-  readonly supportsNativeSlashCommands = false;
-
   isSessionInvalid(): boolean {
     return true;
   }
@@ -678,7 +681,6 @@ describe('poll loop — slash command during active query', () => {
  * the loop interrupts an active stream.
  */
 class BlockingProvider {
-  readonly supportsNativeSlashCommands = false;
   queries = 0;
   aborts = 0;
   ends = 0;

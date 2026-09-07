@@ -1,6 +1,12 @@
 ---
 name: add-codex
 description: Use Codex (OpenAI's codex app-server) as a full agent provider — planning, tool orchestration, MCP tools, server-side history, session resume — alongside or instead of Claude. ChatGPT subscription or OpenAI API key, vault-only via OneCLI. Per-group via `ncl groups config update --provider codex`. Distinct from using OpenAI as an MCP tool (where Claude remains the planner).
+metadata:
+  nanoclaw-provider: codex
+  nanoclaw-provider-label: Codex
+  nanoclaw-provider-hint: OpenAI — ChatGPT subscription or API key
+  nanoclaw-provider-offered: 'true'
+  nanoclaw-provider-image: local-required
 ---
 
 # Codex agent provider
@@ -44,14 +50,22 @@ The payload this fork does not carry, and does not want:
 
 ### 2. Wire the barrels
 
+This fork carries no `src/provider-contracts/codex.ts` nor its container twin, so the two
+provider-CONTRACT barrels are deliberately not wired: appending `import './codex.js';` there
+would import a module that does not exist here and break the build. Upstream's copy of this
+skill has those two fences because upstream installs the `providers`-branch payload, which
+does carry them. Do not re-add them without also carrying the declarations.
+
 Append the self-registration import to each of the three provider barrels (skipped if the line is already present — which is the normal state on trunk; these stay so a deleted line self-heals). Each barrel-registration test imports its real barrel and asserts `codex` is registered — they go red the moment a barrel line is missing or drifts.
 
 ```nc:append to:src/providers/index.ts
 import './codex.js';
 ```
+
 ```nc:append to:container/agent-runner/src/providers/index.ts
 import './codex.js';
 ```
+
 ```nc:append to:setup/providers/index.ts
 import './codex.js';
 ```

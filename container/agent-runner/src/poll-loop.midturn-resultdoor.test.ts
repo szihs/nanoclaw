@@ -9,7 +9,7 @@ import { processQuery, __costCapTestHooks as H } from './poll-loop.js';
 import { __resetCodexCostMemo } from './codex-cost.js';
 import type { AgentQuery, ProviderEvent } from './providers/types.js';
 
-// Adversarial verification of the one-door contract for emitsMidTurnText
+// Adversarial verification of the one-door contract for mid-turn delivery
 // providers: mid-turn streaming is the SINGLE content door. The result door
 // NEVER writes content to messages_out (error results excepted) — its only
 // other job is the nudge decision: a turn that delivered nothing (no door

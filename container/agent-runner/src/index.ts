@@ -44,8 +44,14 @@ import { getAgentMailbox, readMailboxContext } from './mailbox/index.js';
 // Provider skills append imports to providers/index.ts.
 import './providers/index.js';
 import { createCodexConfigOverrides } from './providers/codex-app-server.js';
-import { createProvider, type ProviderName } from './providers/factory.js';
+import { createProvider } from './providers/factory.js';
 import { parseAllowedMcpTools } from './providers/claude.js';
+// Provider-contracts barrel — each provider's runtime contract attaches to its
+// registration on import. Provider skills append imports to
+// provider-contracts/index.ts alongside the providers barrel line.
+import './provider-contracts/index.js';
+import { registerProviderMemorySessionHook } from './provider-contracts/realize.js';
+import { getProviderRuntimeContract, requireProviderName } from './providers/provider-registry.js';
 import { resolvePluginServer } from './plugin-mcp.js';
 import type { McpServerConfig } from './providers/types.js';
 import { runPollLoop } from './poll-loop.js';
@@ -62,8 +68,11 @@ async function main(): Promise<void> {
   // stuck on the hardcoded fallback. Safe to call multiple times (memoized).
   const config = loadConfig();
 
-  const providerName = (process.env.AGENT_PROVIDER || config.provider || 'claude').toLowerCase() as ProviderName;
+  // AGENT_PROVIDER (env) still wins over container.json on this fork.
+  // requireProviderName lowercases and asserts the provider is registered.
+  const providerName = requireProviderName(process.env.AGENT_PROVIDER || config.provider || 'claude');
   const assistantName = process.env.NANOCLAW_ASSISTANT_NAME || config.assistantName || undefined;
+
   const mailbox = getAgentMailbox();
   await mailbox.start(await readMailboxContext());
 
@@ -293,14 +302,15 @@ async function main(): Promise<void> {
     model: config.model,
     effort: config.effort,
     fallbackModel: config.fallbackModel,
-    fastMode: config.fastMode,
+    speed: config.speed,
   });
 
   // Wire the shared memory tree into the provider's native session-start
   // mechanism. Only Claude Code has one; the rest report false and get the
   // section in the system prompt instead, so `container/CLAUDE.md`'s promise
-  // that memory arrives in context holds for every provider.
-  const needsMemoryInPrompt = !provider.registerMemorySessionHook(MEMORY_SESSION_HOOK);
+  // that memory arrives in context holds for every provider. Registration goes
+  // through the contract helper so the memory capability is resolved too.
+  const needsMemoryInPrompt = !registerProviderMemorySessionHook(providerName, provider, MEMORY_SESSION_HOOK);
   if (needsMemoryInPrompt) log(`Memory delivered via system prompt (${providerName} has no session-start hook)`);
 
   // Re-read on every rebuild rather than caching a boot-time copy: the agent
@@ -310,10 +320,10 @@ async function main(): Promise<void> {
     needsMemoryInPrompt
       ? appendMemorySection(buildInstructions(), memoryContextForSystemPrompt(CWD))
       : buildInstructions();
-
   try {
     await runPollLoop({
       provider,
+      providerContract: getProviderRuntimeContract(providerName),
       providerName,
       cwd: CWD,
       systemContext: { instructions: rebuild(), rebuild },

@@ -36,7 +36,9 @@ mock.module('@anthropic-ai/claude-agent-sdk', () => ({
   },
 }));
 
-const { ClaudeProvider } = await import('./claude.js');
+await import('./index.js');
+await import('../provider-contracts/index.js');
+const { createProvider } = await import('./factory.js');
 const { MEMORY_SESSION_HOOK } = await import('../memory/session-hook.js');
 
 const SERVERS = {
@@ -80,7 +82,7 @@ afterEach(() => {
 
 /** Build a provider under `env` and drain one query so the SDK options are captured. */
 async function optionsUnder(env: Record<string, string>): Promise<SdkOptions> {
-  const provider = new ClaudeProvider({ mcpServers: SERVERS, env });
+  const provider = createProvider('claude', { mcpServers: SERVERS, env });
   provider.registerMemorySessionHook(MEMORY_SESSION_HOOK);
   const q = provider.query({ prompt: 'hi', cwd: tmp });
   for await (const _ of q.events) {

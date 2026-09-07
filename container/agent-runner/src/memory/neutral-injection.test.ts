@@ -21,7 +21,12 @@ import { ensureMemoryScaffold } from './scaffold.js';
 import { buildSystemPromptAddendum } from '../destinations.js';
 import { closeSessionDb, getInboundDb, initTestSessionDb } from '../mailbox/sqlite/connection.js';
 import { runPollLoop } from '../poll-loop.js';
-import { ClaudeProvider } from '../providers/claude.js';
+// Only claude's own registrations — importing the whole barrels pulls in every
+// provider, and some need an agent mailbox at import time (this suite has none).
+import '../providers/claude.js';
+import '../provider-contracts/claude.js';
+import { createProvider } from '../providers/factory.js';
+import { registerProviderMemorySessionHook } from '../provider-contracts/realize.js';
 import { CodexProvider } from '../providers/codex.js';
 import { MockProvider } from '../providers/mock.js';
 import { PiProvider } from '../providers/pi.js';
@@ -53,7 +58,11 @@ describe('every provider without a session-start hook says so', () => {
     const prev = process.env.CLAUDE_CONFIG_DIR;
     process.env.CLAUDE_CONFIG_DIR = path.join(tmp, '.claude');
     try {
-      expect(new ClaudeProvider().registerMemorySessionHook(MEMORY_SESSION_HOOK)).toBe(true);
+      // Through the contract helper, as index.ts does: the settings.json WRITE is
+      // the contract's `lifecycle.memorySessionHookRegistration`, so calling the
+      // provider method directly registers the hook but writes no file.
+      const provider = createProvider('claude', {});
+      expect(registerProviderMemorySessionHook('claude', provider, MEMORY_SESSION_HOOK)).toBe(true);
       const settings = JSON.parse(fs.readFileSync(path.join(tmp, '.claude', 'settings.json'), 'utf-8'));
       expect(JSON.stringify(settings.hooks.SessionStart)).toContain(MEMORY_SESSION_HOOK.command);
     } finally {
