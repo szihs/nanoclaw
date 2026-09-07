@@ -172,6 +172,10 @@ container/skills/okf-synthesis/**
 # Costliest-session digest skill — daily "costliest session + why" DM to the owner (Tier 5).
 container/skills/costliest-session-digest/**
 
+# explain-diff-html — base skill: every PR a coworker opens ships a self-contained
+# HTML explanation; asked for by the PR-created hook. Common infra for every spine.
+container/skills/explain-diff-html/**
+
 # Upstream-tracking shared skills — allowlisted so upstream-sync PRs can update
 # them on nv-main (same pattern as whatsapp-formatting above). DO NOT hand-edit
 # the prose of these on nv-*: they originate from origin/main/upstream and any
