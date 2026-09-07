@@ -142,20 +142,36 @@ ls -l "$LEDGER" "$GAP" 2>&1 | head -5
 grep -cE '^\| *[A-Z]+-F[0-9]+' "$GAP" 2>/dev/null   # ids are <FAMILY>-F<NN>
 ```
 
-Then bucket the ledger's **last column** (`status`, the one the merge gate edits in place)
-in a single pass. Take `$NF`, and only fall back to `$(NF-1)` when the row ends in a trailing
-`|` (which makes `$NF` empty) — a row without one would otherwise be read one column early:
+Then bucket the ledger's **outcome column** in a single pass. The Orchestrator's ledger is a
+*work list*: seven columns (`row-id | dispatched | spec accepted | PR | verdict | merged/blocked |
+notes`), a row appears the moment a requirement is dispatched, and the merge gate edits
+`merged/blocked` in place. So on that shape an empty outcome means **in flight**, and `todo` is
+what the ledger does *not* list: `todo = <denominator from the matrix> − done − active − blocked`.
+The older requirements ledger pre-lists every row with one `status` column last, and there an
+empty status means not started. Locate the column from the header row rather than assuming a
+position — reading `$NF` on the work list would bucket the free-text `notes` cell and count
+every row as active:
 
 ```bash
-awk -F'|' 'NF>2 && $2 ~ /[A-Z]+-F[0-9]+/ {                                   # gap-matrix ids are <FAMILY>-F<NN> (RT-F01, ISO-F10, ...)
-  s=$NF; if (s ~ /^[ \t]*$/) s=$(NF-1);
-  gsub(/^[ \t]+|[ \t]+$/,"",s);
-  if (s ~ /^merged/) d++;
-  else if (s ~ /^blocked/) b++;
-  else if (s == "" || s ~ /^(not started|queued|-)$/) t++;
-  else a++;
-} END { printf "done=%d active=%d blocked=%d todo=%d\n", d+0, a+0, b+0, t+0 }' "$LEDGER"
+awk -F'|' '
+  $2 ~ /^[ \t]*(row-id|req-id|id)[ \t]*$/ {                                  # header row → find the outcome column
+    for (i=1; i<=NF; i++) { h=$i; gsub(/^[ \t]+|[ \t]+$/,"",h);
+      if (h == "merged/blocked") { c=i; worklist=1 } else if (h == "status") c=i }
+    next
+  }
+  NF>2 && $2 ~ /[A-Z]+-F[0-9]+/ {                                            # gap-matrix ids are <FAMILY>-F<NN> (RT-F01, ISO-F10, ...)
+    s = c ? $c : $NF; if (!c && s ~ /^[ \t]*$/) s=$(NF-1);                    # no header match → legacy last-column shape
+    gsub(/^[ \t]+|[ \t]+$/,"",s);
+    if (s ~ /^merged/) d++;
+    else if (s ~ /^blocked/) b++;
+    else if (worklist) a++;                                                   # listed but not settled → in flight
+    else if (s == "" || s ~ /^(not started|queued|-|pending|—)$/) t++;
+    else a++;
+  } END { printf "done=%d active=%d blocked=%d todo=%d worklist=%d\n", d+0, a+0, b+0, t+0, worklist+0 }' "$LEDGER"
 ```
+
+`worklist=1` → replace the printed `todo` with `<denominator> − done − active − blocked` before
+rendering (never negative; if it would be, note `ledger lists ids absent from the matrix`).
 
 *Fallbacks, in order:* both denominator paths missing → total `61` with the note
 `row source unavailable — 61 from the plan`. Ledger missing **but the denominator parsed** →
@@ -269,7 +285,7 @@ identifier** — a note with no number is filler; delete it.
 |---|---|---|---|
 | 1 | `The team` | `chain` | The routing topology as 3–4 monospace lines (`Orchestrator → architect → builder`, `→ tester → reviewer`, `← fixes loop back (max 2)`). Note: which roles are awake right now and the count, from §1.2 — e.g. `5 wired · tester + builder running, 3 idle · forced A2A, critique gates on`. |
 | 2 | `Milestones` | `rows` | 8–10 rows max, newest-relevant first. `ok` = landed (merged PR, closed milestone), `run` = in flight now (open non-draft PR, a live chain), `todo` = queued, `bad` = a real blocker. Each `note` is the short state (`merged`, `r2 running`, `queued`, `blocked P3`). Sources: §1.5 PRs, §1.7 tasks, your own ledger reading. |
-| 3 | `61 requirement rows` | `progress` | `progress: {done, active, todo}` straight from §1.3 (fold `blocked` into `active` only if you also add a `bad` row naming the blocked ids). Note: the ledger path you actually read and the newest merged req-id — `ledger /workspace/shared/… · last merged FR-3 (sha 1a2b3c4)`. |
+| 3 | `61 requirement rows` | `progress` | `progress: {done, active, todo}` straight from §1.3 (fold `blocked` into `active` only if you also add a `bad` row naming the blocked ids). Note: the ledger path you actually read and the newest merged req-id — `ledger /workspace/agent/reports/ledger.md · last merged GOV-F24 (sha 1a2b3c4)`. |
 | 4 | `Verification` | `metric` | `metric: {value, label}` = the gate everyone trusts (`12 / 12`, `smoke — reliable gate`), plus 1–3 `rows` for the fuller picture (`Full suite`, `44 pass / 17 fail / 13 skip`; `DESKTOP`, `SKIPPED — install_packages`). Note: which head SHA the numbers are from and whether they came from one run or were assembled — say so if assembled. |
 | 5 | `Pinned baseline` | `chain` | 3–4 lines from §1.1 + §1.5: `release tree  <tag> (read-only mount)`, `fork branch   release/<tag>-e2e-fixed`, `commit        <sha7>`. Note: whether the base branch resolved on the fork, and that PRs target the baseline, not fork `main`. |
 | 6 | `Cost posture` | `rows` | Dot-less rows (`text` + `note`, no `state`) exactly like the reference: `Cap / ceiling per coworker` → `$150`; `Escalations pending` → count; `Spend last 24h` → `$N` from §1.6; `Costliest coworker` → `<folder> $N`. Use a `bad` state **only** for a stopped/pending escalation, since that one blocks a chain. |
