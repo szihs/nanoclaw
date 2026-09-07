@@ -12,6 +12,12 @@
  * already links the same concept as `#chain-communication--the-rules`, which does
  * exist (`main.md:234`), so this is a retarget to the section that was always meant,
  * not a de-link.
+ *
+ * One later content change is bounded the same way: `base-common` gained the
+ * `explain-diff-html` skill, which adds exactly one `## Skills` line to every
+ * non-`main` composed document (`main` is flat and lists no skills). The pre-change
+ * fixtures stay immutable; stripping that one line from the shipped golden must
+ * reproduce them byte for byte.
  */
 import fs from 'fs';
 import path from 'path';
@@ -29,7 +35,11 @@ const NEW_ANCHOR = '[chain-reporting](#chain-communication--the-rules)';
 
 /** Only `main` carries `agents.md`; the other two types compose without it. */
 const AFFECTED = ['main', 'main.persona'] as const;
-const UNAFFECTED = ['base-common', 'base-common.persona', 'default', 'default.persona'] as const;
+/** Untouched by the retarget; moved once since, by the `explain-diff-html` skill line. */
+const SKILL_LINE_ONLY = ['base-common', 'base-common.persona', 'default', 'default.persona'] as const;
+
+const SKILL_LINE_KEY = '`/explain-diff-html`';
+const SKILL_LINE_RE = /^- `\/explain-diff-html` — [^\n]*\n/m;
 
 function golden(dir: string, name: string): string {
   return fs.readFileSync(path.join(dir, `${name}.md`), 'utf-8');
@@ -55,9 +65,15 @@ describe('the anchor retarget is the only content change', () => {
     });
   }
 
-  for (const name of UNAFFECTED) {
-    it(`${name}: untouched by the content phase`, () => {
-      expect(golden(GOLDEN_DIR, name)).toBe(golden(PRE_DIR, name));
+  for (const name of SKILL_LINE_ONLY) {
+    it(`${name}: differs from the pre-change golden by the explain-diff-html skill line only`, () => {
+      const shipped = golden(GOLDEN_DIR, name);
+
+      // Exactly one occurrence, asserted before stripping — same reasoning as above.
+      expect(shipped.split(SKILL_LINE_KEY).length - 1).toBe(1);
+      expect(golden(PRE_DIR, name)).not.toContain(SKILL_LINE_KEY);
+
+      expect(shipped.replace(SKILL_LINE_RE, '')).toBe(golden(PRE_DIR, name));
     });
   }
 

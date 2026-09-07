@@ -35,6 +35,12 @@ base-common:
     - base-nanoclaw
     - codex-critique
     - buddy
+    # Every PR a coworker opens gets a self-contained HTML explanation
+    # (background → intuition → code walkthrough → quiz). The PR-created
+    # PostToolUse hook (container/hooks/pr-auto-map.sh) asks for it right
+    # after report_pr_created, so it is part of opening a PR on every
+    # project spine — slang, hermes, and whatever comes next.
+    - explain-diff-html
   # Standard chain-role delivery vocabulary — declared ONCE here and inherited
   # by every coworker type via `extends:` (the composer unions delivery_markers
   # across the chain into .critique-delivery-markers; all three gates —
