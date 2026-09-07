@@ -11,7 +11,16 @@
 #   reviewer -> tester (re-run requests; the tester's [Test Report] answer
 #   rides back as a reply on that edge — the tester never opens a fresh send
 #   to the reviewer), orchestrator -> tester (nightly regression against the
-#   fork's main). Per-PR chain: builder hand-off (round 1 unmarked
+#   fork's main, and the merge gate's evidence request for the tester's
+#   canonical test-report file). There is deliberately NO orchestrator <->
+#   builder edge: the orchestrator's only edge into the chain is the
+#   requirement dispatch to the architect, so the merge gate fires on the
+#   architect's [Triage Resolution] reply (which carries the builder's
+#   locators forward in a `## Merge gate` block) and a `blocked: P<n>` answer
+#   goes back on that same edge for the architect to relay down. The reviewer
+#   has no orchestrator edge at all — its [Review Verdict] is read out of the
+#   reviewer's own session with `ncl sessions messages` (cli_scope: global),
+#   never forwarded. Per-PR chain: builder hand-off (round 1 unmarked
 #   `Fix report — …`, round 2 a [Fix Report] reply to the tester's FAIL) ->
 #   tester verifies -> [Test Report] PASS -> reviewer (the report travels
 #   attached to the builder's review request; the [Review Verdict] stays a
@@ -42,6 +51,15 @@ hermes-common:
   # hermes-implement and hermes-review write {{vars.release_tree}} /
   # {{vars.release_tag}} once. Spine fragments (identity/invariants/context)
   # are NOT var-substituted — they spell the paths out literally.
+  #
+  # release_tag is a FALLBACK LABEL, not the source of truth. The authoritative
+  # pinned tag lives in {{vars.release_tree}}/RELEASE_MANIFEST.json ("tag",
+  # "commit", "tarball_sha256", "previous_tag", ...), written by
+  # scripts/hermes-pin.sh (see docs/hermes-pin.md) each time the operator pins
+  # or rolls back the release tree. Roles cite the tag from that file; this
+  # value only backfills bodies that spell {{vars.release_tag}} and is what a
+  # reader sees when the manifest is missing. Bump it when the pin moves, but
+  # whenever the two disagree the manifest wins.
   vars:
     repo: NousResearch/hermes-agent
     project: hermes
@@ -163,6 +181,17 @@ hermes-builder:
   # Standard markers [Fix Review Request] / [Fix Report] are inherited from
   # base-common; the built-in Bash patterns already cover `gh pr create`.
   required_critique_stages: [PLAN_REVIEW, CODE_REVIEW, OUTPUT_REVIEW]
+  # Data-level backstop for the merge boundary. This is the ONLY role holding
+  # fork write credentials, and the gate's built-in Bash floor covers PR
+  # CREATION only (`gh pr create`, `gh api …/pulls`, `createPullRequest`) — not
+  # `gh pr merge` / `gh pr ready`. Without these two patterns the builder has
+  # no data-level speed bump on the one action the whole chain exists to
+  # reserve for the Orchestrator. The hard rule is the peer-review invariant
+  # (always-in-context, so it survives compaction); this is the backstop for
+  # when prose is not enough. `gh pr create` is deliberately NOT re-listed: the
+  # built-in floor already covers it and the builder legitimately opens the
+  # draft PR under that gate.
+  pr_command_patterns: ['gh pr merge', 'gh pr ready']
 
 hermes-tester:
   description: "Hermetic verifier for the Hermes fork — one container per thread (NanoClaw), each in its own network namespace, so parallel test sessions never collide on ports. Owns (a) the hermetic testbed harness: temp HERMES_HOME per run, plugins.enabled injected, sockets blocked except loopback, fake HERMES_DOCKER_BINARY shim, `hermes approvals test --json` as oracle, suite T1–T12; (b) UI parity: `hermes serve` (headless backend) / `hermes dashboard` (web UI) in-container, driven by agent-browser with screenshots; (c) desktop: the release tree's apps/desktop Playwright e2e under xvfb-run, phase-gated — missing xvfb/Electron deps → DESKTOP=SKIPPED with the exact install_packages request, never a whole-run failure. Input: the builder's hand-off naming the PR head (round 1 an unmarked `Fix report — …`; round 2 a [Fix Report] reply to this role's [Test Report] FAIL) or the orchestrator's nightly regression dispatch against the fork's main. Output: /workspace/agent/reports/<thread-id>/test-report-*.md + a gated [Test Report] PASS | FAIL reply on the requester's edge. Max 2 FAILs per PR, then escalates to the orchestrator. Never pushes, never opens PRs."
@@ -255,3 +284,111 @@ hermes-reviewer:
   required_critique_stages: [CODE_REVIEW, OUTPUT_REVIEW]
   # Same speed bump as the architect (see there) — the reviewer never pushes.
   pr_command_patterns: ['git push']
+
+# ---------------------------------------------------------------------------
+# main — the Orchestrator. THIS PROJECT'S SOLE MERGE AUTHORITY.
+#
+# This is a REDECLARATION of the base `main` type, not a new type. registry.ts
+# scans TYPE_SOURCE_DIRS (container/spines, then container/skills) with dirs
+# sorted, so base/coworker-types.yaml's `main` loads first and this entry is
+# merged into it by mergeTypeEntries: arrays (`context`, `delivery_markers`,
+# `pr_command_patterns`) UNION, scalars are leaf-wins. Same mechanism the
+# registry comment names ("Capability skill dirs can add type contributions —
+# e.g. dashboard-base appends context: to main").
+#
+# WHY A CONTEXT FRAGMENT AND NOT A WORKFLOW OR A SKILL.
+# `main` is declared `flat: true` (container/spines/base/coworker-types.yaml).
+# In src/claude-composer/resolve.ts the flat branch returns EARLY with
+# `invariants: []`, `workflows: []`, `skills: []` — it composes only `identity`
+# and `context`. A `hermes-merge` WORKFLOW.md or SKILL.md attached to `main`
+# would therefore be silently discarded: no error, no failing check, no
+# `/hermes-merge` command in the Orchestrator's spine, and a merge gate that
+# exists only on disk. `context:` is the one additive channel a flat type has,
+# so the gate is authored as always-in-context prose (merge-gate.md carries its
+# own `##` heading — flat mode joins fragment bodies on H2 boundaries) and it
+# survives compaction, which is what a merge authority needs.
+#
+# Spine fragments are NOT var-substituted (readFragments reads them verbatim;
+# only workflow/overlay bodies go through substituteVars). `main` is also
+# outside the hermes-common chain, so it has no `vars:` at all — merge-gate.md
+# spells the fork slug, the release-tree path and the fallback tag literally.
+#
+# WHY THE GATE VOCABULARY STILL WORKS. `pr_command_patterns` is not read from
+# the flat-resolved manifest: materializeCritiqueDeliveryMarkers (resolve.ts)
+# walks the TYPE CHAIN directly and writes the union to
+# `<groupDir>/.critique-delivery-markers`, so a declaration on this entry does
+# take effect for a flat type. It makes `gh pr merge` / `gh pr ready` require a
+# recorded /codex-critique STAGE before the Bash call — the OUTPUT_REVIEW step
+# in merge-gate.md's all-green path. OPERATOR PRECONDITION: the enforcement
+# half is opt-in — gate-critique-on-deliver.sh exits 0 unless the Orchestrator's
+# agent group carries the `critique-gate` overlay (or CRITIQUE_GATE_ACTIVE=1).
+# Without it the declaration is inert and the critique round is honor-system.
+#
+# WHY NO `delivery_markers` HERE. The chain-routing gate is ALWAYS ON (no
+# overlay) and denies any marker-prefixed send that carries no `in_reply_to`.
+# The Orchestrator's two outputs are a merge notice to the human's dashboard
+# chat (a FRESH send — no inbound to answer, so a marker would be denied every
+# single time) and a blocked reply on the builder's edge (already a reply, so
+# it routes without needing a marker). Declaring one here would buy nothing and
+# break the notice, so both stay unmarked plain text.
+#
+# DELIBERATELY UNSET: `flat` (mergeTypeEntries does `addon.flat ?? base.flat` —
+# leaving it out preserves base's `flat: true`; setting it false would push
+# `main` down the validated path and break composition), `identity` / `title` /
+# `description` (leaf-wins scalars would clobber the base orchestrator body),
+# and `project` (it would file `main` under the hermes group of the
+# auto-generated "## Projects available" discovery table).
+#
+# MERGE AUTHORITY IS NOT ADDED TO ANY hermes-* ROLE. architect / tester /
+# reviewer carry invariants/no-push.md (hard rule) plus `git push` speed bumps;
+# the builder pushes and opens a DRAFT PR and never readies or merges one.
+main:
+  context:
+    # The merge procedure: when it fires, the first-party evidence the
+    # Orchestrator must collect itself (originals via `ncl sessions messages`,
+    # never a copy forwarded by the party being gated), preconditions P1-P6
+    # with the exact command per check, the squash path, and the refusal list.
+    #
+    # COST, ACCEPTED DELIBERATELY: registry.ts scans container/spines/* for
+    # every install, so any checkout that merely has this spine on disk gets
+    # this fragment always-in-context in its admin orchestrator — ~20KB of a
+    # ~56KB composed doc — even with zero hermes agent groups and no fork.
+    # Moving it under container/skills/ would NOT gate it (TYPE_SOURCE_DIRS
+    # scans that tree just as unconditionally), and `main` is flat, so there is
+    # no on-demand channel: a workflow or skill attached to it is discarded.
+    # Same trade the dashboard-base precedent makes. If a hermes-free install
+    # ever needs the bytes back, delete container/spines/hermes/ — nothing else
+    # in the tree depends on it.
+    - container/spines/hermes/context/merge-gate.md
+    # Awareness of the daily HTML status report: that `/hermes-status-report`
+    # exists, where its output lands, how it is delivered, and that a recurring
+    # `ncl tasks` series fires it. CONTEXT, NOT `skills:` — `main` is
+    # `flat: true`, and resolveCoworkerManifest returns early for flat types
+    # with `workflows: []` / `skills: []` (src/claude-composer/resolve.ts), so a
+    # `skills:` entry here would be silently discarded and the Orchestrator
+    # would never learn the report exists. Only `identity` and `context` compose
+    # for main. The skill BODY is still reachable at runtime: a flat type takes
+    # the mirror-all branch of resolveMirroredSkillScope, so every
+    # container/skills/ dir (including hermes-status-report) is copied to
+    # .claude-shared/skills → /home/node/.claude/skills/ and invocable as a
+    # slash command.
+    - container/spines/hermes/context/status-report.md
+  # Route the merge/ready commands through the critique gate's Bash matcher, so
+  # the merge decision itself gets one OUTPUT_REVIEW round before it executes.
+  # Additive to the gate's built-in floor (`gh pr create`, `gh api …/pulls`,
+  # `createPullRequest`) — extensions can never configure a default away.
+  pr_command_patterns:
+    - 'gh pr merge'
+    - 'gh pr ready'
+  # One codex round on the merge DECISION before it executes. Without this the
+  # union is empty and the gate falls back to its legacy "any 1 critique round
+  # of any stage releases the command" path (gate-critique-on-deliver.sh's
+  # `jq -e 'length > 0'` / poll-loop's `if (required.length > 0)`), which skips
+  # the verdict-must-be-APPROVE check, the `edits_since_critique` freshness
+  # check and the attested-hash re-check — so a must-fix OUTPUT_REVIEW would
+  # still release `gh pr merge`. Named explicitly, those three re-engage.
+  # materializeCritiqueRequiredStages walks resolveTypeChain directly
+  # (resolve.ts), so like pr_command_patterns it takes effect for a flat type.
+  # Same operator precondition as above: written only when the group carries
+  # the `critique-gate` overlay; without it the declaration is inert.
+  required_critique_stages: [OUTPUT_REVIEW]

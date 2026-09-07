@@ -1,6 +1,6 @@
 ---
 name: hermes-testbed
-description: "Hermetic verification harness for Hermes Agent plugin PRs (release v2026.8.31 = 0.21.0): temp-HERMES_HOME testbed with loopback-only sockets and a fake container runtime, the T1–T12 acceptance suite, `hermes plugins doctor --ci` + `hermes approvals test --json` oracles, web-UI parity via `hermes dashboard`/`hermes serve` + agent-browser screenshots, the phase-gated apps/desktop Electron Playwright tier under xvfb-run, and the test-report-<sha7>.md `## Results` rows the reviewer audits. Load from the hermes-verify workflow when a [Fix Report] names a PR head, when the orchestrator dispatches a nightly regression run against the fork's main, or when writing/extending T-suite or desktop e2e tests."
+description: "Hermetic verification harness for Hermes Agent plugin PRs (release v2026.8.31 = 0.21.0): temp-HERMES_HOME testbed with loopback-only sockets and a fake container runtime, the T1–T12 acceptance suite, `hermes plugins doctor --ci` + `hermes approvals test --json` oracles, web-UI parity via `hermes dashboard`/`hermes serve` + agent-browser screenshots, the phase-gated apps/desktop Electron Playwright tier under xvfb-run, and the test-report-<sha7>.md `## Results` rows the reviewer audits — the fixed tier rows plus one AC-<req-id>-<n> row per ADR acceptance criterion, emitted by one test per criterion named test_ac_<req_id>_<n> so the reviewer and the merge gate can join criteria to tests mechanically. Load from the hermes-verify workflow when a [Fix Report] names a PR head, when the orchestrator dispatches a nightly regression run against the fork's main, or when writing/extending T-suite or desktop e2e tests."
 provides: [test.run, test.gen]
 allowed-tools: Bash(git:*), Bash(uv:*), Bash(hermes:*), Bash(.venv/bin/hermes:*), Bash(scripts/run_tests.sh:*), Bash(bash:*), Bash(curl:*), Bash(npm:*), Bash(npx:*), Bash(xvfb-run:*), Bash(agent-browser:*), Bash(dpkg:*), Bash(node:*), Bash(python3:*), Agent, Read, Write, Grep, Glob, mcp__nanoclaw__send_file
 ---
@@ -162,6 +162,8 @@ Ids are the plan's (v1 §5, carried into v2 P2) — never renumber, never add `T
 
 The desktop e2e ships the reference: a mock OpenAI-compatible inference server on `127.0.0.1` (apps/desktop/e2e/mock-server.ts:655) and the exact `config.yaml` shape that points Hermes at it (fixtures.ts:160-189: `model.default: mock-model`, `model.provider: mock`, `providers.mock.api: <url>/v1`, `api_mode: chat_completions`, `key_env: MOCK_API_KEY`, `models: {mock-model: {}}`; `.env` with `MOCK_API_KEY=...`, 195-198). Write the Python equivalent at `$TB/bin/model-stub.py` (`http.server`, `POST /v1/chat/completions` → one canned completion, bind `127.0.0.1:0`, print the port), append that provider block to `$TB/home/config.yaml`, write `$TB/home/.env`. The stub is Python, so it runs under the same socket guard. Never point the harness at a real provider unless `tier=live` was dispatched (§7).
 
+**Live tier via OneCLI — a dummy key, never a real one.** When a dispatch says `tier=live` for a row that genuinely needs a real model (T5b, T6), the hermetic `config.yaml` may point at the real inference `base_url` with a **dummy** `api_key` (`key_env: LIVE_API_KEY`, `LIVE_API_KEY=unused-testbed` in `$TB/home/.env`). The container's egress goes through the OneCLI proxy, which injects the real credential per request from the vault — so a placeholder is all Hermes ever needs to hold, and the credential never enters the testbed, the config, the logs, the report, or an artifact. **Never write a real API key anywhere under `$TB`, `$WT`, or `$ART`**, never read one out of the environment to paste into a config, and never ask for one: a row that "needs the key" is a row you record as `SKIPPED(no-provider)`. Two harness knobs have to be relaxed for the call to leave the container, and both go in the report's `## Network` section for that run: the §2 socket guard must allow the inference host (add it to `_ok`'s allow-list explicitly, by host — never disable the guard), and the `*_proxy` pin must be dropped back to the container's own OneCLI proxy values instead of `127.0.0.1:9`. Do that in a separate `$TB/harness.live.env` used only by the live rows; the default `harness.env` stays offline, and every other row keeps running under it.
+
 ### 3b. Companion rows the reviewer's gate checks (same run, same harness)
 
 ```bash
@@ -175,6 +177,45 @@ The desktop e2e ships the reference: a mock OpenAI-compatible inference server o
 #   copy the acceptance test in, run it there → EXPECT non-zero. Exit 0 = the test does not test the plugin → row FAIL.
 # FOCUSED-PYTEST — `scripts/run_tests.sh tests/plugins/ tests/hermes_cli/` in an `Agent` with explicit timeout; `⚠ FLAKY` = FAIL for that file.
 ```
+
+### 3c. Acceptance-criterion rows `AC-<req-id>-<n>` — the `test.gen` contract
+
+The `ACCEPTANCE` row above says "the acceptance file passed". That is not enough to merge on: nobody reads this diff, so the reviewer and the Orchestrator's merge gate need to see **each acceptance criterion individually satisfied by a named test**. The join is by id, and it is mechanical — there is no prose step where a human decides whether criterion 3 was "basically covered".
+
+**The id.** The architect's ADR carries a `## Acceptance criteria` table with one row per criterion and a stable id `AC-<req-id>-<n>`: `AC-FR-3-1`, `AC-SR-2-4`. `<n>` is 1-based and ids are **never renumbered** — a criterion added in a later ADR revision takes the next free `<n>`, a dropped one leaves a hole. Round 2 reuses round 1's ids exactly.
+
+**The rule.** `test.gen` emits **exactly one test function per criterion**, in `tests/plugins/test_<plugin>_acceptance.py`, named by lowercasing the id and replacing `-` with `_`:
+
+```python
+def test_ac_fr_3_1(tmp_path, monkeypatch):
+    """AC-FR-3-1: a peer DM dispatched through the plugin lands as a reply row in the target profile's state.db."""
+    ...
+```
+
+First docstring line = the criterion id + its text verbatim. One criterion may not be split across two tests (which one is the row?) and two criteria may not share one test (which one failed?); a criterion needing several assertions gets them inside its one function. Shape and rules are otherwise the ordinary ones — behaviour contracts, no snapshots, no source reading, nothing under `~/.hermes`, `tests/hermes_cli/test_plugin_api_compat.py:14-52` as the template — and the file still runs under `scripts/run_tests.sh`, never bare `pytest`.
+
+**Harvesting the rows.**
+
+```bash
+( source $TB/harness.env && cd $WT
+  scripts/run_tests.sh tests/plugins/test_<plugin>_acceptance.py > $ART/acceptance.log 2>&1 ; echo acceptance_exit=$?
+  grep -n "^def test_ac_" tests/plugins/test_<plugin>_acceptance.py > $ART/ac-functions.txt   # ids that exist at this head
+)
+```
+
+Then one `## Results` row per **ADR** id (never per test found):
+
+| ADR id | test at this head | pytest outcome | row |
+|---|---|---|---|
+| present | present | passed | `PASS`, evidence = the node id |
+| present | present | failed / errored | `FAIL`, evidence = node id + first assertion |
+| present | present | skipped / deselected / not collected | `FAIL` — a criterion that was not exercised was not met; the skip reason goes in `## Skipped / advisory` |
+| present | absent | — | `FAIL`, evidence = `no test — criterion unimplemented`, exit `–`, log `artifacts/ac-functions.txt` |
+| absent | present | — | no row; list it in `## Skipped / advisory` as `orphan test id <name>` |
+
+**A criterion with no test id is a `FAIL`, never a silent omission.** Do not fold it into `ACCEPTANCE`, do not record it as `SKIPPED`, do not drop it because the builder said it was out of scope, and never renumber ids so the two sets line up. Any non-`PASS` `AC-` row makes the report verdict `FAIL` (§6) — which is the point: an unimplemented criterion should stop the merge at the tester, not at a human who is not there.
+
+**If you write the tests yourself** (§5): same rule, same naming, and the diff travels as `$ART/tests.patch` + `send_file` — you never push, and you never invent a criterion the ADR does not list (report the gap in `## Failures` and let the architect amend the ADR).
 
 ## 4. UI parity (T10–T12 and any UI-touching PR)
 
@@ -258,7 +299,7 @@ Agent(prompt="cd /workspace/agent/wt-verify-<N>/apps/desktop && npm run build > 
 
 Why this is hermetic enough: the fixtures sandbox `HERMES_HOME`, set `HERMES_DESKTOP_IGNORE_EXISTING=1` and `HERMES_DESKTOP_HERMES_ROOT=<repo root>` (fixtures.ts:239-243), so the app spawns `hermes serve` from YOUR worktree — the python probe tries `.venv/bin/python` before `venv/bin/python` (electron/main.ts:2422-2423; the root override wins, 4640-4648), so the uv venv is found; Electron launches with `--disable-gpu --no-sandbox` (fixtures.ts:316-320); the inference mock binds `127.0.0.1` (mock-server.ts:655). Electron and node are outside the Python socket guard (§2 table) — say so. No `*-snapshots` baselines exist in the fork, so visual diffs are surfaced, not failed (playwright.config.ts header); never `--update-snapshots` on a PR run. A desktop FAIL blocks the verdict only when `changed-files.txt` touches `apps/desktop/**`, `apps/shared/**`, `web/**`, or `tui_gateway/**`; otherwise check the fork's own `E2E Desktop` workflow (`gh run list --repo slang-coworkers/hermes-agent --workflow "E2E Desktop" --limit 3`) — the same spec failing on the default branch is `FAIL(pre-existing: <spec>)`, listed, non-blocking.
 
-**Writing desktop tests (test.gen).** New specs go in `$WT/apps/desktop/e2e/<name>.spec.ts` on the shared fixtures (`fixtures.ts` `mockBackend` / `noProvider`, header 1-20) with `expectVisualSnapshot` from `visual-snapshot.ts` for screenshots; helper unit tests are `*.unit.test.ts` (vitest project, ignored by Playwright — playwright.config.ts:31-35). New T-suite tests go under `tests/plugins/` in the shape of `tests/hermes_cli/test_plugin_api_compat.py:14-52` and run via `scripts/run_tests.sh`. You never push: `git -C $WT diff > $ART/tests.patch`, attach it; the builder commits.
+**Writing desktop tests (test.gen).** New specs go in `$WT/apps/desktop/e2e/<name>.spec.ts` on the shared fixtures (`fixtures.ts` `mockBackend` / `noProvider`, header 1-20) with `expectVisualSnapshot` from `visual-snapshot.ts` for screenshots; helper unit tests are `*.unit.test.ts` (vitest project, ignored by Playwright — playwright.config.ts:31-35). New T-suite tests go under `tests/plugins/` in the shape of `tests/hermes_cli/test_plugin_api_compat.py:14-52` and run via `scripts/run_tests.sh`. **Anything written for an acceptance criterion follows §3c**: one test per `AC-<req-id>-<n>`, named `test_ac_<req_id>_<n>`, criterion text as the first docstring line — including a desktop spec, where the criterion id goes in the `test(...)` title (`test('AC-FR-7-2: … ', …)`) so the node id still names it. You never push: `git -C $WT diff > $ART/tests.patch`, attach it; the builder commits.
 
 ## 6. Artifacts + `test-report-<sha7>.md`
 
@@ -278,9 +319,11 @@ Why this is hermetic enough: the fixtures sandbox `HERMES_HOME`, set `HERMES_DES
 
 **Header:** `# Test Report — <fork-slug>#<N> — head <sha> — round <k>/2 — <PASS|FAIL>` (nightly: `# Test Report — nightly <date> — head <sha> — <PASS|FAIL>`), then the canonical path, PR URL, base SHA, requirement id, plugin key, ADR path, worktree, thread id.
 
-**Sections, in order:** `## Verdict` (`PASS | FAIL`, plus `UI=<PASS|FAIL|SMOKE-ONLY>` and `DESKTOP=<PASS|FAIL|SKIPPED — …>`); `## Results` — **one row per tier, these ids verbatim** (the reviewer's gate checks them), columns `row | result | exit | log | evidence`:
+**Sections, in order:** `## Verdict` (`PASS | FAIL`, plus `UI=<PASS|FAIL|SMOKE-ONLY>` and `DESKTOP=<PASS|FAIL|SKIPPED — …>`); `## Results` — **one row per tier, these ids verbatim** (the reviewer's gate checks them), opened by this **exact** header line and separator, five columns, no extras, no reordering:
 
 ```
+| row | result | exit | log | evidence |
+|---|---|---|---|---|
 | DOCTOR | PASS | 0 | artifacts/doctor.log | "OK: runtime discovery, manifest parsing, import, and registration passed" |
 | LIST | PASS | 0 | artifacts/plugins-list.json | <key> enabled, error null |
 | ACCEPTANCE | PASS | 0 | artifacts/acceptance.log | tests/plugins/test_<plugin>_acceptance.py 3 passed |
@@ -292,11 +335,16 @@ Why this is hermetic enough: the fixtures sandbox `HERMES_HOME`, set `HERMES_DES
 | … one row per id through SUITE T12 (T5b/T6 as SKIPPED(tier=live) or ADVISORY-FAIL; T10–T12 point at ui-*.png) … |
 | UI | PASS | 0 | artifacts/dashboard.log | /api/health ok; ui-T10/T11/T12 png; baseline <nightly-date|none>; diff <n>% |
 | DESKTOP | SKIPPED — install_packages: xvfb xauth libnotify4 libxss1 libxtst6 xdg-utils libatspi2.0-0 | – | artifacts/desktop-preflight.log | see Skipped / advisory |
+| AC-FR-3-1 | PASS | 0 | artifacts/acceptance.log | tests/plugins/test_a2a_acceptance.py::test_ac_fr_3_1 |
+| AC-FR-3-2 | FAIL | 1 | artifacts/acceptance.log | tests/plugins/test_a2a_acceptance.py::test_ac_fr_3_2 — AssertionError: peer reply not recorded |
+| AC-FR-3-3 | FAIL | – | artifacts/ac-functions.txt | no test — criterion unimplemented |
 ```
+
+The `AC-<req-id>-<n>` rows come **last, in ADR order, one per criterion** (§3c). Their `result` cell is `PASS` or `FAIL` only — no `SKIPPED`, no `ADVISORY-FAIL`, no `N/A`, no `✅` — and their `evidence` cell is a pytest **node id** or the literal `no test — criterion unimplemented`. The reviewer's `## Acceptance criteria` cross-walk and the Orchestrator's merge gate join the ADR to this table by id, so a renamed header, a collapsed range row (`AC-FR-3-1..3 PASS`), a missing id, or an invented id breaks the merge silently.
 
 then `## Network` — the §2 enforcement table with the line count of `net-denials.log`; `## Failures` — per failing row: command, exit, first failing assertion or last 30 log lines, and `reproduce with:` one paste-able line; `## Skipped / advisory` — reasons, the verbatim `install_packages` request when `DESKTOP=SKIPPED`, T5b/T6 outcomes, the negative-control caveat for CORE-CHANGE PRs; `## Environment` — `hermes --version`, `python3 --version`, `uv --version`, `node --version`, `npm --version`, container gaps; `## References` — release-tree `file:line` for every command relied on. Round 2 = a NEW `test-report-<newsha7>.md` with a `## Delta from round 1 (head <oldsha7>)` section; rows not re-run are copied with `(round 1)` in the evidence column.
 
-**Verdict rule.** `PASS` iff `DOCTOR`, `ACCEPTANCE`, `NEGATIVE-CONTROL`, `RUFF`, `FOOTGUNS`, `FOCUSED-PYTEST` all PASS **and** every non-advisory, non-skipped `SUITE` row is PASS **and** `UI` is PASS or SMOKE-ONLY **and** `DESKTOP` is not a blocking FAIL. Advisory rows and SKIPPED rows never flip the verdict — and never hide: every SKIPPED carries its reason.
+**Verdict rule.** `PASS` iff `DOCTOR`, `ACCEPTANCE`, `NEGATIVE-CONTROL`, `RUFF`, `FOOTGUNS`, `FOCUSED-PYTEST` all PASS **and every `AC-<req-id>-<n>` row is PASS** **and** every non-advisory, non-skipped `SUITE` row is PASS **and** `UI` is PASS or SMOKE-ONLY **and** `DESKTOP` is not a blocking FAIL. Advisory rows and SKIPPED rows never flip the verdict — and never hide: every SKIPPED carries its reason. `AC-` rows have no advisory or skipped state; one non-`PASS` criterion is a `FAIL` report.
 
 **`[Test Report]` message** (marker-prefixed → always a reply, `in_reply_to=<intake-id>` — the builder's Fix Report, the reviewer's re-run request, or the orchestrator's nightly dispatch; exact routing per hermes-verify step 7):
 
@@ -304,6 +352,7 @@ then `## Network` — the §2 enforcement table with the line count of `net-deni
 [Test Report] <fork-slug>#<N> (round <k>/2, head <sha7>)
 - **Verdict:** PASS | FAIL | FAIL ×2 — ESCALATE
 - **Matrix:** doctor OK|FAIL; acceptance PASS|FAIL; negative control FAILS-on-base|PASSES-on-base; T1–T9 <p>/<n> PASS (skipped: <ids|none>; advisory: <ids|none>); UI T10–T12 <PASS|FAIL|SMOKE-ONLY>; DESKTOP=<PASS|FAIL|SKIPPED — install_packages: <pkgs>>
+- **Acceptance criteria:** <p>/<n> PASS — AC-<req-id>-1 … AC-<req-id>-<n> (ADR <path>); FAIL: <ids | none>
 - **Network:** python-guarded + proxy-pinned; non-python best-effort; denials logged: <n>
 - **Failing:** <row> — exit <code> — <first assertion> | none
 - **Report:** attached — test-report-<sha7>.md (+ artifacts-round<k>.tgz)
@@ -318,7 +367,7 @@ followed by `send_file(in_reply_to=<intake-id>, path="/workspace/agent/reports/<
 - **One `/codex-critique` per run, `STAGE: OUTPUT_REVIEW`, on `test-report-<sha7>.md` (attested) + the exact `[Test Report]` text, at the very end.** No per-row, per-tier, or per-step critique; never on logs or on the diff. Must-fix → edit the report → `codex-reply` on the same thread (3 rounds max). Write nothing under `reports/<thread-id>/` between the approve and the send — the gate re-hashes the attested file.
 - **Never clone or copy the release tree.** Cite from `/workspace/extra/hermes-release`; build/test only in `wt-verify-<N>`. Never `uv python install`; never a second `uv sync` when `.venv` already imports `hermes_cli`; the negative control reuses the PR venv via symlink.
 - **Reuse across rounds and nights:** the worktree, `.venv` (unless `uv.lock`/`pyproject.toml` changed), `node_modules` (unless `package-lock.json`/`apps/desktop/package.json` changed), `web_dist-<sha7>` (unless `web/`/`apps/shared/` changed), `apps/desktop/dist` (unless `apps/` changed), the nightly baseline screenshots. Never `rm -rf` a cache "to be safe".
-- **Model calls:** the §3a stub by default; `tier=live` rows only when dispatched (T5b/T6 are the expensive ones).
+- **Model calls:** the §3a stub by default; `tier=live` rows only when dispatched (T5b/T6 are the expensive ones). A live row uses the real `base_url` with a **dummy** key and lets the OneCLI proxy inject the credential (§3a) — a real key never touches the testbed, and a row you cannot run without one is `SKIPPED(no-provider)`.
 - **Time caps — each chunk its own Bash call with a declared `timeout`, long ones inside `Agent`, never `run_in_background`, never an unbounded wait:** T-suite ≤ 30 min; focused pytest ≈ 1500000 ms per chunk; UI ≤ 15 min; desktop smoke ≤ 5 min, PR set ≤ 25 min. Full `scripts/run_tests.sh` and full desktop `e2e/` only for a CORE-CHANGE diff or the nightly.
 - **Round cap:** 2 verification rounds per PR, then ESCALATE. Nightly: once per day against the fork's default branch, one report, no rounds.
 - **No installs of any kind, no pushes, no PRs, no GitHub writes** (`no-push.md`); `DESKTOP=SKIPPED` with the verbatim `install_packages` request is the correct outcome for a missing dependency; tests you write travel as `tests.patch` + `send_file`.

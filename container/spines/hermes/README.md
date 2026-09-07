@@ -13,7 +13,20 @@ Provides identity, invariants, context, and coworker types:
 | `hermes-builder` | `hermes-writer` | implements the plugin in the fork worktree, tests + `doctor --ci`, draft PR to the fork, `peer-review` invariant; stages `PLAN_REVIEW, CODE_REVIEW, OUTPUT_REVIEW` |
 | `hermes-reviewer` | `hermes-reader` | adversarial re-run of acceptance test + doctor in its own container (`hermes-review`); `no-push` + `code-changes`; stages `CODE_REVIEW, OUTPUT_REVIEW` |
 
-Wiring is architect ↔ builder ↔ reviewer only (`wire_agents`); the orchestrator drives requirement rows to the architect. Overlays (`critique-gate`, `plan-gate`), `cli_scope`, apt packages, and the release mount are per-group settings, not type keys.
+Wiring is architect ↔ builder ↔ reviewer/tester (`wire_agents`), plus `orchestrator → tester`; the orchestrator drives requirement rows to the architect. Overlays (`critique-gate`, `plan-gate`), `cli_scope`, apt packages, and the release mount are per-group settings, not type keys.
+
+## Merge authority (there is no orchestrator ↔ builder edge)
+
+The orchestrator (`main`, `cli_scope: global`) is the sole merge authority and the only role that may run `gh pr merge --squash`. Its gate lives in `context/merge-gate.md`, contributed to the `main` type as a **context fragment** — `main` is `flat: true`, so a workflow or skill attached to it is silently discarded and only `identity` + `context` compose.
+
+Its one edge into this chain is the requirement dispatch it sends the architect, so:
+
+- **The gate fires on the architect's `[Triage Resolution]`**, whose `## Merge gate` block carries the builder's locators forward (PR number, full head SHA, `$BASE`, thread, the reviewer's and tester's message ids + rounds). It is a pointer sheet, never evidence.
+- **A red precondition is answered on the architect's edge** (`in_reply_to=<the [Triage Resolution]>`); the architect relays it down to the builder. The orchestrator never opens a builder edge — that would skip a tier.
+- **First-party evidence is read, not forwarded.** The reviewer's `[Review Verdict]` and the tester's `[Test Report]` are pulled out of those roles' own sessions (`ncl groups list` → `ncl sessions list --agent-group-id … --thread-id hermes-<req-id>` → `ncl sessions messages … --full --reverse`), because the builder is the party being gated. The tester's canonical report **file** is requested over the `orchestrator → tester` edge as an unmarked fresh dispatch.
+- **Attachment paths are never built from a message id.** `send_file` writes its own message with its own id, so a file lands under `inbox/<the file message's id>/`, not under the id of the text that mentions it. Read the `saved to` path the formatter prints, or locate the file by name and verify its contents.
+
+`pr_command_patterns: ['gh pr merge', 'gh pr ready']` + `required_critique_stages: [OUTPUT_REVIEW]` on `main` route the merge decision through one codex round; the same two patterns on `hermes-builder` are the data-level backstop for the one role holding fork write credentials (the gate's built-in floor covers PR *creation* only).
 
 ## Marker routing (why `[Spec handoff]` goes up, not down)
 
