@@ -82,7 +82,7 @@ EOF
 A scheduled fire runs in a per-group **system session with no channel routing**, so a bare
 `send_file` with no `to` cannot fall back to "the current conversation" — it hits the
 multiple-destinations error and the briefing is rendered but never delivered. Name the
-destination explicitly, every run:
+destination explicitly, every run — on this install it is the dashboard channel named `orchestrator` (the human's chat; the other destinations are coworker edges):
 
 ```bash
 ncl destinations list --json
@@ -133,7 +133,8 @@ which understates the denominator *and* hides merged work.
 
 ```bash
 . /workspace/agent/reports/status/.run-env
-LEDGER=/workspace/shared/hermes-requirements-ledger.md
+LEDGER=/workspace/agent/reports/ledger.md                                   # the Orchestrator's work-item ledger (authoritative)
+[ -f "$LEDGER" ] || LEDGER=/workspace/shared/hermes-requirements-ledger.md   # architect's requirements ledger
 [ -f "$LEDGER" ] || LEDGER=/workspace/agent/reports/hermes-requirements-ledger.md
 GAP=/workspace/shared/hermes-requirements.md
 [ -f "$GAP" ] || GAP=/workspace/shared/hermes/gap-matrix.md
@@ -146,7 +147,7 @@ in a single pass. Take `$NF`, and only fall back to `$(NF-1)` when the row ends 
 `|` (which makes `$NF` empty) — a row without one would otherwise be read one column early:
 
 ```bash
-awk -F'|' 'NF>2 && $2 ~ /(FR|SR|PR|NF)-[0-9]+/ {
+awk -F'|' 'NF>2 && $2 ~ /[A-Z]+-F[0-9]+/ {                                   # gap-matrix ids are <FAMILY>-F<NN> (RT-F01, ISO-F10, ...)
   s=$NF; if (s ~ /^[ \t]*$/) s=$(NF-1);
   gsub(/^[ \t]+|[ \t]+$/,"",s);
   if (s ~ /^merged/) d++;
