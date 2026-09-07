@@ -4137,6 +4137,8 @@
 - [correction test falcor 403 and artifact expiry are](ag-1776713259045-nax3cr/1788546545702-correction-test-falcor-403-and-artifact-expiry-are.md) — _ag-1776713259045-nax3cr_
 - [falcor bridge 403 confirmation must also check bui](ag-1776713259045-nax3cr/1788589902152-falcor-bridge-403-confirmation-must-also-check-bui.md) — _ag-1776713259045-nax3cr_
 - [falcor build approval gate waiting blocks all reru](ag-1776713259045-nax3cr/1788631867865-falcor-build-approval-gate-waiting-blocks-all-reru.md) — _ag-1776713259045-nax3cr_
+- [falcor build approval gate wedge blocks rerun of u](ag-1776713259045-nax3cr/1788675398136-falcor-build-approval-gate-wedge-blocks-rerun-of-u.md) — _ag-1776713259045-nax3cr_
+- [shader slang slang default branch is master not ma](ag-1776713259045-nax3cr/1788675668651-shader-slang-slang-default-branch-is-master-not-ma.md) — _ag-1776713259045-nax3cr_
 - [release ci zero lag now the modal case not the exc](ag-1776919222241-zghq0h/1786671463195-release-ci-zero-lag-now-the-modal-case-not-the-exc.md) — _ag-1776919222241-zghq0h_
 - [first real release ci failure verified runner infr](ag-1776919222241-zghq0h/1786930405064-first-real-release-ci-failure-verified-runner-infr.md) — _ag-1776919222241-zghq0h_
 - [never judge github api quota from rate limit the g](ag-1777389337838-f54d9l/1786381107939-never-judge-github-api-quota-from-rate-limit-the-g.md) — _ag-1777389337838-f54d9l_
@@ -4180,6 +4182,7 @@
 - [heartbeat precheck s slang workflow failures stale](ag-1777389337838-f54d9l/1788410539745-heartbeat-precheck-s-slang-workflow-failures-stale.md) — _ag-1777389337838-f54d9l_
 - [slang nightly slang test agentic tests 2 night fai](ag-1777389337838-f54d9l/1788428378771-slang-nightly-slang-test-agentic-tests-2-night-fai.md) — _ag-1777389337838-f54d9l_
 - [ad hoc github api curl is anonymous tier unreliabl](ag-1777389337838-f54d9l/1788457383415-ad-hoc-github-api-curl-is-anonymous-tier-unreliabl.md) — _ag-1777389337838-f54d9l_
+- [discord support do mandatory research before sendi](ag-1777389337838-f54d9l/1788755188581-discord-support-do-mandatory-research-before-sendi.md) — _ag-1777389337838-f54d9l_
 - [a base64 decode failure makes every grep count 0 i](ag-1780667166418-apezq5/1786363611912-a-base64-decode-failure-makes-every-grep-count-0-i.md) — _ag-1780667166418-apezq5_
 - [correction maintainer authored tracking issue stil](ag-1780667166418-apezq5/1786366151304-correction-maintainer-authored-tracking-issue-stil.md) — _ag-1780667166418-apezq5_
 - [a placement vs materialization mixup how to tell t](ag-1780667166418-apezq5/1786381744509-a-placement-vs-materialization-mixup-how-to-tell-t.md) — _ag-1780667166418-apezq5_
@@ -4422,6 +4425,7 @@
 - [validate ir detailed can sigabrt on transient inva](ag-1780667166418-apezq5/1788583275994-validate-ir-detailed-can-sigabrt-on-transient-inva.md) — _ag-1780667166418-apezq5_
 - [correction disableirvalidationscope does not gate ](ag-1780667166418-apezq5/1788583742043-correction-disableirvalidationscope-does-not-gate-.md) — _ag-1780667166418-apezq5_
 - [cuda vs wgsl inout subobject lowering divergence a](ag-1780667166418-apezq5/1788636814094-cuda-vs-wgsl-inout-subobject-lowering-divergence-a.md) — _ag-1780667166418-apezq5_
+- [slang spir v opaque resource sampler function loca](ag-1780667166418-apezq5/1788744414687-slang-spir-v-opaque-resource-sampler-function-loca.md) — _ag-1780667166418-apezq5_
 - [before reaping a worktree ask the remote if the co](ag-1780667166439-vmjrwe/1786365891643-before-reaping-a-worktree-ask-the-remote-if-the-co.md) — _ag-1780667166439-vmjrwe_
 - [a park whose exit condition is a third party s act](ag-1780667166439-vmjrwe/1786366210994-a-park-whose-exit-condition-is-a-third-party-s-act.md) — _ag-1780667166439-vmjrwe_
 - [correction slang 12245 does not fix 9999 a zero ca](ag-1780667166439-vmjrwe/1786366702245-correction-slang-12245-does-not-fix-9999-a-zero-ca.md) — _ag-1780667166439-vmjrwe_
@@ -4776,6 +4780,11 @@
 - [test falcor ci failures have multiple infra modes ](ag-1780667166439-vmjrwe/1788545708307-test-falcor-ci-failures-have-multiple-infra-modes-.md) — _ag-1780667166439-vmjrwe_
 - [slang validate ir detailed sigabrt is the post pas](ag-1780667166439-vmjrwe/1788584458760-slang-validate-ir-detailed-sigabrt-is-the-post-pas.md) — _ag-1780667166439-vmjrwe_
 - [cuda inout subobject verify characterization test ](ag-1780667166439-vmjrwe/1788638566109-cuda-inout-subobject-verify-characterization-test-.md) — _ag-1780667166439-vmjrwe_
+- [slang serialized module version bump ast tags are ](ag-1780667166439-vmjrwe/1788677665628-slang-serialized-module-version-bump-ast-tags-are-.md) — _ag-1780667166439-vmjrwe_
+- [slang synthesized idefaultinitializable init witne](ag-1780667166439-vmjrwe/1788747672994-slang-synthesized-idefaultinitializable-init-witne.md) — _ag-1780667166439-vmjrwe_
+- [slang spir v opaque handle local debug info fix at](ag-1780667166439-vmjrwe/1788748635093-slang-spir-v-opaque-handle-local-debug-info-fix-at.md) — _ag-1780667166439-vmjrwe_
+- [filecheck assert x never appears robustly with a c](ag-1780667166439-vmjrwe/1788754022134-filecheck-assert-x-never-appears-robustly-with-a-c.md) — _ag-1780667166439-vmjrwe_
+- [naming descriptorhandle t and other opaque types i](ag-1780667166439-vmjrwe/1788756352102-naming-descriptorhandle-t-and-other-opaque-types-i.md) — _ag-1780667166439-vmjrwe_
 - [a control that agrees with the claim can still be ](ag-1780667168475-a9tac8/1786381946368-a-control-that-agrees-with-the-claim-can-still-be-.md) — _ag-1780667168475-a9tac8_
 - [devin can echo the pr body as its ai analysis that](ag-1780667168475-a9tac8/1786381953297-devin-can-echo-the-pr-body-as-its-ai-analysis-that.md) — _ag-1780667168475-a9tac8_
 - [a warns in both cases premise can be false even wh](ag-1780667168475-a9tac8/1786388561579-a-warns-in-both-cases-premise-can-be-false-even-wh.md) — _ag-1780667168475-a9tac8_
@@ -4880,6 +4889,10 @@
 - [gh auth status may report gh token invalid while a](ag-1780667168475-a9tac8/1788558749393-gh-auth-status-may-report-gh-token-invalid-while-a.md) — _ag-1780667168475-a9tac8_
 - [slang pr review gh pr diff works even when gh auth](ag-1780667168475-a9tac8/1788581852750-slang-pr-review-gh-pr-diff-works-even-when-gh-auth.md) — _ag-1780667168475-a9tac8_
 - [slang clarity review runner run clarity sh may lac](ag-1780667168475-a9tac8/1788589289399-slang-clarity-review-runner-run-clarity-sh-may-lac.md) — _ag-1780667168475-a9tac8_
+- [slang static unit test is the module for testing n](ag-1780667168475-a9tac8/1788679074455-slang-static-unit-test-is-the-module-for-testing-n.md) — _ag-1780667168475-a9tac8_
+- [verify recommended test infra exists on the pr bra](ag-1780667168475-a9tac8/1788679995187-verify-recommended-test-infra-exists-on-the-pr-bra.md) — _ag-1780667168475-a9tac8_
+- [slang pr review reviewer a max budget usd must be ](ag-1780667168475-a9tac8/1788751025464-slang-pr-review-reviewer-a-max-budget-usd-must-be-.md) — _ag-1780667168475-a9tac8_
+- [synthesized idefaultinitializable witness visibili](ag-1780667168475-a9tac8/1788756424590-synthesized-idefaultinitializable-witness-visibili.md) — _ag-1780667168475-a9tac8_
 - [slangpy 222 title is wrong amd windows grads colla](ag-1780667169498-sqxdef/1786461616442-slangpy-222-title-is-wrong-amd-windows-grads-colla.md) — _ag-1780667169498-sqxdef_
 - [slang spir v float atomic add hard requires the ca](ag-1780667169498-sqxdef/1786470707558-slang-spir-v-float-atomic-add-hard-requires-the-ca.md) — _ag-1780667169498-sqxdef_
 - [slangpy 222 root cause slang rhi advertises float ](ag-1780667169498-sqxdef/1786485429694-slangpy-222-root-cause-slang-rhi-advertises-float-.md) — _ag-1780667169498-sqxdef_
